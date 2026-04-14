@@ -51,10 +51,15 @@ def _truncate_reason(text, max_len=120):
     return text.strip()[:max_len] if text.strip() else ""
 
 
-def apply_glt_configs(scheduler, logger):
+def apply_glt_configs(scheduler, logger, target_categories):
     """Read the configs and apply to test_objs"""
+    target = set(target_categories)
     yaml_data = GLTConf.load_glt_yaml_files(logger)
     for test_item, contents in yaml_data[0].items():
+        category = test_item.split(":", 1)[0]
+        if category not in target:
+            logger.debug(f"Skipping {test_item} from config: category not in run targets.")
+            continue
         obj = scheduler.get_test_obj_by_name(test_item)
         if not obj:
             raise ValueError(f"Not found {test_item} from test cases.")
@@ -145,6 +150,22 @@ def get_cached_session_path(index):
         index -= 1
 
     return target
+
+
+def get_target_categories(args, supported_categories):
+    """Return the categories this run targets.
+
+    Args:
+        args: Parsed argparse namespace with category boolean flags.
+        supported_categories: List of all known category names.
+
+    Returns:
+        List of target category names. If the user passed category
+        flags, that subset is returned; otherwise falls back to all
+        supported categories (default behavior).
+    """
+    selected = [cat for cat in supported_categories if getattr(args, cat)]
+    return selected if selected else list(supported_categories)
 
 
 def glt_signal_handler(logger, scheduler):
@@ -316,15 +337,7 @@ def resolve_plan_and_categories(args, scheduler, supported_categories):
         selected_plan = GLTCore.GLTPlanType.SANITY.value
 
     scheduler.test_tags = GLTCore.GLTPlanType.get_all_nested(selected_plan)
-
-    for category in supported_categories:
-        if getattr(args, category):
-            scheduler.test_categories.append(category)
-
-    # If no specific category, apply all supported categories
-    if not scheduler.test_categories:
-        for category in supported_categories:
-            scheduler.test_categories.append(category)
+    scheduler.test_categories = get_target_categories(args, supported_categories)
 
 
 def resume_from_session(scheduler, session):
@@ -389,18 +402,27 @@ Details:
     logger.info(res)
 
 
-def test_case_discover():
-    """Discover test cases"""
+def test_case_discover(categories):
+    """Discover test cases from selected category modules.
+
+    Args:
+        categories: List of category directory names to scan.
+
+    Returns:
+        List of discovered test function objects.
+    """
     cur_dir = os.path.dirname(__file__)
-    pattern = f"{cur_dir}/../modules/*/*.py"
+    modules_dir = os.path.join(cur_dir, "..", "modules")
     test_objs = []
 
-    # Get all .py files matching the pattern
-    for fullpath in glob.glob(pattern, recursive=True):
-        filepath = os.path.basename(fullpath)
-        if filepath.startswith("glt_test_") and filepath.endswith(".py"):
-            # Convert filepath to module name
-            module_name = os.path.splitext(os.path.relpath(filepath, start=os.getcwd()))[0].replace(os.path.sep, ".")
+    for category in categories:
+        if category == glt_ext_launcher.CATEGORY_NAME:
+            continue
+
+        category_path = os.path.join(modules_dir, category)
+        for fullpath in glob.glob(os.path.join(category_path, "glt_test_*.py")):
+            filepath = os.path.basename(fullpath)
+            module_name = os.path.splitext(filepath)[0]
 
             # Dynamically import the module
             spec = importlib.util.spec_from_file_location(module_name, fullpath)
@@ -413,6 +435,29 @@ def test_case_discover():
     return test_objs
 
 
+def test_case_discover_with_prereqs(initial_categories, supported_categories):
+    """Discover tests for @initial_categories, expanding the import set to
+    cover any cross-category prerequisites referenced by their @requires
+    decorators.
+    """
+    supported = set(supported_categories)
+    loaded = set(initial_categories)
+    pending = initial_categories
+    test_objs = []
+    while pending:
+        new_objs = test_case_discover(pending)
+        test_objs.extend(new_objs)
+        referenced = set()
+        for obj in new_objs:
+            wrapped = getattr(obj, "__wrapped__", None)
+            reqs = getattr(wrapped, "requires", None)
+            if reqs is not None:
+                referenced |= reqs.categories()
+        pending = (referenced & supported) - loaded
+        loaded |= pending
+    return test_objs
+
+
 def test_case_init(module):
     """Retrieve object of test function"""
     test_obj = []
@@ -422,13 +467,23 @@ def test_case_init(module):
     return test_obj
 
 
-def test_category_discover(test_objs):
-    """Discover test categories"""
-    test_categories = []
-    for test_obj in test_objs:
-        if test_obj.__wrapped__.attr.category not in test_categories:
-            test_categories.append(test_obj.__wrapped__.attr.category)
-    return test_categories
+def test_category_discover():
+    """Discover test categories from module directory names.
+
+    Scans subdirectories of src/modules/.  Each subdirectory name is a
+    category.  No modules are imported.
+
+    Returns:
+        Sorted list of category name strings.
+    """
+    modules_dir = os.path.join(os.path.dirname(__file__), "..", "modules")
+    categories = []
+    for entry in sorted(os.listdir(modules_dir)):
+        if entry.startswith("__") or entry.startswith("."):
+            continue
+        if os.path.isdir(os.path.join(modules_dir, entry)):
+            categories.append(entry)
+    return categories
 
 
 def main():
@@ -446,18 +501,32 @@ def main():
         list_cached_session()
         return
 
-    # --- Phase 1: Discover tests and parse arguments (session-independent) ---
+    # --- Phase 1: Discover categories from filesystem without importing any modules ---
 
-    test_objs = test_case_discover()
+    supported_categories = test_category_discover()
 
     ext_dir = initial_args.ext_dir
+    external_test_objs = []
     if os.path.isdir(ext_dir):
-        test_objs.extend(glt_ext_launcher.discover(ext_dir, ext_dir))
+        external_test_objs = glt_ext_launcher.discover(ext_dir, ext_dir)
+        if external_test_objs and glt_ext_launcher.CATEGORY_NAME not in supported_categories:
+            supported_categories.append(glt_ext_launcher.CATEGORY_NAME)
 
-    supported_categories = test_category_discover(test_objs)
     args = parse_arguments(supported_categories)
 
-    # --- Phase 2: Build scheduler, resolve plan and categories ---
+    # --- Phase 2: Resolve which categories user selected ---
+
+    target_categories = get_target_categories(args, supported_categories)
+
+    # --- Phase 3: Import only selected category modules ---
+
+    test_objs = test_case_discover_with_prereqs(
+        target_categories, supported_categories)
+
+    if glt_ext_launcher.CATEGORY_NAME in target_categories:
+        test_objs.extend(external_test_objs)
+
+    # --- Phase 4: Build scheduler, resolve plan ---
 
     scheduler = GLTCore.GLTScheduler(test_objs)
     scheduler.sort()
@@ -469,14 +538,14 @@ def main():
         list_test_cases(scheduler)
         return
 
-    # --- Phase 3: Create session and run tests ---
+    # --- Phase 5: Create session and run tests ---
 
     session, logger = setup_session(initial_args)
 
     # Wire session into the scheduler (ext_test workdirs resolve lazily)
     scheduler.log_dir = f"{session}/glt-test-suite"
 
-    apply_glt_configs(scheduler, logger)
+    apply_glt_configs(scheduler, logger, target_categories)
 
     signal.signal(signal.SIGINT, glt_signal_handler(logger, scheduler))
     signal.signal(signal.SIGTERM, glt_signal_handler(logger, scheduler))

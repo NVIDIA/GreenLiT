@@ -158,6 +158,17 @@ class GLTRequires:
         self.any_true = []  # At least one must return True
         self.any_false = []  # At least one must return False
 
+    def _dependency_names(self):
+        return self.all_true + self.all_false + self.any_true + self.any_false
+
+    def categories(self):
+        """Return the set of category prefixes from "category:name" entries."""
+        return {
+            dep.split(":", 1)[0]
+            for dep in self._dependency_names()
+            if ":" in dep
+        }
+
     @staticmethod
     def any_fail(category, name):
         """Decorator for any_fail when discover function"""
