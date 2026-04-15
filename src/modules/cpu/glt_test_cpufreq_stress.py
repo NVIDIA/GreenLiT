@@ -64,7 +64,12 @@ REQUIRED_PATCHES = (
 )
 
 
-def is_amu_extension_enabled():
+def _cpu_cpufreq_glob(filename):
+    """Return glob results for a cpufreq sysfs file across all CPUs."""
+    return glob.glob(f"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/{filename}")
+
+
+def _is_amu_extension_enabled():
     """
     Check if CONFIG_ARM64_AMU_EXTN is enabled in the kernel.
 
@@ -85,7 +90,7 @@ def is_amu_extension_enabled():
         return None
 
 
-def get_cpu_frequencies(cpu_list=None, logger=None):
+def _get_cpu_frequencies(cpu_list=None, logger=None):
     """
     Get CPU frequencies from cpuinfo_avg_freq interface.
 
@@ -96,7 +101,7 @@ def get_cpu_frequencies(cpu_list=None, logger=None):
     Returns:
         List of CPU frequencies in kHz, or empty list if interface unavailable.
     """
-    paths = glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_avg_freq")
+    paths = _cpu_cpufreq_glob("cpuinfo_avg_freq")
     if not paths:
         return []
 
@@ -128,7 +133,7 @@ def get_cpu_frequencies(cpu_list=None, logger=None):
     return frequencies
 
 
-def start_stress_ng_background():
+def _start_stress_ng_background():
     """
     Start stress-ng in background to stress all CPUs.
 
@@ -144,7 +149,7 @@ def start_stress_ng_background():
     return process
 
 
-def terminate_stress_ng(process):
+def _terminate_stress_ng(process):
     """
     Terminate a stress-ng process and its children via process group.
 
@@ -171,7 +176,7 @@ def terminate_stress_ng(process):
         return False
 
 
-def cleanup_stress_ng(process):
+def _cleanup_stress_ng(process):
     """Kill a specific stress-ng process group as a safety net."""
     if process is None or process.poll() is not None:
         return
@@ -183,27 +188,28 @@ def cleanup_stress_ng(process):
         pass
 
 
-def get_all_cpu_governors():
+def _get_all_cpu_governors():
     """Get current governor for all CPUs."""
     governors = {}
-    for cpu_dir in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+    for cpu_dir in _cpu_cpufreq_glob("scaling_governor"):
         try:
             cpu_match = re.search(r'cpu(\d+)', cpu_dir)
-            if cpu_match:
-                cpu_num = int(cpu_match.group(1))
-                with open(cpu_dir, 'r', encoding='utf-8') as f:
-                    governors[cpu_num] = f.read().strip()
+            if not cpu_match:
+                continue
+            cpu_num = int(cpu_match.group(1))
+            with open(cpu_dir, 'r', encoding='utf-8') as f:
+                governors[cpu_num] = f.read().strip()
         except (IOError, OSError):
             continue
     return governors
 
 
-def set_all_cpu_governors(target_governor, logger=None):
+def _set_all_cpu_governors(target_governor, logger=None):
     """Set governor for all CPUs."""
     success_count = 0
     total_count = 0
 
-    for cpu_dir in glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"):
+    for cpu_dir in _cpu_cpufreq_glob("scaling_governor"):
         try:
             total_count += 1
             with open(cpu_dir, 'w', encoding='utf-8') as f:
@@ -219,7 +225,7 @@ def set_all_cpu_governors(target_governor, logger=None):
     return success_count, total_count
 
 
-def restore_cpu_governors(original_governors, logger=None):
+def _restore_cpu_governors(original_governors, logger=None):
     """Restore original governor settings for all CPUs."""
     success_count = 0
     for cpu_num, governor in original_governors.items():
@@ -237,9 +243,14 @@ def restore_cpu_governors(original_governors, logger=None):
 
 
 def _check_stress_ng_alive(process):
-    """Fail the test if stress-ng exited prematurely, including its stderr."""
+    """
+    Check if stress-ng is still running.
+
+    Returns:
+        (True, None) if alive, (False, reason) if exited prematurely.
+    """
     if process.poll() is None:
-        return
+        return True, None
     stderr_output = ""
     try:
         _, stderr = process.communicate(timeout=2)
@@ -249,29 +260,35 @@ def _check_stress_ng_alive(process):
     reason = f"stress-ng exited prematurely with code {process.returncode}"
     if stderr_output:
         reason += f": {stderr_output}"
-    GLTCore.GLTTestResult.fail(reason=reason)
+    return False, reason
 
 
-def _validate_stress_test_prerequisites():
-    """Validate system prerequisites for CPU frequency stress test."""
-    if not glob.glob("/sys/devices/system/cpu/cpu*/cpufreq/"):
-        GLTCore.GLTTestResult.fail(
-            "CPU frequency scaling sysfs not available. "
-            "Ensure the cppc_cpufreq module is loaded (modprobe cppc_cpufreq).")
+def _validate_cppc_stress_prerequisites():
+    """
+    Validate common prerequisites for CPU frequency stress tests.
+
+    Returns:
+        (True, None) if all checks pass,
+        (False, reason) on failure.
+    """
+    driver_paths = sorted(_cpu_cpufreq_glob("scaling_driver"))
+    if not driver_paths:
+        return False, "cpufreq sysfs not available; cannot read scaling_driver."
+    try:
+        with open(driver_paths[0], 'r', encoding='utf-8') as f:
+            scaling_driver = f.read().strip()
+        if scaling_driver != "cppc_cpufreq":
+            return False, (f"cppc_cpufreq not active "
+                           f"(current driver: {scaling_driver}).")
+    except (IOError, OSError):
+        return False, "cpufreq sysfs not available; cannot read scaling_driver."
 
     if not glt_utils.is_cli_available("stress-ng"):
-        GLTCore.GLTTestResult.fail(
-            "stress-ng is not available. Please follow the user guide to install "
-            "it on your distribution or build it from source: "
-            "https://github.com/ColinIanKing/stress-ng")
+        return False, ("stress-ng is not available. Please follow the user guide "
+                       "to install it on your distribution or build it from source: "
+                       "https://github.com/ColinIanKing/stress-ng")
 
-    amu_status = is_amu_extension_enabled()
-    if amu_status is None:
-        GLTCore.GLTTestResult.skip(
-            "Cannot determine AMU extension status: kernel config file not readable.")
-    elif not amu_status:
-        GLTCore.GLTTestResult.fail("CONFIG_ARM64_AMU_EXTN not enabled in kernel. "
-                                 "This is required for cpuinfo_avg_freq support.")
+    return True, None
 
 
 @GLTCore.GLTTestAttr()
@@ -284,16 +301,26 @@ def test_cpu_frequency_under_stress(_, logger):
 
     JIRA: DGX-11735, DGX-11722, DGX-11725, DGX-11737, DGX-11728
     PATCH: https://lore.kernel.org/all/173982791748.4020779.2848639862581042284.b4-ty@arm.com/
-          https://lore.kernel.org/all/20250131155842.3839098-1-beata.michalska@arm.com/
-          https://lore.kernel.org/all/20240827154818.1195849-1-ionela.voinescu@arm.com/
-          https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git/commit/?id=20711efa91e8ba44149f5e2ed1cf81e5355650e5
+           https://lore.kernel.org/all/20250131155842.3839098-1-beata.michalska@arm.com/
+           https://lore.kernel.org/all/20240827154818.1195849-1-ionela.voinescu@arm.com/
+           https://git.kernel.org/pub/scm/linux/kernel/git/next/linux-next.git/commit/?id=20711efa91e8ba44149f5e2ed1cf81e5355650e5
     """
     patches_msg = "Required patches:\n" + "\n".join(f"  - {p}" for p in REQUIRED_PATCHES)
 
-    _validate_stress_test_prerequisites()
+    ok, reason = _validate_cppc_stress_prerequisites()
+    if not ok:
+        GLTCore.GLTTestResult.fail(reason)
+
+    amu_status = _is_amu_extension_enabled()
+    if amu_status is None:
+        GLTCore.GLTTestResult.skip(
+            "Cannot determine AMU extension status: kernel config file not readable.")
+    elif not amu_status:
+        GLTCore.GLTTestResult.fail("CONFIG_ARM64_AMU_EXTN not enabled in kernel. "
+                                   "This is required for cpuinfo_avg_freq support.")
 
     logger.info("Saving current CPU governor settings...")
-    original_governors = get_all_cpu_governors()
+    original_governors = _get_all_cpu_governors()
     if not original_governors:
         GLTCore.GLTTestResult.fail(
             "Cannot read CPU scaling_governor sysfs. "
@@ -308,13 +335,13 @@ def test_cpu_frequency_under_stress(_, logger):
         logger.info("All CPUs already on performance governor, skipping governor change")
     else:
         logger.info("Setting all CPUs to performance governor for testing...")
-        success_count, _ = set_all_cpu_governors('performance', logger)
+        success_count, _ = _set_all_cpu_governors('performance', logger)
         if success_count == 0:
             GLTCore.GLTTestResult.skip("Cannot set CPU governors to performance mode")
 
     stress_process = None
     try:
-        baseline_frequencies = get_cpu_frequencies(logger=logger)
+        baseline_frequencies = _get_cpu_frequencies(logger=logger)
         if not baseline_frequencies:
             GLTCore.GLTTestResult.fail(
                 f"Cannot read baseline CPU frequencies. {patches_msg}")
@@ -330,22 +357,24 @@ def test_cpu_frequency_under_stress(_, logger):
                    baseline_min, baseline_max, baseline_avg)
 
         logger.info("Starting stress-ng on all available CPUs...")
-        stress_process = start_stress_ng_background()
+        stress_process = _start_stress_ng_background()
 
         try:
             logger.info("Waiting for frequencies to stabilize under stress...")
             time.sleep(FREQ_STABILIZATION_WAIT_SECS)
 
-            _check_stress_ng_alive(stress_process)
+            alive, reason = _check_stress_ng_alive(stress_process)
+            if not alive:
+                GLTCore.GLTTestResult.fail(reason)
 
             logger.info("Measuring CPU frequencies under load...")
-            post_frequencies = get_cpu_frequencies(logger=logger)
+            post_frequencies = _get_cpu_frequencies(logger=logger)
             if not post_frequencies:
                 GLTCore.GLTTestResult.fail(
                     f"Cannot read CPU frequencies under stress. {patches_msg}")
         finally:
             logger.info("Stopping stress-ng...")
-            if not terminate_stress_ng(stress_process):
+            if not _terminate_stress_ng(stress_process):
                 logger.warning("Failed to cleanly terminate stress-ng")
 
         min_freq = min(post_frequencies) / 1000
@@ -375,6 +404,6 @@ def test_cpu_frequency_under_stress(_, logger):
         logger.info("PASS: CPU frequency stress test completed successfully")
 
     finally:
-        cleanup_stress_ng(stress_process)
+        _cleanup_stress_ng(stress_process)
         logger.info("Restoring original CPU governor settings...")
-        restore_cpu_governors(original_governors, logger)
+        _restore_cpu_governors(original_governors, logger)
