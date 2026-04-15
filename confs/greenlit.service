@@ -1,0 +1,13 @@
+[Unit]
+Description=GreenLiT deamon to handle the actions if any when system bootup
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/glt-test-suite --resume -1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+

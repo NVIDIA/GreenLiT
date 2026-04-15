@@ -1,0 +1,27 @@
+---
+categories:
+  build: Build
+  chore: Grunt Task
+  ci: CI/CD
+  doc: Document
+  feat: Feature
+  fix: Fix
+  perf: Performance
+  refactor: Refactor  
+  style: Style
+  test: Test
+template: |
+  {% if categories %}
+  {% each categories %}
+  ### {{ title }}
+
+  {% each entries %}
+  - [{{ title }}]({{ commit.web_url }})\
+  {% if author.credit %} by {{ author.reference }}{% end %}
+
+  {% end %}
+
+  {% end %}
+  {% else %}
+  No changes.
+  {% end %}

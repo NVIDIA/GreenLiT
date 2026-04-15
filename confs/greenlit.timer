@@ -1,0 +1,9 @@
+[Unit]
+Description=Timer for GreenLiT service
+
+[Timer]
+OnActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

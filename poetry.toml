@@ -1,0 +1,11 @@
+# GreenLiT Poetry Configuration
+# This file configures Poetry for system-level installation
+# Required for kernel, OS, and hardware testing scenarios
+
+[virtualenvs]
+# Disable virtual environment creation for direct system access
+create = false
+in-project = false
+
+# System-level installation for hardware/kernel testing
+system-site-packages = true

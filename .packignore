@@ -1,0 +1,28 @@
+# Files and directories to exclude from the GreenLiT package
+# Git and Gitlab
+.git/
+.gitlab/
+.gitlab-ci.yml
+.gitignore
+.gitlint
+
+# Packaging exclusions
+.packignore
+
+# Internal configuration
+.vscode/
+confs-internal/
+.pylintrc
+
+# Standalone mode
+orb/
+
+# Development documents
+docs/developer-docs/
+docs/home.md
+README.md
+CLAUDE.md
+AGENTS.md
+
+# Unit tests
+tests/

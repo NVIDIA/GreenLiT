@@ -1,0 +1,26 @@
+arm64:test_all_pmu_events:
+  allow-failure:
+    - condition:
+        name: "Perf is not ready on Ubuntu 20.04"
+        distro: "Ubuntu"
+        release: "20.04"
+    - condition:
+        name: "Coresight is not ready on Redhat 9.5"
+        distro: "Red Hat"
+        release: "9.5"
+    - condition:
+        name: "Assume NFS is present in kernel command line"
+        script: |
+          #!/usr/bin/python3
+          return 'nfs' in open('/proc/cmdline').read()
+  conditional-skip:
+    - condition:
+        name: "Skip because is not ready on Ubuntu 20.04"
+        distro: "Ubuntu"
+        release: "20.04"
+    - condition:
+        name: "Just a test"
+        script: |
+          #!/bin/bash
+          grep -q 'nfs' /proc/cmdline
+

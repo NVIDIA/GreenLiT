@@ -1,0 +1,8 @@
+{
+    "tpm": [
+        "dmi:bvnNVIDIA:bvr*:bd*:efr*:",
+        "dmi:bvnNVIDIA:bvr*:bd*:"
+    ],
+
+    "rtc": []
+}

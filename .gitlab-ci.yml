@@ -1,0 +1,4 @@
+include:
+  - project: dgx/mgx/greenlit-ci
+    ref: main
+    file: /main.yml

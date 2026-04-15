@@ -1,0 +1,22 @@
+
+[general]
+# Ignore the following rules
+ignore=title-trailing-punctuation,body-max-line-length
+
+verbosity = 3
+
+# Enable conventional commits
+contrib=contrib-title-conventional-commits
+
+# Enable extra linting rules. 
+# Enables the custom regex check for NVBug and Jira tickets in the summary
+extra-path=/tmp/extra_commit_rules.py
+
+[title-max-length]
+# Default is ~80, we have much larger screens now
+line-length=120
+
+[title-must-not-contain-word]
+# Comma-separated list of words that should not occur in the title. 
+# Matching is case insensitive.
+words=wip,draft

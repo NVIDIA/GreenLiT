@@ -1,0 +1,17 @@
+# Poetry lock file (GreenLiT intentionally does not lock package versions)
+poetry.lock
+
+# Tarballs used by gitlab pipeline
+*.tar.gz
+
+# Python cache
+src/common/__pycache__
+src/modules/__pycache__
+src/modules/*/__pycache__
+src/modules/*/*/__pycache__
+src/scripts/__pycache__
+tests/__pycache__
+tests/*/__pycache__
+
+# Compiled CUDA binaries
+external_tests/iommu/test_tlb_shootdown

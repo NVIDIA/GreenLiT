@@ -1,0 +1,58 @@
+# The following table contains patches that enable functions and are required
+# for bare metal support on the Vera platform.
+# Table 101. Bare Metal Support: Enablement
+f69767a1ada3ac74be2e1ac0795a05e1d1384eff PCI: Add TLP Processing Hints (TPH) support
+d2e8a34876ce69b27f450eebfc550ab8e316f752 PCI/TPH: Add Steering Tag support
+48d0fd2b903e397c2a9621ab35f3d8877f61aee4 PCI/TPH: Add TPH documentation
+b880a80011f56880f32bde47fc6af313359f926b arm64: rsi: Add RSI definitions
+c077711f718be7cebcc8b987eac2ebfd17447e9f arm64: Detect if in a realm and set RIPAS RAM
+399306954996be58ac20b4b29f6334e3d55a2ce7 arm64: realm: Query IPA size from the RMM
+371589437616fbb03590d8ff505f8a4c95c8a031 arm64: rsi: Add support for checking whether an MMIO is protected
+3c6c706139564f74ec48229378873c1d930a8bc8 arm64: rsi: Map unprotected MMIO as decrypted
+491db21d8256992ab9fe11c42744eb3044315d14 efi: arm64: Map Device with Prot Shared
+fbf979a01375704fa87c559763209c658593b6f8 arm64: Enforce bounce buffers for realm DMA
+0e9cb5995b2539a332fe65ada6a28a6be55f6e40 arm64: mm: Avoid TLBI when marking pages as valid
+42be24a4178fe51e6f47d91d8621b2f53820f88b arm64: Enable memory encrypt for Realms
+7999edc484ca376f803562edb2d43ec921642c2a virt: arm-cca-guest: TSM_REPORT support for realms
+972d755f01954bd0e36d8696f0d7dc6466072c21 arm64: Document Arm Confidential Compute
+e185c8a0d84236d14af61faff8147c953a878a77 arm64: cputype: Add NVIDIA Olympus definitions
+cc80537caaa789e097f35b2032ddc693a4e136f9 arm64: cpufeature: Add Olympus MIDR to BBML2 allow list
+fa84e534c3ec2904d8718a83180294f7b5afecc7 arm64: realm: ioremap: Allow mapping memory as encrypted
+9e8a3df3e7f762966762a6fbf3282b9da2074127 arm64: Enable EFI secret area Securityfs support
+d02c2e45b1e7767b177f6854026e4ad0d70b4a4d arm64: acpi: Enable ACPI CCEL support
+9631a10083d843b57b371d406235e2f2a3e49285 gpio: tegra186: Add support for Tegra410
+f75db6f7f907c10bf4d45a6cfdae03bb1b631841 gpio: tegra186: Use generic macro for port definitions
+c87f820bc4748fdd4d50969e8930cd88d1b61582 soc/tegra: fuse: Do not register SoC device on ACPI boot
+67f9b828d4e5e47caf3472a399c25c3c0ddc824a gpio: tegra186: Fix GPIO name collisions for Tegra410
+
+# The following table contains patches that resolve critical issues and hardware
+# errata.
+# Table 102. Bare Metal Support: Critical Fixes
+# n/a
+
+# The following table contains patches that resolve faults in enablement patches
+# and other issues that have been discovered while testing the Vera platform
+# with various workloads.
+# Table 103. Bare Metal Support: Fixes
+12f78021973ae422564b234136c702a305932d73 iommu/arm-smmu-v3: Fix pgsize_bit for sva domains
+89a2d212bdb4bc29bed8e7077abe054b801137ea dma/pool: Ensure DMA_DIRECT_REMAP allocations are decrypted
+04bd15c4cbc3f7bd2399d1baab958c5e738dbfc9 perf: arm_pmuv3: Call kvm_vcpu_pmu_resync_el0() before enabling counters
+dcca27bc1eccb9abc2552aab950b18a9742fb8e7 perf: arm_pmu: Don't disable counter in armpmu_add()
+4b0567ad0be52b9e7a36de94193b89e94487363f perf: arm_pmuv3: Don't disable counter in armv8pmu_enable_event()
+7a5387748215c19cee7bd693ebaf336cf9bbbdcb perf: arm_v7_pmu: Drop obvious comments for enabling/disabling counters and interrupts
+7bf1001e0d9124ad65642a5bbff76b46a35798f3 perf: arm_v7_pmu: Don't disable counter in (armv7|krait_|scorpion_)pmu_enable_event()
+c2e793da59fc297b4844669e57208c66f45fce0e perf: apple_m1: Don't disable counter in m1_pmu_enable_event()
+dc4d58a752ea6cb0821d889e8412c22d5289f3d3 perf: arm_pmu: Move PMUv3-specific data
+52e4a56ab8b85a11ffc017eaec5b2f38642a43ba arm64/sysreg: Add BRBE registers and fields
+ae344bcb0d4967f6aa5f7b02f86bcfd389e513e4 arm64: Handle BRBE booting requirements
+d7567e9b9ba53861390830ee18b9fb2035ca81c4 KVM: arm64: nvhe: Disable branch generation in nVHE guests
+58074a0fce66c6c97b35ce8a28ed4e7b780f9a8f perf: arm_pmuv3: Add support for the Branch Record Buffer Extension (BRBE)
+a2573bc7908da8e6eb63dc4e449b7c1724e3849b perf/arm_cspmu: Add callback to reset filter config
+04330be8dc7fddf36f4adb1271932788ad47e7ad perf/arm_cspmu: Add pmpidr support
+82dfd72bfb0362a3900179595032b65be11582da perf/arm_cspmu: nvidia: Add revision id matching
+decc3684c24112286c527188bb09dd6eaf720cc0 perf/arm_cspmu: nvidia: Add pmevfiltr2 support
+
+# The following table contains patches that support NVIDIA CUDA® features on
+# Vera platforms.
+# Table 104. Bare Metal Support: CUDA
+# n/a

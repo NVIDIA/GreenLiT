@@ -1,0 +1,57 @@
+arm64:test_all_pmu_events:
+  allow-failure:
+    - condition:
+        name: "Perf is not ready on Ubuntu 20.04"
+        distro: "Ubuntu"
+        release: "20.04"
+    - condition:
+        name: "Coresight is not ready on Redhat 9.5"
+        distro: "Red Hat"
+        release: "9.5"
+    - condition:
+        name: "Assume NFS is present in kernel command line"
+        script: |
+          #!/usr/bin/python3
+          return 'nfs' in open('/proc/cmdline').read()
+  conditional-skip:
+    - condition:
+        name: "Skip because is not ready on Ubuntu 20.04"
+        distro: "Ubuntu"
+        release: "20.04"
+    - condition:
+        name: "Just a test"
+        script: |
+          #!/bin/bash
+          grep -q 'nfs' /proc/cmdline
+
+acpi:test_acpi_hmat_msg:
+  conditional-skip:
+    - condition:
+        name: "Skip on Red Hat Enterprise Linux 9.3"
+        distro: "Red Hat Enterprise Linux"
+        release: "9.3"
+    - condition:
+        name: "Skip on Ubuntu Jammy with older kernels"
+        distro: "Ubuntu"
+        release: "22.04"
+        kernel-uname: "< 6.8.0-1024.27"
+    - condition:
+        name: "Skip on Ubuntu Noble with older kernels"
+        distro: "Ubuntu"
+        release: "24.04"
+        kernel-uname: "< 6.8.0-1024.27"
+
+hwtracing:test_perf_metric_id:
+  conditional-skip:
+    - condition:
+        name: "Perf metric ID is not supported on RHEL 9.3"
+        distro: "Red Hat Enterprise Linux"
+        release: "9.3"
+
+virt:test_virt_kselftest:
+   conditional-skip:
+    - condition:
+        name: "Please put the Linux source to /usr/local/share/greenlit"
+        script: |
+          #!/bin/bash
+          ! test -d /usr/local/share/greenlit/linux
