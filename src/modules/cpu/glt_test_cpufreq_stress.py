@@ -55,6 +55,10 @@ MAX_FREQ_VARIANCE_PERCENT = 20
 # CPUs running above this threshold are counted in the results summary.
 HIGH_PERF_CPU_FREQ_MHZ = 1000
 
+# Minimum CPU frequency as a percentage of the CPU's rated max under stress.
+# Applies to platforms using the cppc_cpufreq driver.
+SCALING_FREQ_MIN_PERCENT = 70
+
 REQUIRED_PATCHES = (
     "https://lore.kernel.org/all/173982791748.4020779.2848639862581042284.b4-ty@arm.com/",
     "https://lore.kernel.org/all/20250131155842.3839098-1-beata.michalska@arm.com/",
@@ -67,6 +71,48 @@ REQUIRED_PATCHES = (
 def _cpu_cpufreq_glob(filename):
     """Return glob results for a cpufreq sysfs file across all CPUs."""
     return glob.glob(f"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/{filename}")
+
+
+def _get_cpu_max_freq_khz():
+    """
+    Return the highest cpuinfo_max_freq across all CPUs in kHz, or None if unavailable.
+    """
+    max_freq = None
+    for path in _cpu_cpufreq_glob("cpuinfo_max_freq"):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                freq = int(f.read().strip())
+                if max_freq is None or freq > max_freq:
+                    max_freq = freq
+        except (IOError, OSError, ValueError):
+            continue
+    return max_freq
+
+
+def _get_cpu_scaling_cur_freqs(logger=None):
+    """
+    Read scaling_cur_freq for all CPUs.
+
+    Returns:
+        Dict mapping cpu_num (int) to frequency in kHz, or empty dict if unavailable.
+    """
+    freqs = {}
+    for path in sorted(_cpu_cpufreq_glob("scaling_cur_freq")):
+        match = re.search(r'cpu(\d+)', path)
+        if not match:
+            continue
+        cpu_num = int(match.group(1))
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+                if content:
+                    freq = int(content)
+                    if freq > 0:
+                        freqs[cpu_num] = freq
+        except (IOError, OSError, ValueError):
+            if logger:
+                logger.warning("Cannot read scaling_cur_freq for cpu%d", cpu_num)
+    return freqs
 
 
 def _is_amu_extension_enabled():
@@ -294,6 +340,7 @@ def _validate_cppc_stress_prerequisites():
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
 def test_cpu_frequency_under_stress(_, logger):
     """
     Test CPU frequency behavior under stress load.
@@ -406,4 +453,105 @@ def test_cpu_frequency_under_stress(_, logger):
     finally:
         _cleanup_stress_ng(stress_process)
         logger.info("Restoring original CPU governor settings...")
+        _restore_cpu_governors(original_governors, logger)
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cpu_scaling_frequency(_, logger):
+    """
+    Verify each CPU scales to at least SCALING_FREQ_MIN_PERCENT of its rated
+    max frequency under stress load on cppc_cpufreq platforms.
+
+    Sets the performance governor, runs a stress workload, reads
+    scaling_cur_freq per CPU, and fails if any CPU stays below the threshold.
+
+    Assumes homogeneous cppc_cpufreq ARM platforms where all cores
+    share the same rated max frequency.
+
+    JIRA: DGX-11768
+    PATCH: https://lore.kernel.org/all/OS3P286MB2490EB027398DDB852BE2169B1C02@OS3P286MB2490.JPNP286.PROD.OUTLOOK.COM/
+    """
+    ok, reason = _validate_cppc_stress_prerequisites()
+    if not ok:
+        GLTCore.GLTTestResult.fail(reason)
+
+    max_freq_khz = _get_cpu_max_freq_khz()
+    if max_freq_khz is None:
+        GLTCore.GLTTestResult.fail(
+            "Cannot read cpuinfo_max_freq from sysfs. "
+            "Ensure the cppc_cpufreq module is loaded.")
+
+    min_expected_khz = max_freq_khz * SCALING_FREQ_MIN_PERCENT // 100
+    logger.info("CPU max freq: %d MHz, minimum expected under stress: %d MHz (%d%%)",
+                max_freq_khz // 1000, min_expected_khz // 1000, SCALING_FREQ_MIN_PERCENT)
+
+    stress_process = None
+    original_governors = {}
+    try:
+        original_governors = _get_all_cpu_governors()
+        if not original_governors:
+            GLTCore.GLTTestResult.fail(
+                "Cannot read CPU scaling_governor sysfs. "
+                "This may happen if the test is not run as root "
+                "or the cpufreq driver does not expose a governor interface.")
+
+        performance_cpus = [cpu for cpu, gov in original_governors.items() if gov == 'performance']
+        logger.info("Current governor state: %d/%d CPUs on performance governor",
+                    len(performance_cpus), len(original_governors))
+
+        if len(performance_cpus) < len(original_governors):
+            logger.info("Setting all CPUs to performance governor for testing...")
+            success_count, _ = _set_all_cpu_governors('performance', logger)
+            if success_count == 0:
+                GLTCore.GLTTestResult.skip("Cannot set CPU governors to performance mode.")
+        logger.info("Starting stress-ng on all CPUs...")
+
+        stress_process = _start_stress_ng_background()
+
+        try:
+            logger.info("Waiting %ds for frequencies to stabilize...", FREQ_STABILIZATION_WAIT_SECS)
+            time.sleep(FREQ_STABILIZATION_WAIT_SECS)
+
+            alive, reason = _check_stress_ng_alive(stress_process)
+            if not alive:
+                GLTCore.GLTTestResult.fail(reason)
+
+            logger.info("Reading per-CPU scaling_cur_freq under load...")
+            freqs = _get_cpu_scaling_cur_freqs(logger=logger)
+            if not freqs:
+                GLTCore.GLTTestResult.fail(
+                    "Cannot read scaling_cur_freq for any CPU under stress.")
+        finally:
+            if not _terminate_stress_ng(stress_process):
+                logger.warning("Failed to cleanly terminate stress-ng")
+
+        failing_cpus = {
+            cpu_num: freq_khz
+            for cpu_num, freq_khz in freqs.items()
+            if freq_khz < min_expected_khz
+        }
+
+        for cpu_num, freq_khz in sorted(failing_cpus.items()):
+            logger.error("CPU%d: %d MHz < %d MHz (%d%% of max)",
+                         cpu_num, freq_khz // 1000, min_expected_khz // 1000,
+                         SCALING_FREQ_MIN_PERCENT)
+
+        if failing_cpus:
+            GLTCore.GLTTestResult.fail(
+                f"{len(failing_cpus)}/{len(freqs)} CPUs below "
+                f"{SCALING_FREQ_MIN_PERCENT}% of max frequency ({max_freq_khz // 1000} MHz). "
+                "Check thermal/power capping or apply patch: "
+                "https://lore.kernel.org/all/"
+                "OS3P286MB2490EB027398DDB852BE2169B1C02@OS3P286MB2490.JPNP286.PROD.OUTLOOK.COM/")
+
+        min_freq = min(freqs.values()) // 1000
+        max_freq = max(freqs.values()) // 1000
+        logger.info("PASS: All %d CPUs reached >= %d%% of max frequency under stress. "
+                    "Frequency range: %d-%d MHz",
+                    len(freqs), SCALING_FREQ_MIN_PERCENT, min_freq, max_freq)
+
+    finally:
+        _cleanup_stress_ng(stress_process)
         _restore_cpu_governors(original_governors, logger)
