@@ -17,6 +17,8 @@
 Python script to test PMU.
 """
 import json
+import os
+import platform
 import re
 import subprocess
 from packaging import version
@@ -24,6 +26,7 @@ from packaging import version
 from common import glt_core as GLTCore
 from common import glt_utils
 from common.nv_device import NvDev
+from scripts import check_kernel_config
 
 
 def _get_nvidia_perf_list(logger):
@@ -39,10 +42,10 @@ def _get_nvidia_perf_list(logger):
 
     perf_list_json = json.loads(cmd_output.stdout)
     events = set(
-            re.sub(r'\d$', '', item["Unit"])
-            for item in perf_list_json
-            if "Unit" in item and item["Unit"].startswith("nvidia")
-            )
+        re.sub(r'\d$', '', item["Unit"])
+        for item in perf_list_json
+        if "Unit" in item and item["Unit"].startswith("nvidia")
+    )
     return {s.strip() for s in events}
 
 
@@ -129,4 +132,63 @@ def test_perf_cspmu_rejects_foreign_events(_, logger):
         GLTCore.GLTTestResult.fail(
             f"perf command failed with return code {e.returncode}: {stderr_line}. "
             "This may indicate that commit 15c7ef73 is missing; consider backporting it."
+        )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_arm_spe_pmu(sd, logger):
+    """Verify ARM SPE PMU support."""
+    kconfig_path = "/boot/config-" + platform.uname().release
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+        if kconfig.get("CONFIG_ARM_SPE_PMU") not in ("y", "m"):
+            GLTCore.GLTTestResult.fail("CONFIG_ARM_SPE_PMU is not enabled in kernel config")
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.fail(
+            f"Kernel config not found at {kconfig_path}, cannot verify CONFIG_ARM_SPE_PMU"
+        )
+
+    if not os.path.exists("/sys/bus/event_source/devices/arm_spe_0/"):
+        GLTCore.GLTTestResult.fail(
+            "/sys/bus/event_source/devices/arm_spe_0/ does not exist. "
+            "SPE requires OS and firmware support, please check both."
+        )
+
+    if not glt_utils.is_cli_available("perf"):
+        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+
+    perf_data_path = os.path.join(sd.log_dir, "test_arm_spe_pmu.perf.data")
+
+    try:
+        subprocess.run(
+            ["perf", "record", "-e", "arm_spe//", "-o", perf_data_path, "--",
+             "dd", "if=/dev/zero", "of=/dev/null", "bs=1M", "count=500"],
+            check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        stderr_out = e.stderr.decode(errors="replace") if e.stderr else ""
+        GLTCore.GLTTestResult.fail(f"perf record failed with arm_spe event: {e} - {stderr_out}")
+
+    try:
+        cmd_output = subprocess.run(
+            ["perf", "report", "-i", perf_data_path, "--stdio"],
+            check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        logger.debug(cmd_output.stdout)
+    except subprocess.CalledProcessError as e:
+        GLTCore.GLTTestResult.fail(f"perf report failed with {perf_data_path}: {e} - {e.stdout}")
+
+    # Since we are using `perf record -e arm_spe//` instead of `perf mem`,
+    # the output format changes. We verify that the SPE event was actually sampled.
+    expected_strings = [
+        "Samples:", "l1d-miss", "l1d-access", "llc-miss", "llc-access",
+        "tlb-access", "memory", "branch"
+    ]
+    missing = [s for s in expected_strings if s not in cmd_output.stdout]
+    if missing:
+        GLTCore.GLTTestResult.fail(
+            f"Missing expected strings {missing} in perf report with {perf_data_path}"
         )
