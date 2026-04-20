@@ -19,3 +19,4 @@ Guidance for AI coding agents working in this repository.
 - Do **not** run `glt-test-suite` or anything in `external_tests/` without root and real hardware — these tests interact with kernel interfaces and physical devices.
 - Do **not** add new test categories without also updating `docs/developer-docs/architecture.md`.
 - In non-root/CI environments, only run unit tests and lint.
+- Do **not** call `GLTCore.GLTTestResult.fail()` or `GLTCore.GLTTestResult.skip()` from any function that is not decorated with `@GLTCore.GLTTestAttr()`.
