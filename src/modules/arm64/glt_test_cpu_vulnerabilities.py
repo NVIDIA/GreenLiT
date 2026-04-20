@@ -32,20 +32,24 @@ CPU_VULNERABILITY_EXPECTED_STATES = {
 }
 
 
-def _read_vuln_file(name: str) -> str:
-    """Read /sys/devices/system/cpu/vulnerabilities/<name>"""
+def _read_vuln_file(name: str) -> tuple[str, str]:
+    """
+    Read /sys/devices/system/cpu/vulnerabilities/<name>.
+
+    Returns:
+        (content, error) tuple. On success, error is empty. On failure,
+        content is empty and error describes the problem.
+    """
     path = os.path.join(VULN_SYSFS_DIR, name)
-    content = "invalid"
 
     if not os.path.exists(path):
-        GLTCore.GLTTestResult.fail(f"The vulnerabilities file {name} is not found.")
+        return ("", f"The vulnerabilities file {name} is not found.")
 
     try:
         with open(path, "r", encoding="ascii") as f:
-            content = f.read().strip()
+            return (f.read().strip(), "")
     except (IOError, OSError) as e:
-        GLTCore.GLTTestResult.fail(f"Failed to read {path}: {e}")
-    return content
+        return ("", f"Failed to read {path}: {e}")
 
 
 @GLTCore.GLTTestAttr()
@@ -72,7 +76,11 @@ def test_vera_spectre_mitigation(_, logger):
             failures.append(("missing_file", filename, None, None))
             continue
 
-        value = _read_vuln_file(filename)
+        value, error_msg = _read_vuln_file(filename)
+        if error_msg:
+            logger.error("Spectre mitigation test: %s", error_msg)
+            failures.append(("read_error", filename, None, error_msg))
+            continue
 
         if value != expected_value:
             logger.error(
@@ -86,13 +94,15 @@ def test_vera_spectre_mitigation(_, logger):
     if failures:
         # Build a single-space-separated message; no newlines.
         fail_msg = ["Spectre mitigation test failed."]
-        for kind, filename, expected, value in failures:
+        for kind, fname, expected, detail in failures:
             if kind == "missing_file":
-                fail_msg.append(f"The vulnerabilities file {filename} is not found.")
+                fail_msg.append(f"The vulnerabilities file {fname} is not found.")
+            elif kind == "read_error":
+                fail_msg.append(detail)
             elif kind == "mismatch":
                 fail_msg.append(
-                    f"The vulnerability {filename} is not in the expected state."
-                    f" Expected '{expected}', got '{value}'."
+                    f"The vulnerability {fname} is not in the expected state."
+                    f" Expected '{expected}', got '{detail}'."
                 )
 
         GLTCore.GLTTestResult.fail(" ".join(fail_msg))
