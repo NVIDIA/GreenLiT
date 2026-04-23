@@ -38,6 +38,7 @@ CONFIG_DMABUF_HEAPS_SYSTEM=y
 CONFIG_DMI_SYSFS=y # [=m]
 CONFIG_INIT_ON_ALLOC_DEFAULT_ON=n
 CONFIG_IOMMU_DEFAULT_DMA_LAZY=y
+CONFIG_ARM64_PSEUDO_NMI=y
 
 # The following table contains optional config settings that enable the
 # performance tooling functions on Grace platforms.
