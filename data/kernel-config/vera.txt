@@ -4,6 +4,9 @@
 # for bare metal support on the Vera platform.
 # Table 107. Bare Metal Configs: Required
 CONFIG_ARM_ARCH_TIMER_EVTSTREAM=y
+CONFIG_TCG_CRB=y
+CONFIG_ARM_FFA_TRANSPORT=y
+CONFIG_TCG_ARM_CRB_FFA=y
 
 # The following table contains the recommended config settings that provide
 # performance improvements for certain workloads.
