@@ -1,4 +1,7 @@
+variables:
+  GREENLIT_CI_REF: "main"
+
 include:
   - project: dgx/mgx/greenlit-ci
-    ref: main
+    ref: "main"
     file: /main.yml
