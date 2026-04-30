@@ -17,6 +17,7 @@
 Python script to test GPIO.
 """
 
+import re
 import subprocess
 from common import glt_core as GLTCore
 from common import glt_utils
@@ -156,5 +157,108 @@ def test_tegra410_gpio_name_collision(_, logger):
     if glt_utils.check_kernel_log(collision_msg):
         GLTCore.GLTTestResult.fail(
             "Found GPIO name collision in kernel log. "
-            "Backport commit 67f9b828d4e5e to fix it."
+            "Backport commit 67f9b828d4e5e to fix it, "
+            "if you are using multi-socket system, also "
+            "backport commit 2c299030c6."
         )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
+def test_tegra410_gpio_numa_prefix(_, logger):
+    """Verifies tegra410 GPIO line names are NUMA-prefixed on multi-socket Vera.
+
+    JIRA: DGX-16336
+    PATCH: https://git.kernel.org/torvalds/c/2c299030c6813eaa9ef95773c64d65c50fa706ac
+    """
+
+    line_name_re = re.compile(
+        r"^\d+-(?:COMPUTE|SYSTEM)-P[A-Z]+\.[0-9a-fA-F]{2}$"
+    )
+    gpioinfo_line_re = re.compile(r'^\s*line\s+\d+:\s+"(?P<name>[^"]*)"')
+    gpiodetect_re = re.compile(
+        r'^(?P<chip>\S+)\s+\[(?P<label>[^\]]+)\]\s+\((?P<count>\d+)\s+lines\)'
+    )
+
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("The test is only applicable to Vera CPUs.")
+
+    socket_count = NvDev.get_cpu_socket_count()
+    if socket_count == -1:
+        GLTCore.GLTTestResult.fail(
+            "Unable to determine CPU socket count on a Vera system."
+            " Check that 'lscpu' is installed and runnable, and that its"
+            " output contains a 'Socket(s):' line, or the CPU topology is"
+            " reported incorrectly by the firmware, ACPI, etc."
+        )
+    elif socket_count < 2:
+        GLTCore.GLTTestResult.skip(
+            f"Single-socket system ({socket_count} socket); "
+            "patch effect is only observable on multi-socket Vera."
+        )
+
+    if not glt_utils.is_cli_available("gpioinfo"):
+        GLTCore.GLTTestResult.skip(
+            "Please install 'gpiod' to perform the test."
+        )
+
+    # Discover tegra410 controllers by label
+    try:
+        detect = subprocess.run(
+            ["gpiodetect"], capture_output=True, shell=False, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.warning("gpiodetect failed: %s", e)
+        GLTCore.GLTTestResult.fail(
+            f"gpiodetect failed to enumerate GPIO controllers: {e}."
+        )
+
+    chips = []
+    for line in detect.stdout.splitlines():
+        m = gpiodetect_re.match(line)
+        if m and m.group("label").startswith("tegra410-gpio-"):
+            chips.append(m.group("chip"))
+
+    if not chips:
+        logger.warning("gpiodetect stdout:\n%s", detect.stdout)
+        GLTCore.GLTTestResult.fail(
+            "No tegra410 GPIO controllers detected on a Vera system; "
+            "expected tegra410-gpio-compute and tegra410-gpio-system."
+        )
+
+    # Pull every line name from every tegra410 chip via gpioinfo.
+    gpio_names = []
+    for chip_name in chips:
+        try:
+            info = subprocess.run(
+                ["gpioinfo", chip_name],
+                capture_output=True, shell=False, text=True, check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            logger.warning("gpioinfo %s failed: %s", chip_name, e)
+            GLTCore.GLTTestResult.fail(
+                f"Failed to enumerate GPIO line names via 'gpioinfo {chip_name}': {e}."
+            )
+        gpio_names.extend(
+            mm.group("name")
+            for mm in (gpioinfo_line_re.match(ln) for ln in info.stdout.splitlines())
+            if mm is not None and mm.group("name")
+        )
+
+    if not gpio_names:
+        GLTCore.GLTTestResult.fail(
+            "gpioinfo produced no parseable GPIO line names."
+        )
+
+    for name in gpio_names:
+        if not line_name_re.match(name):
+            GLTCore.GLTTestResult.fail(
+                f"Tegra410 GPIO line names don't follow the expected "
+                f"'<numa_node>-<COMPUTE|SYSTEM>-P<bank>.<pin_hex>' shape "
+                f"(e.g. '{name}'). "
+                "Consider to backport commit 2c299030."
+            )
