@@ -1,6 +1,7 @@
 # Files and directories to exclude from the GreenLiT package
 # Git and Gitlab
 .git/
+.github/
 .gitlab/
 .gitlab-ci.yml
 .gitignore
@@ -14,8 +15,19 @@
 confs-internal/
 .pylintrc
 
-# Standalone mode
+# CI configuration (copied from greenlit-ci by before_script in common.yml)
+distro-map.json
+docker/
+gitlab-ci/
+install-offline.sh
+main.yml
+nv_gitlab_docker.env
 orb/
+setup-kernel-sources.sh
+simple-host-example.json
+simple-target-example.json
+vault/
+wheel-build-config.yml
 
 # Development documents
 docs/developer-docs/
