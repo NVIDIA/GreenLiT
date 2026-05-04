@@ -17,10 +17,12 @@
 Python script to test tpm.
 """
 import os
+import platform
 import subprocess
 import time
 from common import glt_core as GLTCore
 from common import glt_utils
+from scripts import check_kernel_config
 
 def _stop_stress_processes(process1, process2):
     """Terminate the two stress processes; kill them if they do not exit in time."""
@@ -69,8 +71,8 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
             text=True,
             check=True,
         )
-    except subprocess.CalledProcessError:
-        GLTCore.GLTTestResult.skip("SKIPPED: Could not get udev info for /dev/tpm0")
+    except subprocess.CalledProcessError as e:
+        GLTCore.GLTTestResult.fail(f"udevadm info /dev/tpm0 failed unexpectedly: {e}")
     devpath = ""
     for line in udev.stdout.splitlines():
         if "DEVPATH=" in line:
@@ -147,4 +149,59 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
             "(transfer may already be done). Consider backporting commit 9b7977f to fix it. "
             "Refer to https://lore.kernel.org/linux-tegra/20260116-tegra_xfer-v1-0-02d96c790619"
             "@debian.org/T/#u for details."
+        )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_tegra_qspi_xfer_kasan_oob(_, __):
+    """
+    Checking KASAN slab-out-of-bounds splat in the Tegra QSPI handle_cpu_based_xfer path
+    by reading current-boot kernel log.
+
+    JIRA: DGX-8750
+    PATCH: https://github.com/torvalds/linux/commit/195aba96
+    """
+
+    if not os.path.exists("/dev/tpm0") or not os.path.exists("/dev/tpmrm0"):
+        GLTCore.GLTTestResult.skip("Missing TPM devices (/dev/tpm0 or /dev/tpmrm0).")
+
+    if not glt_utils.is_cli_available("udevadm"):
+        GLTCore.GLTTestResult.skip("udevadm is not available.")
+
+    try:
+        udev = subprocess.run(
+            ["udevadm", "info", "/dev/tpm0"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        GLTCore.GLTTestResult.fail(f"udevadm info /dev/tpm0 failed unexpectedly: {e}")
+    devpath = ""
+    for line in udev.stdout.splitlines():
+        if "DEVPATH=" in line:
+            devpath = line.split("DEVPATH=", 1)[-1].strip()
+            break
+    if "NVDA1513" not in devpath:
+        GLTCore.GLTTestResult.skip("TPM is not on the Tegra QSPI controller (NVDA1513).")
+
+    kconfig_path = "/boot/config-" + platform.uname().release
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.skip(f"Cannot read kernel config at {kconfig_path}.")
+
+    if kconfig.get("CONFIG_TCG_TIS_SPI") not in ("y", "m"):
+        GLTCore.GLTTestResult.skip("CONFIG_TCG_TIS_SPI is not enabled.")
+    if kconfig.get("CONFIG_KASAN") != "y":
+        GLTCore.GLTTestResult.skip("CONFIG_KASAN is not enabled.")
+
+    splat = "KASAN: slab-out-of-bounds in handle_cpu_based_xfer"
+    if glt_utils.check_kernel_log(splat):
+        GLTCore.GLTTestResult.fail(
+            f"Found KASAN slab-out-of-bounds splat '{splat}' in kernel log. "
+            "Consider backporting commit 195aba9."
         )
