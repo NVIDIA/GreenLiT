@@ -109,6 +109,13 @@ class TestGLTConf(GLTTestBase):
                 func(), expected, f"Failed for condition: {condition}"
             )
 
+    def test_cond_to_func_unsupported(self):
+        """Unsupported conditions log a warning and return a False stub"""
+        condition = {"foo": "bar"}
+        func = cond_to_func(self.mock_logger, condition)
+        self.assertFalse(func())
+        self.mock_logger.warning.assert_called_once()
+
     def test_load_glt_yaml_files(self):
         """Load the sample yaml file and check fields"""
         # Test successful yaml loading
