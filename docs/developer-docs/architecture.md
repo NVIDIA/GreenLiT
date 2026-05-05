@@ -22,6 +22,7 @@ greenlit/
 │       ├── acpi/           # ACPI and EFI tests
 │       ├── arm64/          # ARM64 architecture tests
 │       ├── cpu/            # CPU-related tests
+│       ├── cxl/            # CXL device tests
 │       ├── gpio/           # GPIO tests
 │       ├── gpu/            # GPU and framebuffer tests
 │       ├── hwtracing/      # Hardware tracing (perf, coresight)
