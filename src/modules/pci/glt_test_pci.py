@@ -47,7 +47,7 @@ def test_nvidia_pci_device_reset_method(sd, logger):
 
             # If timer was activated and GLT gets resumed here, it means
             # the system didn't reset, therefore the test was passed.
-            p = subprocess.run("""sudo systemctl show -p LastTriggerUSecMonotonic greenlit.timer | cut -d'=' -f2-""",
+            p = subprocess.run("""systemctl show -p LastTriggerUSecMonotonic greenlit.timer | cut -d'=' -f2-""",
                                capture_output=True, shell=True, text=True, check=False)
 
             if p.returncode == 0 and p.stdout.strip() != "0":
@@ -79,7 +79,7 @@ def test_nvidia_pci_device_reset_method(sd, logger):
 
     for pci_dev_addr in pci_dev_addrs:
         # pylint: disable=consider-using-with
-        subprocess.Popen(f"sudo sh -c 'sleep 5; echo 1 > /sys/bus/pci/devices/{pci_dev_addr}/reset'",
+        subprocess.Popen(f"sh -c 'sleep 5; echo 1 > /sys/bus/pci/devices/{pci_dev_addr}/reset'",
                          start_new_session=True, restore_signals=False, shell=True)
 
     glt_utils.arm_for_reset(test_nvidia_pci_device_reset_method.__name__, sd)
@@ -190,7 +190,7 @@ def test_pci_secondary_mabort(_, logger):
     # Step 2: Re-scan/re-enumerate all PCI/PCIe devices
     try:
         _ = subprocess.run(
-            ["sudo", "sh", "-c", "echo 1 > /sys/bus/pci/rescan"],
+            ["sh", "-c", "echo 1 > /sys/bus/pci/rescan"],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -202,7 +202,7 @@ def test_pci_secondary_mabort(_, logger):
     # Step 3: Check for MAbort+ flags in secondary status
     try:
         cmd_output = subprocess.run(
-            ["sudo", "lspci", "-vv"],
+            ["lspci", "-vv"],
             check=True,
             text=True,
             stdout=subprocess.PIPE,
@@ -229,7 +229,7 @@ def test_pci_secondary_mabort(_, logger):
             logger.error(fail_msg)
             GLTCore.GLTTestResult.fail(fail_msg)
     except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"Failed to run 'sudo lspci -vv': {e}")
+        GLTCore.GLTTestResult.fail(f"Failed to run 'lspci -vv': {e}")
 
 
 _acs_kexec_conditional_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(

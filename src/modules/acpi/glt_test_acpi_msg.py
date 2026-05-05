@@ -80,7 +80,6 @@ def test_no_legacy_tegra_sku_log_on_acpi(_, logger):
     cmds = [
         ["journalctl", "-k"],
         ["dmesg"],
-        ["sudo", "-n", "dmesg"],
     ]
     result = None
     last_error = None
