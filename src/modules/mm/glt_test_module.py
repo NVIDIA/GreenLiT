@@ -63,7 +63,7 @@ def test_module_allocation(_, logger) -> bool:
         # shell=True required for pipe and awk; command is hardcoded with no user input
         output = subprocess.run(
                 r"""journalctl -b -k | awk \
-                    'match($0, ": ([[:digit:]]+).* PLT", cap) {print cap[1]}'""",
+                    'match($0, ": ([[:digit:]]+).* for PLT", cap) {print cap[1]}'""",
                 capture_output=True, shell=True, text=True, check=True)
 
         if not output.stdout:
