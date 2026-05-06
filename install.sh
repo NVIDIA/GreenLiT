@@ -171,8 +171,20 @@ install_prerequisites() {
   fi
 }
 
+uninstall_existing_greenlit() {
+  if pip3 show greenlit >/dev/null 2>&1; then
+    echo "Uninstalling existing GreenLiT package via pip..."
+    if ! pip3 uninstall -y greenlit; then
+      echo "ERROR: Existing GreenLiT package could not be uninstalled."
+      exit 1
+    fi
+  fi
+}
+
 install_greenlit() {
   echo "Installing GreenLiT package and dependencies via pip..."
+
+  uninstall_existing_greenlit
 
   # Install from pyproject.toml (pip ≥ 21.3)
   if ! pip3 install --ignore-installed .; then
@@ -202,8 +214,12 @@ install_from_local_wheels() {
 
   echo "Installing packages: ${WHL_PKGS[*]}"
 
+  if [[ " ${WHL_PKGS[*]} " == *" greenlit "* ]]; then
+    uninstall_existing_greenlit
+  fi
+
   # Install wheels without internet access
-  if ! pip3 install --no-index --find-links "$LOCAL_WHL_DIR" "${WHL_PKGS[@]}"; then
+  if ! pip3 install --ignore-installed --no-index --find-links "$LOCAL_WHL_DIR" "${WHL_PKGS[@]}"; then
     echo "ERROR: Local wheel installation failed"
     exit 1
   fi
