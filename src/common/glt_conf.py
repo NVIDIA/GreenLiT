@@ -30,7 +30,6 @@ from common.nv_device import NvDev
 
 def cond_to_func(logger, cond):
     """Return a function by parsing the condition"""
-    ret = None
     if "script" in cond:
 
         def new_func(script=cond["script"]):
@@ -102,8 +101,13 @@ def cond_to_func(logger, cond):
 
             return allowed
 
-    ret = new_func
-    return ret
+    else:
+        logger.warning(f"Unsupported condition (ignored): {cond}")
+
+        def new_func():
+            return False
+
+    return new_func
 
 
 def load_glt_yaml_files(logger, directory="/usr/share/greenlit/confs.d"):

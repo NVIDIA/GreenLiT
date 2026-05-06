@@ -196,7 +196,7 @@ def arm_for_reset(testcase, sd):
     # If hardware reset occurs, the service will resume the test
     # If it doesn't happen, the timer starts GLT to continue the test
     # Use shell=False to prevent command injection (CWE-78)
-    subprocess.run(["sudo", "pkill", "-INT", "glt-test-suite"], shell=False, check=False)
+    subprocess.run(["pkill", "-INT", "glt-test-suite"], shell=False, check=False)
     return False
 
 
@@ -228,7 +228,7 @@ def check_kernel_log(msg) -> bool:
     """
     if is_cli_available("journalctl"):
         # Use shell=False to prevent command injection (CWE-78)
-        result = subprocess.run(["sudo", "journalctl", "-b0", "-k"],
+        result = subprocess.run(["journalctl", "-b0", "-k"],
                                 capture_output=True, text=True, check=False)
         if result.returncode == 0 and msg in result.stdout:
             return True
@@ -236,7 +236,7 @@ def check_kernel_log(msg) -> bool:
     # FIXME: DGX-10224 pylint: disable=fixme
     elif is_cli_available("dmesg"):
         # Use shell=False to prevent command injection (CWE-78)
-        result = subprocess.run(["sudo", "dmesg"], capture_output=True, text=True, check=False)
+        result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False)
         if result.returncode == 0 and msg in result.stdout:
             return True
 
@@ -689,14 +689,14 @@ def reboot_with_reisub(testcase, sd):
         # Not using 'e' (SIGTERM) or 'i' (SIGKILL) so the REISUB process stays
         # alive. 5 seconds delay to let glt-test-suite dump the stack
         # shell=True required for sh -c with multiple commands; command is hardcoded with no user input
-        subprocess.Popen(r"""sudo sh -c 'sleep 5; \
+        subprocess.Popen(r"""sh -c 'sleep 5; \
                          echo s > /proc/sysrq-trigger; \
                          echo u > /proc/sysrq-trigger; \
                          echo b > /proc/sysrq-trigger'""",
                          start_new_session=True, restore_signals=False, shell=True)
 
         # Use shell=False to prevent command injection (CWE-78)
-        subprocess.run(["sudo", "pkill", "-INT", "glt-test-suite"], shell=False, check=False)
+        subprocess.run(["pkill", "-INT", "glt-test-suite"], shell=False, check=False)
     else:
         # If systemd unavailable, guess in development mode,
         # Send SIGTERM to self to emulate system off.

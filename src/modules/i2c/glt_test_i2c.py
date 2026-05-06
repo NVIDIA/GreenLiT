@@ -101,12 +101,12 @@ def test_ipmi_i2c_pec(_, logger):
                 GLTCore.GLTTestResult.fail(
                     "Cannot sign kretprobe.ko for Secure Boot. "
                     "See docs/user-guides/secure-boot.md for setup.")
-            subprocess.run(["sudo", "insmod", "kretprobe.ko"], check=True, shell=False)
-            subprocess.run(["sudo", "ipmitool", "mc", "info"],
+            subprocess.run(["insmod", "kretprobe.ko"], check=True, shell=False)
+            subprocess.run(["ipmitool", "mc", "info"],
                            capture_output=True, shell=False, text=True, check=False)
             result = subprocess.run(["cat", "/proc/greenlit"],
                                     capture_output=True, shell=False, text=True, check=False)
-            subprocess.run(["sudo", "rmmod", "kretprobe"], check=True, shell=False)
+            subprocess.run(["rmmod", "kretprobe"], check=True, shell=False)
             subprocess.run(["make", "clean"], check=True, shell=False)
             if result.returncode != 0 or "0" in result.stdout:
                 GLTCore.GLTTestResult.fail("IPMI PEC validation failed. "

@@ -50,7 +50,7 @@ def test_module_allocation(_, logger) -> bool:
     if platform.machine() == "aarch64":
         # shell=True required for pipe and awk; command is hardcoded with no user input
         output = subprocess.run(
-                r"""sudo journalctl -b -k | awk \
+                r"""journalctl -b -k | awk \
                     'match($0, ": ([[:digit:]]+).* non-PLT", cap) {print cap[1]}'""",
                 capture_output=True, shell=True, text=True, check=True)
 
@@ -62,8 +62,8 @@ def test_module_allocation(_, logger) -> bool:
 
         # shell=True required for pipe and awk; command is hardcoded with no user input
         output = subprocess.run(
-                r"""sudo journalctl -b -k | awk \
-                    'match($0, ": ([[:digit:]]+).* PLT", cap) {print cap[1]}'""",
+                r"""journalctl -b -k | awk \
+                    'match($0, ": ([[:digit:]]+).* for PLT", cap) {print cap[1]}'""",
                 capture_output=True, shell=True, text=True, check=True)
 
         if not output.stdout:
@@ -98,8 +98,8 @@ def test_module_allocation(_, logger) -> bool:
                 GLTCore.GLTTestResult.fail(
                     "Cannot sign bingo.ko for Secure Boot. "
                     "See docs/user-guides/secure-boot.md for setup.")
-            subprocess.run(["sudo", "insmod", "bingo.ko"], check=True, shell=False)
-            subprocess.run(["sudo", "rmmod", "bingo"], check=True, shell=False)
+            subprocess.run(["insmod", "bingo.ko"], check=True, shell=False)
+            subprocess.run(["rmmod", "bingo"], check=True, shell=False)
             subprocess.run(["make", "clean"], check=True, shell=False)
         except subprocess.CalledProcessError as e:
             GLTCore.GLTTestResult.fail(f"Error executing command: {e}")
