@@ -1,7 +1,7 @@
 # The comment can have an optional value inside bracket, e.g. [=y], [>100], [<1024]
 
-# The following table contains config settings that enable function and are required
-# for bare metal support on the Grace platform.
+# The following table contains config settings that enable functionality and are
+# required for bare metal support on the Grace platform.
 # Table 7. Bare Metal Configs: Required
 CONFIG_NR_CPUS=512 # [>512]
 CONFIG_NODES_SHIFT=6 # [>6]
@@ -47,8 +47,8 @@ CONFIG_ARM_CORESIGHT_PMU_ARCH_SYSTEM_PMU=m
 CONFIG_NVIDIA_CORESIGHT_PMU_ARCH_SYSTEM_PMU=m
 CONFIG_ARM_SPE_PMU=m
 
-# The following table contains config settings that are required when
-# supporting partner diagnostics on Grace platforms.
+# The following table contains config settings that are required when supporting
+# partner diagnostics on Grace platforms.
 # Table 10. Bare Metal Configs: Partner Diagnostics
 CONFIG_ACPI_APEI_EINJ=m
 CONFIG_ARM_FFA_TRANSPORT=m # [=y]
@@ -60,3 +60,9 @@ CONFIG_CPU_FREQ_GOV_POWERSAVE=y
 CONFIG_CPU_FREQ_GOV_USERSPACE=y
 CONFIG_STRICT_DEVMEM=y
 CONFIG_SENSORS_ACPI_POWER=m
+
+# The following table contains config settings that are required for MPAM
+# support on Grace platforms.
+# Table table-grace-mpam-configs. Bare Metal Configs: MPAM
+CONFIG_ARM64_MPAM=y
+CONFIG_RESCTRL_FS=y

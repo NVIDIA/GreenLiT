@@ -67,8 +67,8 @@ def parse_defconfig(filename: str) -> dict:
         for line in file:
             line = line.strip()
 
-            # Detect table headers: "# Table N. Table Name"
-            table_match = re.match(r"#\s*Table\s+\d+\.\s*(.+)", line)
+            # Detect table headers: "# Table <ref>. Table Name"
+            table_match = re.match(r"#\s*Table\s+\S+\.\s*(.+)", line)
             if table_match:
                 table = table_match.group(1).strip()
                 continue

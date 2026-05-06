@@ -42,7 +42,7 @@ d42e6c20de6192f8e4ab4cf10be8c694ef27e8cb arm64/entry: Mask DAIF in cpu_switch_to
 # with various workloads.
 # Table 3. Bare Metal Support: Fixes
 8777dd9dff4020bba66654ec92e4b0ab6367ad30 spi: tegra210-quad: Fix combined sequence
-ae4b3c1252f0fd0951d2f072a02ba46cac8d6c92 spi: tegra210-quad: Don’t initialise DMA if not supported
+ae4b3c1252f0fd0951d2f072a02ba46cac8d6c92 spi: tegra210-quad: Don't initialise DMA if not supported
 2197aa6b0aa236b9896a09b9d08d6924d18b84f6 spi: tegra210-quad: Fix duplicate resource error
 2e3468778dbe3ec389a10c21a703bb8e5be5cfbc mm: remember young/dirty bit for page migrations
 101ca8d05913b7d1e6e8b9dd792193d4082fff86 rtc: efi: Enable SET/GET WAKEUP services as optional
@@ -51,7 +51,7 @@ ef3691683d7bfd0a2acf48812e4ffe894f10bfa8 KVM: arm64: GICv4.1: Fix race with door
 047ee71ae4f412d8819e39e4b08c588fa299cfc2 spi: tegra210-quad: Fix validate combined sequence
 2449d436681d40bc63ec2c766fd51b632270d8a7 spi: tegra210-quad: Fix iterator outside loop
 f7482d8285b638be87a594a30edaaf1341135c1a spi: tegra210-quad: set half duplex flag
-010338d729c1090036eb40d2a60b7b7bce2445b8 arm64: kaslr: don’t pretend KASLR is enabled if offset < MIN_KIMG_ALIGN
+010338d729c1090036eb40d2a60b7b7bce2445b8 arm64: kaslr: don't pretend KASLR is enabled if offset < MIN_KIMG_ALIGN
 c0e0421a60bf468e88cf569fbd727346b138ed04 ACPI: processor: Reorder acpi_processor_driver_init()
 c43198af05cffa5de8d4f356c40ce4bdca066272 thermal: core: Introduce thermal_cooling_device_present()
 790930f44289c8209c57461b2db499fcc702e0b3 thermal: core: Introduce thermal_cooling_device_update()
@@ -81,7 +81,7 @@ e07255d69702bc9131427fda8f9749355b10780f arm64: tlb: Improve __TLBI_VADDR_RANGE(
 73301e464a72a0d007d0d4e0f4d3dab5c58125bf arm64: tlb: Allow range operation for MAX_TLBI_RANGE_PAGES
 7bf9d2af7e89f65a79225e26d261b52ce4ee3e95 PCI: Clear Secondary Status errors after enumeration
 eebab7e3eb4bb906a8ebc3b70d28059ff1d9271c PCI/DOE: Support discovery version 2
-90e4ed6bb02ad93663f17411d17e8e714a765a6b cpufreq/cppc: Don’t compare desired_perf in target()
+90e4ed6bb02ad93663f17411d17e8e714a765a6b cpufreq/cppc: Don't compare desired_perf in target()
 4cd7ba16a0afb36550eed7690e73d3e7a743fa96 mm: fix old/young bit handling in the faulting path
 14d069d92951a3e150c0a81f2ca3b93e54da913b i2c: tegra: Do not mark ACPI devices as irq safe
 088984c8d54c0053fc4ae606981291d741c5924b ACPI: PRM: Find EFI_MEMORY_RUNTIME block for PRM handler and context
@@ -96,7 +96,7 @@ c8e88de1b44e58cacdef41ea9aaa78fca35f1357 ACPI/HMAT: Move HMAT messages to pr_deb
 7f5704b6a143b8eca640cba820968e798d065e91 ACPI: PRM: Remove unnecessary strict handler address checks
 abc7b3f1f056d69a8f11d6dceecc0c9549ace770 RDMA/mlx5: Fix a WARN during dereg_mr for DM type
 f7edb07ad7c66eab3dce57384f33b9799d579133 Fix mmu notifiers for range-based invalidates
-9cf8a952d57b422d3ff8a9a0163f8adf694f4b2b PCI/ACS: Fix ‘pci=config_acs=’ parameter
+9cf8a952d57b422d3ff8a9a0163f8adf694f4b2b PCI/ACS: Fix 'pci=config_acs=' parameter
 b3f6fcd8404f9f92262303369bb877ec5d188a81 iommu: Skip PASID validation for devices without PASID capability
 41c721fc093938745d116c3a21326a0ee03bb491 spi: tegra210-quad: use WARN_ON_ONCE instead of WARN_ON for timeouts
 21f4314e66ed8d40b2ee24185d1a06a07a512eb1 spi: tegra210-quad: add rate limiting and simplify timeout error message
@@ -106,16 +106,17 @@ d8966b65413390d1b5b706886987caac05fbe024 spi: tegra210-quad: modify chip select 
 635bf3c8853359a987c5c909d424df92a0d3016a i2c: tegra: Use internal reset when reset property is not available
 c7c31f8dc54aa3c9b2c994b5f1ff7e740a654e97 drm/ast: Use msleep instead of mdelay for edid read
 7526183cfdbe352c51c285762f0e15b7c428ea06 net: aquantia: Add missing descriptor cache invalidation on ATL2
+5ffcb7b890f61541201461580bb6622ace405aec net: atlantic: fix fragment overflow handling in RX path
 b4e002d8a7cee3b1d70efad0e222567f92a73000 spi: tegra210-quad: Fix timeout handling
 6022eacdda8b0b06a2e1d4122e5268099b62ff5d spi: tegra210-quad: Refactor error handling into helper functions
 380fd29d57abe6679d87ec56babe65ddc5873a37 spi: tegra210-quad: spi: tegra210-quad: Check hardware status on timeout
-5ffcb7b890f61541201461580bb6622ace405aec net: atlantic: fix fragment overflow handling in RX path
 aabd8ea0aa253d40cf5f20a609fc3d6f61e38299 spi: tegra210-quad: Return IRQ_HANDLED when timeout already processed transfer
 ef13ba357656451d6371940d8414e3e271df97e3 spi: tegra210-quad: Move curr_xfer read inside spinlock
 f5a4d7f5e32ba163cff893493ec1cbb0fd2fb0d5 spi: tegra210-quad: Protect curr_xfer assignment in tegra_qspi_setup_transfer_one
 bf4528ab28e2bf112c3a2cdef44fd13f007781cd spi: tegra210-quad: Protect curr_xfer in tegra_qspi_combined_seq_xfer
 6d7723e8161f3c3f14125557e19dd080e9d882be spi: tegra210-quad: Protect curr_xfer clearing in tegra_qspi_non_combined_seq_xfer
 edf9088b6e1d6d88982db7eb5e736a0e4fbcc09e spi: tegra210-quad: Protect curr_xfer check in IRQ handler
+c87f820bc4748fdd4d50969e8930cd88d1b61582 soc/tegra: fuse: Do not register SoC device on ACPI boot
 
 # The following table contains optional patches that improve performance on
 # Grace platforms.
@@ -140,7 +141,7 @@ c1bd2b4028ae5b4d2ada64b31c40cc44cdf00972 arm64/mm: convert pte_next_pfn() to pte
 506b586769ecef8c83fff64de227e7fa84b7be42 x86/mm: convert pte_next_pfn() to pte_advance_pfn()
 fb23bf6bd288db3187c27b971e558a3e9f70ae96 mm: tidy up pte_next_pfn() definition
 532736558e8ef2865eae1d84b52dda4422cac810 arm64/mm: convert READ_ONCE(*ptep) to ptep_get(ptep)
-659e193027910a5d3083e34b488ab459d2ef5082 arm64/mm: convert set_pte_at() to set_ptes(…, 1)
+659e193027910a5d3083e34b488ab459d2ef5082 arm64/mm: convert set_pte_at() to set_ptes(..., 1)
 cbb0294fdd72a5f63ec59fad5c0a98d63bd572fc arm64/mm: convert ptep_clear() to ptep_get_and_clear()
 5a00bfd6a52cf31e93d5f1b734087deb32a3cffa arm64/mm: new ptep layer to manage contig bit
 d9d8dc2bd3fb2689309f704fe85e6dde2b1bd73a arm64/mm: dplit __flush_tlb_range() to elide trailing DSB
@@ -154,6 +155,14 @@ f0c2264958e18bc7bc35b567d51b99461e4de34f arm64/mm: automatically fold contpte ma
 ead79118dae6f9f982532002e82c2fb291ae0480 arm64/io: Provide a WC friendly __iowriteXX_copy()
 2b7a5e1fe02231acc5d50339b2f10833565ef559 net: hns3: Remove io_stop_wc() calls after __iowrite64_copy()
 ef302283ddfceaba2657923af3f90fd58e6dff06 IB/mlx5: Use __iowrite64_copy() for write combining stores
+9dc42c9070282c81058a875fea5acae057610980 workqueue: fix typo in WQ_AFFN_SMT comment
+5920d046f7ae3bf9cf51b9d915c1fff13d299d84 workqueue: add WQ_AFFN_CACHE_SHARD affinity scope
+4cdc8a7389d5025051f6c4a60fb5b7cb9b7960bb workqueue: set WQ_AFFN_CACHE_SHARD as the default affinity scope
+738390a5321c7d34f468bc69f7232db711210bc0 tools/workqueue: add CACHE_SHARD support to wq_dump.py
+24b2e73f9700e0682575feb34556b756e59d4548 workqueue: add test_workqueue benchmark module
+41e3ccca00b374b7f39cf68e818b59a921cd7069 docs: workqueue: document WQ_AFFN_CACHE_SHARD affinity scope
+1abaae9b38a85c9dabff67a22d8c99f7254c423a workqueue: fix parse_affn_scope() prefix matching bug
+76af54648899abbd6b449c035583e47fd407078a workqueue: validate cpumask_first() result in llc_populate_cpu_shard_id()
 
 # The following table contains optional patches that enable functions, or
 # resolve faults, with performance tooling on Grace platforms.
@@ -171,11 +180,11 @@ f462eb1d0df39499eff2407b2581ddf2fe89e744 arm64: defconfig: Enable ARM CoreSight 
 225d757012e0afa673d8c862e6fb39ed2f429b4d perf: arm_cspmu: Set irq affinitiy only if overflow interrupt is used
 71e0cb32d5fc61468e83ed962379af71bba8237e perf/arm_cspmu: Fix event attribute type
 7e51d05e43f19f394b3b0df01a22225143f9c5b5 perf: arm_cspmu: Add missing MODULE_DEVICE_TABLE
-87b3b6d53efccbb64396675b35839180ef14ef40 ACPI/APMT: Don’t register invalid resource
+87b3b6d53efccbb64396675b35839180ef14ef40 ACPI/APMT: Don't register invalid resource
 d2e3bb51281875be23cb4726a59b03d0a53eb0d3 perf/arm_cspmu: Decouple APMT dependency
 f9bd34e3753ea8f1433a3ba70f03a165a1416f98 perf/arm_cspmu: Clean up ACPI dependency
-3095e90eee5ea2d5658cab90b6da9c6d5d0a3bdf coresight: etm4x: Allocate and device assign ‘struct etmv4_drvdata’ earlier
-4e3b9a6eae987c80330e5253754dab35acc2a63b coresight: etm4x: Drop iomem ‘base’ argument from etm4_probe()
+3095e90eee5ea2d5658cab90b6da9c6d5d0a3bdf coresight: etm4x: Allocate and device assign 'struct etmv4_drvdata' earlier
+4e3b9a6eae987c80330e5253754dab35acc2a63b coresight: etm4x: Drop iomem 'base' argument from etm4_probe()
 5a1c7097472fcde5745654e3a59f55140903d9cc coresight: etm4x: Drop pid argument from etm4_probe()
 73d779a03a76ac3fe26832cba3c9ad04194af595 coresight: etm4x: Change etm4_platform_driver driver for MMIO devices
 3a2888aa1f962c55ca36119aebe67355c7bf54e4 coresight: platform: acpi: Ignore the absence of graph
@@ -190,7 +199,7 @@ bfc653aa89cb05796d7b4e046600accb442c9b7a perf: arm_cspmu: Separate Arm and vendo
 4277f035d227e829133df284be7e35b7236a5b0f coresight: trbe: Add a representative coresight_platform_data for TRBE
 a24d9d9dc096fc0d0bd85302c9a4fe4fe3b1107b perf parse-events: Make legacy events lower priority than sysfs/JSON
 f4d9d9dcc70b96b5e5d7801bd5fbf8491b07b13d arm64: Add Neoverse-V2 part
-dc6abbbde4b099e936cd5428e196d86a5e119aae tools headers arm64: Sync arm64’s cputype.h with the kernel sources
+dc6abbbde4b099e936cd5428e196d86a5e119aae tools headers arm64: Sync arm64's cputype.h with the kernel sources
 b6aa0de9a53a231eb068ce1e62b5e7ec9e30e627 perf cs-etm: Create decoders after both AUX and HW_ID search passes
 57880a7966be510cdaa08ab76b9d63e3df786bf0 perf: cs-etm: Allocate queues for all CPUs
 77c123f53e97ad4bde0271eb671b71774a99ebf6 perf: cs-etm: Move traceid_list to each queue
@@ -211,7 +220,7 @@ fb98fa3bf86893e53fac7bc951f503caf4a6eb23 perf arm-spe: Rename arm_spe__synth_dat
 50b8f1d5bf4ad7f09ef8012ccf5f94f741df827b perf arm-spe: Rename the common data source encoding
 56ae663e7636f2ce180201f0f18d7736c319a43f perf arm-spe: Introduce arm_spe__is_homogeneous()
 ba5e7169e5483a61899497e23fa18f7ef33aa827 perf arm-spe: Use metadata to decide the data source feature
-6bcf54c89b3d8406433839f0e3b72c08b4a1caf3 perf arm-spe: Remove the unused ‘midr’ field
+6bcf54c89b3d8406433839f0e3b72c08b4a1caf3 perf arm-spe: Remove the unused 'midr' field
 041c0e5715a65a1b653283b853b4ca973780607a perf arm-spe: Add Neoverse-V2 to common data source encoding list
 ea2ead4224fd3899f6dadd4c1fc526f32ec2246c perf arm-spe: Add Cortex CPUs to common data source encoding list
 ac4c52956f62700803754ffba906e42126273956 perf: arm_cspmu: nvidia: remove unsupported SCF events
@@ -236,3 +245,105 @@ b392a198917020cac996fd207355211ecfcfad84 vfio/pci: remove vfio_pci_nvlink2
 fd35ca3d12cc9922d7d9a35f934e72132dbc4853 mm/migrate_device.c: copy pte dirty bit to page
 a3589e1d5fe39c3d9fdd291b111524b93d08bc32 mm/migrate_device.c: add missing flush_cache_page()
 60bae73708963de4a17231077285bd9ff2f41c44 mm/migrate_device.c: flush TLB while holding PTL
+
+# The following table contains patches that support MPAM on Grace platforms.
+# Table table-grace-mpam. Bare Metal Support: MPAM
+189572bf4e005431051319def435ac4b7e4489ca cpumask: Relax cpumask_any_but()
+13f0a02bf4c1c5888c736cedef9ca50de666adb3 find: Add find_first_andnot_bit()
+5da703ef4e4a82b2f9a00f2b3a1eae5657e68a92 cpumask: Add cpumask_{first,next}_andnot() API
+94f7531430285b4ec600693f7222c2ca29bd7472 x86/resctrl: Optimize cpumask_any_housekeeping()
+dcb1d3d3b77bdb30d2ec97f540d58ee35f1b1c82 x86/resctrl: Remove the limit on the number of CLOSID
+7704fb81bc87254e8772f387b62153b135bb1932 x86/resctrl: Rename resctrl_sched_in() to begin with "resctrl_arch_"
+8eb7ad66badc71e0d8547cf6195a2a6190090152 x86/resctrl: Check all domains are offline in resctrl_exit()
+8c992e24a0627a6ba508184c07766862c8bb3e54 x86/resctrl: Resctrl_exit() teardown resctrl but leave the mount point
+bc740420d7ae7878696d5ad9f3dbcb11e2599b2e x86/resctrl: Drop __init/__exit on assorted symbols
+6c72fb8d8bd7bfaafdeda3a91c535ecf52283ec9 x86/resctrl: Move is_mba_sc() out of core.c
+d4fb6b8e4640adeff9673ae398525be7382d3197 x86/resctrl: Add end-marker to the resctrl_event_id enum
+2a65660385444e9d9deffe995c71ee20443ef76e x86/resctrl: Expand the width of domid by replacing mon_data_bits
+270f00bcc9525c8ba667349ba3e8c4dbcbbf70fb x86/resctrl: Split trace.h
+003e86077143ebeaa5299fb2bc907ae3b6650028 x86/resctrl: Add 'resctrl' to the title of the resctrl documentation
+bff70402d6d67843fe319338e4c56e1cba13fbd8 fs/resctrl: Add boiler plate for external resctrl code
+3d95a49b365e06d1b4c4e5a426fdc70449a334f3 x86/resctrl: Move the filesystem bits to headers visible to fs/resctrl
+7bdb619c7f9f0a7264b2d69ad0472bf2c785e52a x86/resctrl: Move enum resctrl_event_id to resctrl.h
+272ed1c28c9db60b9bd50d49feae463df50b3ef6 x86/resctrl: Fix types in resctrl_arch_mon_ctx_{alloc,free}() stubs
+279f225951e3c77a1708d77f557b4cc7bdbd76ed x86/resctrl: Move pseudo lock prototypes to include/linux/resctrl.h
+556f48a5093b1edb1b8a594af633303269dec329 x86/resctrl: Squelch whitespace anomalies in resctrl core code
+df3dc0efcc01d6aae8ebd3e479fe0d55f894854b x86/resctrl: Prefer alloc(sizeof(*foo)) idiom in rdt_init_fs_context()
+b7b57edbf5681c7d0ed504a3a4e912bb68661ab9 x86/resctrl: Relax some asm #includes
+f6b25be204b8661e4c32fa770a4c9e3a113ee325 x86/resctrl: Always initialise rid field in rdt_resources_all[]
+7168ae330e8105296210b2b2d31d791d5c073345 x86,fs/resctrl: Move the resctrl filesystem code to live in /fs/resctrl
+54d14f25664bbb75c2928dd0d64a095c0f488176 MAINTAINERS: Add reviewers for fs/resctrl
+796e29b857aed89f83f70f2c199585c45db5dc0f ACPI / PPTT: Add a helper to fill a cpumask from a processor container
+eeec7845e966f9278973c02573e3587e6733a4dd ACPI / PPTT: Stop acpi_count_levels() expecting callers to clear levels
+cfc085af8398479e855b86236a21e1d870d51184 ACPI / PPTT: Add acpi_pptt_cache_v1_full to use pptt cache as one structure
+41a7bb39fede8ecc053c261b86cdfadea45b7b10 ACPI / PPTT: Find cache level by cache-id
+a39a723a6f1ed9a1602ccf8dd56392402afa7339 ACPI / PPTT: Add a helper to fill a cpumask from a cache_id
+d8bf01d80919e81a06dca77556dcfb351fa99b0c arm64: kconfig: Add Kconfig entry for MPAM
+f5915600cc4ca0338a37d5a8a4032e25d939156b platform: Define platform_device_put cleanup handler
+96f4a4d53e6660d9b62e8d739388267fbb660e9f ACPI: Define acpi_put_table cleanup handler and acpi_get_table_pointer() helper
+115c5325beae7199219ab7c12ec2a2af8dea6c3c ACPI / MPAM: Parse the MPAM table
+f04046f2577a5c76167333ca99d3903ee5331ba0 arm_mpam: Add probe/remove for mpam msc driver and kbuild boiler plate
+01fb4b8224726aa0f2170b63e4685cf0eec85d8d arm_mpam: Add the class and component structures for firmware described ris
+aa64b9e110515610b6498df0f8fce9b1c6c44f72 arm_mpam: Add MPAM MSC register layout definitions
+8f8d0ac1da7885c0d619636f93e0983239dc145c arm_mpam: Add cpuhp callbacks to probe MSC hardware
+bd221f9f82afb616887e0b88b43fbb937479d744 arm_mpam: Probe hardware to find the supported partid/pmg values
+d02beb06ca2a624e17004659c79d26a23484aa8b arm_mpam: Add helpers for managing the locking around the mon_sel registers
+8c90dc68a5de4349ef9ba51449fb0a29cd690547 arm_mpam: Probe the hardware features resctrl supports
+c10ca83a778304f976cbea60bbbb2f1fac003f5c arm_mpam: Merge supported features during mpam_enable() into mpam_class
+f188a36ca2416e8090453eacbabd2925b20eb906 arm_mpam: Reset MSC controls from cpuhp callbacks
+475228d15dd653584b840b8e6c5828cdc3884b1c arm_mpam: Add a helper to touch an MSC from any CPU
+3bd04fe7d807bbdcfe75b29ca82fae4e2d7dc524 arm_mpam: Extend reset logic to allow devices to be reset any time
+49aa621c4dcaf8e3cfeb9e73d07a9746b889f9e8 arm_mpam: Register and enable IRQs
+3796f75aa7958d26b93a2508de5fc1e0b2f8a853 arm_mpam: Use a static key to indicate when mpam is enabled
+09b89d2a72f37b078198cbb09d5b9e13ba9d68b9 arm_mpam: Allow configuration to be applied and restored during cpu online
+880df85d8673f8e2395f139d3618661366e5d4d8 arm_mpam: Probe and reset the rest of the features
+c891bae66423bc69a680ca1de34940132e2c8ace arm_mpam: Add helpers to allocate monitors
+823e7c3712c584641b4ef890a8af34884c677197 arm_mpam: Add mpam_msmon_read() to read monitor value
+41e8a14950e1732af51cfec8fa09f8ded02a5ca9 arm_mpam: Track bandwidth counter state for power management
+b35363793291e36c91d4a5b62d7ae7079c70d826 arm_mpam: Consider overflow in bandwidth counter state
+fdc29a141d6364645509cb20129cba1f84e4c10f arm_mpam: Probe for long/lwd mbwu counters
+9e5afb7c32830bcd123976a7729ef4e2dff0cd77 arm_mpam: Use long MBWU counters if supported
+201d96ca4c867695880450930258cd5c97f099d4 arm_mpam: Add helper to reset saved mbwu state
+e3565d1fd4dcf2c7ee6912094066e47c7500eaf2 arm_mpam: Add kunit test for bitmap reset
+2557e0eafec1547aa9e0e768d2376e66252dada4 arm_mpam: Add kunit tests for props_mismatch()
+ce1e1421f8d8cdb5e05e13dbb516caedd67e5ee8 MAINTAINERS: new entry for MPAM Driver
+f91e913355f49c878fc77f995fd71b7800352bd2 arm_mpam: Ensure in_reset_state is false after applying configuration
+a1cb6577f575ba5ec2583caf4f791a86754dbf69 arm_mpam: Reset when feature configuration bit unset
+29fa1be82b83f87e603ed4c21fe86c6e05fd0282 arm64/sysreg: Add MPAMSM_EL1 register
+eda1cd1f9d29b382a07d757cf8b29f9ee636355f KVM: arm64: Preserve host MPAM configuration when changing traps
+2e7c684bdb50cfaf98da80ebaab4a961fdcd1aa2 KVM: arm64: Make MPAMSM_EL1 accesses UNDEF
+8e06d04ff1cf764066c62e5677bfb0b0c1d1fbbc arm64: mpam: Context switch the MPAM registers
+87b78a5d70e83d4dbe31e1afda2be736a3330b31 arm64: mpam: Re-initialise MPAM regs when CPU comes online
+c544f00a473239835d22e7109b403314d8b85974 arm64: mpam: Drop the CONFIG_EXPERT restriction
+831a7f16728c5ceef04ab99a699c3d9e519dc4b8 arm64: mpam: Advertise the CPUs MPAM limits to the driver
+735dad999905dfd246be1994bb8d203063aeb0d6 arm64: mpam: Add cpu_pm notifier to restore MPAM sysregs
+37fe0f984d9ca60e8d95fc9a85d37f4300159625 arm64: mpam: Initialise and context switch the MPAMSM_EL1 register
+2cf9ca3fae38b7894e7f1435cec92f9a679b42f9 arm64: mpam: Add helpers to change a task or cpu's MPAM PARTID/PMG values
+67faed4ccb4f4b8055f50e9cc5670f1fc09ea287 KVM: arm64: Force guest EL1 to use user-space's partid configuration
+09e61daf8e96b9bdb04dd112bdecf9382fd3f919 arm_mpam: resctrl: Add boilerplate cpuhp and domain allocation
+52a4edb16121d07734e4e392767d26d286f08c35 arm_mpam: resctrl: Pick the caches we will use as resctrl resources
+370d166d878d0c0aa06568d67387a1151a200501 arm_mpam: resctrl: Implement resctrl_arch_reset_all_ctrls()
+02cc661687886563a0e08ecee51c5ef7d1737237 arm_mpam: resctrl: Add resctrl_arch_get_config()
+9cd2b522be2cc64fab179d75537d2e8df38d26a6 arm_mpam: resctrl: Implement helpers to update configuration
+9d2e1a99fae58ce992f147bdf83b5d9089f70b27 arm_mpam: resctrl: Add plumbing against arm64 task and cpu hooks
+6789fb99282c0a8e8e84701b7edf456f4a9e71e2 arm_mpam: resctrl: Add CDP emulation
+01a0021f6c39557037bfc41ede7230a0696677ff arm_mpam: resctrl: Hide CDP emulation behind CONFIG_EXPERT
+80d147d293130ee3c8a395cbbea1813e26ab9a1b arm_mpam: resctrl: Convert to/from MPAMs fixed-point formats
+3e9b35823aabcb85cc039960256426e50f1fd601 arm_mpam: resctrl: Add rmid index helpers
+1c1e2968a860c5af9fca67f1c0e88aab83ace0b3 arm_mpam: resctrl: Wait for cacheinfo to be ready
+36528c7681b8093f5f9270d2af7c4326d771f181 arm_mpam: resctrl: Add support for 'MB' resource
+5dc8f73eaa5dfccb229b9a25c797720e6379f8e0 arm_mpam: resctrl: Add kunit test for control format conversions
+264c285999fce128fc52743bce582468b26e9f65 arm_mpam: resctrl: Add monitor initialisation and domain boilerplate
+1458c4f053355f88cc5d190ca02243d2c60fa010 arm_mpam: resctrl: Add support for csu counters
+2a3c79c61539779a09928893518c8286d7774b54 arm_mpam: resctrl: Allow resctrl to allocate monitors
+fb56b29932ca276df268806ad52ed80f40f99a6e arm_mpam: resctrl: Add resctrl_arch_rmid_read()
+49b04e401825431529e866470d8d2dcd8e9ef058 arm_mpam: resctrl: Update the rmid reallocation limit
+efc775eadce2c6e0921c21d9c29a7b6686022281 arm_mpam: resctrl: Add empty definitions for assorted resctrl functions
+4aab135bda1661a795e4fe96418bf840833e1119 arm64: mpam: Select ARCH_HAS_CPU_RESCTRL
+fb481ec08699e9daf08ab839a79ab37b1bcca94d arm_mpam: resctrl: Call resctrl_init() on platforms that can support resctrl
+fa7745218c9828ac4849ef62bccad684aec0f422 arm_mpam: Add quirk framework
+70e81fbedc6570b2397e07a645136af0a0eec907 arm_mpam: Add workaround for T241-MPAM-1
+a7efe23ed6dd08259ad1b238e9c33bb511666fd4 arm_mpam: Add workaround for T241-MPAM-4
+dc48eb1ff27cc3169c3c5cca5eb20645d04d9e22 arm_mpam: Add workaround for T241-MPAM-6
+aeb8595a5f8ba4aac8b5c265a8bcc3f18b473cb5 arm_mpam: Quirk CMN-650's CSU NRDY behaviour
+4ce0a2ccc0358f3f746fa50815a599f861fd5d68 arm64: mpam: Add initial MPAM documentation
