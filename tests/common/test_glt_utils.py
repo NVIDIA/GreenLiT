@@ -6,9 +6,11 @@ import signal
 
 from tests.test_base import GLTTestBase
 from src.common.glt_utils import (
+    append_kernel_parameter,
     arm_for_reset,
     check_kernel_log,
     chdir_managed,
+    check_kernel_parameter,
     collect_logs,
     compare_version,
     create_cache_session,
@@ -18,12 +20,13 @@ from src.common.glt_utils import (
     parse_linux_version,
     reboot,
     reboot_with_reisub,
+    remove_kernel_parameter,
     start_systemd_timer,
     systemd_enable,
 )
 
 
-class TestGLTUtils(GLTTestBase):
+class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test Class for GLT Utils"""
 
     @GLTTestBase.unittest.mock.patch("subprocess.run")
@@ -45,7 +48,7 @@ class TestGLTUtils(GLTTestBase):
         mock_start_timer.assert_called_once()
         mock_systemd_enable.assert_called_once()
         mock_run.assert_called_once_with(
-            ["sudo", "pkill", "-INT", "glt-test-suite"], shell=False, check=False
+            ["pkill", "-INT", "glt-test-suite"], shell=False, check=False
         )
         self.assertFalse(result)
 
@@ -315,12 +318,18 @@ class TestGLTUtils(GLTTestBase):
         self.assertIsNone(result)
 
     @GLTTestBase.unittest.mock.patch("os.listdir")
+    @GLTTestBase.unittest.mock.patch("os.path.isfile")
     @GLTTestBase.unittest.mock.patch("os.path.isdir")
-    def test_get_cache_session_list(self, mock_isdir, mock_listdir):
+    def test_get_cache_session_list(self, mock_isdir, mock_isfile, mock_listdir):
         """Test get_cache_session_list function"""
-        # Test with unsorted input to verify sorting
-        mock_listdir.return_value = ["session2", "not_a_dir", "session1"]
-        mock_isdir.side_effect = lambda x: x.endswith(("session1", "session2"))
+        # Test with unsorted input and a non-session directory.
+        mock_isdir.return_value = True
+        mock_listdir.return_value = ["session2", "not_a_dir", "boot-config", "session1"]
+        valid_progress_paths = {
+            "/var/cache/greenlit/session1/glt-test-suite/test_progress.json",
+            "/var/cache/greenlit/session2/glt-test-suite/test_progress.json",
+        }
+        mock_isfile.side_effect = lambda x: x in valid_progress_paths
 
         result = get_cache_session_list()
 
@@ -338,6 +347,17 @@ class TestGLTUtils(GLTTestBase):
             "/var/cache/greenlit/session2",
         ]
         self.assertEqual(result, expected)
+
+    @GLTTestBase.unittest.mock.patch("os.listdir")
+    @GLTTestBase.unittest.mock.patch("os.path.isdir")
+    def test_get_cache_session_list_missing_root(self, mock_isdir, mock_listdir):
+        """Missing GreenLiT cache root means there are no resumable sessions."""
+        mock_isdir.return_value = False
+
+        result = get_cache_session_list()
+
+        self.assertEqual(result, [])
+        mock_listdir.assert_not_called()
 
     def test_parse_linux_version(self):
         """Test parse_linux_version function"""
@@ -391,7 +411,7 @@ class TestGLTUtils(GLTTestBase):
             )
 
             expected_cmd = (
-                "sudo sh -c 'sleep 5; \\\n"
+                "sh -c 'sleep 5; \\\n"
                 "                         echo s > /proc/sysrq-trigger; \\\n"
                 "                         echo u > /proc/sysrq-trigger; \\\n"
                 "                         echo b > /proc/sysrq-trigger'"
@@ -421,9 +441,10 @@ class TestGLTUtils(GLTTestBase):
             )
             mock_kill.assert_called_once_with(12345, signal.SIGTERM)
 
+    @GLTTestBase.unittest.mock.patch("os._exit")
     @GLTTestBase.unittest.mock.patch("os.system")
     @GLTTestBase.unittest.mock.patch("src.common.glt_utils.systemd_enable")
-    def test_reboot(self, mock_systemd_enable, mock_system):
+    def test_reboot(self, mock_systemd_enable, mock_system, mock_exit):
         """Test reboot function"""
         mock_testcase = GLTTestBase.unittest.mock.MagicMock()
 
@@ -434,6 +455,7 @@ class TestGLTUtils(GLTTestBase):
             mock_testcase, "TriggerReboot"
         )
         mock_system.assert_called_once_with("reboot")
+        mock_exit.assert_called_once_with(0)
         self.assertFalse(result)
 
         # Test with systemd disabled
@@ -491,6 +513,124 @@ class TestGLTUtils(GLTTestBase):
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+        )
+
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.KernelCmdlineManager")
+    def test_append_kernel_parameter(self, mock_manager_cls):
+        """Test appending kernel parameter through detected backend."""
+        mock_manager = GLTTestBase.unittest.mock.MagicMock()
+        mock_manager.append_parameter.return_value = GLTTestBase.unittest.mock.Mock(
+            ok=True, reason=""
+        )
+        mock_manager_cls.detect.return_value = mock_manager
+
+        ok, reason = append_kernel_parameter(
+            "kvm-arm.vgic_v4_enable=1",
+            test_case_name="test_gicv4_irq_scaling",
+            session_dir="/session/glt-test-suite",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        mock_manager_cls.detect.assert_called_once_with(
+            transaction_root="/session/glt-test-suite/boot-config"
+        )
+        mock_manager.append_parameter.assert_called_once_with(
+            "kvm-arm.vgic_v4_enable=1",
+            transaction_id="test_gicv4_irq_scaling"
+        )
+
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.KernelCmdlineManager")
+    def test_append_kernel_parameter_rejects_invalid_parameter(
+        self, mock_manager_cls
+    ):
+        """Test invalid kernel parameter validation."""
+        mock_manager = GLTTestBase.unittest.mock.MagicMock()
+        mock_manager.append_parameter.return_value = GLTTestBase.unittest.mock.Mock(
+            ok=False, reason="kernel parameter contains invalid characters"
+        )
+        mock_manager_cls.detect.return_value = mock_manager
+
+        ok, reason = append_kernel_parameter("bad\nparam")
+
+        self.assertFalse(ok)
+        self.assertIn("invalid characters", reason)
+        mock_manager.append_parameter.assert_called_once_with(
+            "bad\nparam", transaction_id=None
+        )
+
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.KernelCmdlineManager")
+    def test_check_kernel_parameter_returns_backend_result(self, mock_manager_cls):
+        """Test result-preserving kernel parameter check helper."""
+        mock_manager = GLTTestBase.unittest.mock.MagicMock()
+        expected = GLTTestBase.unittest.mock.Mock(ok=True, active=True)
+        mock_manager.check_parameter.return_value = expected
+        mock_manager_cls.detect.return_value = mock_manager
+
+        result = check_kernel_parameter("foo=bar", test_case_name="test")
+
+        self.assertIs(result, expected)
+        mock_manager.check_parameter.assert_called_once_with(
+            "foo=bar", transaction_id="test"
+        )
+
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.KernelCmdlineManager")
+    def test_check_kernel_parameter_uses_session_dir(self, mock_manager_cls):
+        """Test kernel parameter helpers can use the active GreenLiT session."""
+        mock_manager = GLTTestBase.unittest.mock.MagicMock()
+        mock_manager.check_parameter.return_value = GLTTestBase.unittest.mock.Mock(
+            ok=True, reason=""
+        )
+        mock_manager_cls.detect.return_value = mock_manager
+
+        result = check_kernel_parameter(
+            "foo=bar", test_case_name="test", session_dir="/session/glt-test-suite"
+        )
+
+        self.assertTrue(result.ok)
+        mock_manager_cls.detect.assert_called_once_with(
+            transaction_root="/session/glt-test-suite/boot-config"
+        )
+        mock_manager.check_parameter.assert_called_once_with(
+            "foo=bar", transaction_id="test"
+        )
+
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.KernelCmdlineManager")
+    def test_check_kernel_parameter_ignores_empty_session_dir(self, mock_manager_cls):
+        """Empty session directories use the backend default transaction root."""
+        mock_manager = GLTTestBase.unittest.mock.MagicMock()
+        mock_manager.check_parameter.return_value = GLTTestBase.unittest.mock.Mock(
+            ok=True, reason=""
+        )
+        mock_manager_cls.detect.return_value = mock_manager
+
+        result = check_kernel_parameter("foo=bar", test_case_name="test", session_dir=" ")
+
+        self.assertTrue(result.ok)
+        mock_manager_cls.detect.assert_called_once_with(transaction_root=None)
+
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.KernelCmdlineManager")
+    def test_remove_kernel_parameter_from_tag(
+        self, mock_manager_cls
+    ):
+        """Test removing kernel parameters through detected backend."""
+        mock_manager = GLTTestBase.unittest.mock.MagicMock()
+        mock_manager.remove_parameter.return_value = GLTTestBase.unittest.mock.Mock(
+            ok=True, reason=""
+        )
+        mock_manager_cls.detect.return_value = mock_manager
+
+        ok, reason = remove_kernel_parameter(
+            "foo=bar", test_case_name="test", session_dir="/session/glt-test-suite"
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        mock_manager_cls.detect.assert_called_once_with(
+            transaction_root="/session/glt-test-suite/boot-config"
+        )
+        mock_manager.remove_parameter.assert_called_once_with(
+            "foo=bar", transaction_id="test"
         )
 
     def test_chdir_managed(self):
