@@ -33,6 +33,7 @@ The following packages are required and will be automatically installed by the i
 - Python 3 with pip
 - Linux kernel headers
 - ipmitool and other hardware utilities
+- libvirt and QEMU tools for virtualization tests
 
 If you prefer to install prerequisites manually:
 
@@ -41,6 +42,7 @@ If you prefer to install prerequisites manually:
 ```bash
 sudo apt update
 sudo apt install build-essential python3-pip python3-setuptools tar ipmitool linux-tools-common freeipmi-tools
+sudo apt install libvirt-clients libvirt-daemon-system qemu-system-arm qemu-utils
 # Install kernel headers (may require specific handling for custom kernels)
 sudo apt install linux-headers-$(uname -r)
 # If the above fails, try one of these alternatives:
@@ -48,10 +50,14 @@ sudo apt install linux-headers-$(uname -r)
 # sudo apt install linux-headers-generic-hwe-$(lsb_release -rs)
 ```
 
+Different Ubuntu releases may use different QEMU package names or dependency
+sets. Install the package that provides `qemu-system-aarch64` on arm64 systems.
+
 **RHEL/CentOS**:
 
 ```bash
 sudo dnf install python3-pip python3-setuptools tar ipmitool perf freeipmi kernel-devel kernel-headers
+sudo dnf install libvirt-client libvirt-daemon libvirt-daemon-driver-qemu qemu-kvm qemu-img
 ```
 
 **SUSE**:
@@ -59,6 +65,21 @@ sudo dnf install python3-pip python3-setuptools tar ipmitool perf freeipmi kerne
 ```bash
 sudo zypper --non-interactive refresh
 sudo zypper --non-interactive install python3-pip python3-setuptools tar ipmitool perf freeipmi kernel-default-devel linux-glibc-devel
+sudo zypper --non-interactive install libvirt-client libvirt-daemon libvirt-daemon-qemu qemu-arm qemu-tools
+```
+
+If libvirt is not socket-activated by the package installation, start it before running virtualization tests:
+
+```bash
+sudo systemctl enable --now libvirtd virtlogd virtlockd
+# On systems using modular libvirt daemons:
+sudo systemctl enable --now virtqemud virtlogd virtlockd
+```
+
+You can confirm libvirt access with:
+
+```bash
+virsh --connect qemu:///system uri
 ```
 
 ### Linux Source Tree (Optional)
