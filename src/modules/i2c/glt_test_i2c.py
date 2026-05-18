@@ -18,9 +18,54 @@ Python script to test I2C.
 """
 import os
 import subprocess
+import time
+from pathlib import Path
+
 from common import glt_core as GLTCore
 from common import glt_utils
 from common.nv_device import NvDev
+
+
+def _first_eligible_tegra_i2c_device() -> str | None:
+    """
+    Return the basename of the first NVDA2017:* device bound to the
+    tegra-i2c platform driver, or None if none is bound.
+    """
+    drv = Path("/sys/bus/platform/drivers/tegra-i2c")
+    if not drv.is_dir():
+        return None
+
+    candidates = [
+        entry.name
+        for entry in drv.iterdir()
+        if entry.name.startswith("NVDA2017:") and entry.is_symlink()
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates)[0]
+
+
+def _dev_unbind_bind(dev_name: str) -> tuple[bool, str]:
+    """Unbind then rebind dev_name on the tegra-i2c platform driver.
+    Returns (True, "") on success, or (False, reason) on any OSError so
+    the caller can map it to a SKIP verdict.
+    """
+    drv = Path("/sys/bus/platform/drivers/tegra-i2c")
+    unbind = drv / "unbind"
+    bind = drv / "bind"
+    try:
+        with open(unbind, "w", encoding="ascii") as fh:
+            fh.write(dev_name)
+    except OSError as exc:
+        return (False, f"write {unbind}: {exc}")
+    try:
+        with open(bind, "w", encoding="ascii") as fh:
+            fh.write(dev_name)
+    except OSError as exc:
+        return (False, f"write {bind}: {exc}")
+
+    time.sleep(0.5)
+    return (True, "")
 
 
 def is_NVDA0301_present(logger): # pylint: disable=invalid-name
@@ -114,3 +159,76 @@ def test_ipmi_i2c_pec(_, logger):
 
         except subprocess.CalledProcessError as e:
             GLTCore.GLTTestResult.fail(f"Error executing command: {e}")
+
+
+def _restore_tegra_i2c_binding(_scheduler, attr, logger):
+    dev_name = getattr(attr, "picked_device", None)
+    if dev_name is not None:
+        try:
+            with open("/sys/bus/platform/drivers/tegra-i2c/bind", "w", encoding="ascii") as fh:
+                fh.write(dev_name)
+        except OSError as e:
+            logger.debug(f"post-hook: bind {dev_name}: {e}")
+
+    if getattr(attr, "dyndbg_enabled", False):
+        try:
+            with open("/sys/kernel/debug/dynamic_debug/control",
+                      "w", encoding="ascii") as fh:
+                fh.write("module i2c_tegra -p")
+        except OSError as e:
+            logger.debug(f"post-hook: dyndbg restore: {e}")
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_tegra_i2c_dma_pio_fallback(_, __):
+    """
+    Verify kernel commit b53232fd220a takes effect on tegra-i2c device.
+
+    JIRA: DGX-16326
+    PATCH: https://lore.kernel.org/linux-tegra/20251118140620.549-2-akhilrajeev@nvidia.com/
+    """
+
+    test_tegra_i2c_dma_pio_fallback.attr.picked_device = None
+    test_tegra_i2c_dma_pio_fallback.attr.dyndbg_enabled = False
+
+    if not Path("/sys/firmware/acpi").is_dir():
+        GLTCore.GLTTestResult.skip(
+            "System is not ACPI-booted; this test only runs on ACPI-booted systems.")
+
+    dev_name = _first_eligible_tegra_i2c_device()
+    if dev_name is None:
+        GLTCore.GLTTestResult.skip("No tegra-i2c device bound to the platform driver.")
+
+    test_tegra_i2c_dma_pio_fallback.attr.picked_device = dev_name
+
+    # Enable dev_dbg() output for the i2c_tegra module so the new
+    # "DMA not available, falling back to PIO" line reaches the kernel log.
+    try:
+        with open("/sys/kernel/debug/dynamic_debug/control", "w", encoding="ascii") as fh:
+            fh.write("module i2c_tegra +p")
+    except OSError:
+        GLTCore.GLTTestResult.skip(
+            "Could not enable dynamic debug for module i2c_tegra")
+
+    test_tegra_i2c_dma_pio_fallback.attr.dyndbg_enabled = True
+
+    ok, reason = _dev_unbind_bind(dev_name)
+    if not ok:
+        GLTCore.GLTTestResult.skip(f"unbind/bind cycle on {dev_name} failed: {reason}")
+
+    message = "DMA not available, falling back to PIO"
+    if not glt_utils.check_kernel_log(message):
+        GLTCore.GLTTestResult.fail(
+            f"missing '{message}' in kernel log for {dev_name} after rebind, "
+            "consider backporting kernel commit b53232fd220a")
+
+
+test_tegra_i2c_dma_pio_fallback.attr.post_hooks = GLTCore.PostHooks.create(
+    postsuccess=_restore_tegra_i2c_binding,
+    postskip=_restore_tegra_i2c_binding,
+    postfail=_restore_tegra_i2c_binding,
+    postafail=_restore_tegra_i2c_binding,
+)
