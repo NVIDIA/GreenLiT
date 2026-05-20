@@ -33,7 +33,7 @@ class PostHooks:
     """
     Optional hooks run by the framework after a test completes.
     The runner invokes the matching hook: PASS → postsuccess, SKIP → postskip,
-    FAIL → postfail, AFAIL → postafail. Each slot is a callable(scheduler, attr, logger).
+    FAIL → postfail, AFAIL → postafail, WARN → postwarn. Each slot is a callable(scheduler, attr, logger).
     """
 
     def __init__(self):
@@ -41,7 +41,9 @@ class PostHooks:
         self.postskip = None
         self.postafail = None
         self.postfail = None
+        self.postwarn = None
 
+    # pylint: disable=too-many-arguments,too-many-positional-arguments
     @classmethod
     def create(
         cls,
@@ -49,6 +51,7 @@ class PostHooks:
         postskip=None,
         postafail=None,
         postfail=None,
+        postwarn=None,
     ):
         """
         Build a PostHooks instance for the given callables. Assign the return value
@@ -61,7 +64,9 @@ class PostHooks:
         hooks.postskip = postskip if postskip is not None else (lambda _s, _a, _l: None)
         hooks.postafail = postafail if postafail is not None else (lambda _s, _a, _l: None)
         hooks.postfail = postfail if postfail is not None else (lambda _s, _a, _l: None)
+        hooks.postwarn = postwarn if postwarn is not None else (lambda _s, _a, _l: None)
         return hooks
+    # pylint: enable=too-many-arguments,too-many-positional-arguments
 
     @staticmethod
     def for_conditional_reboot(trigger_key: str, condition_fn: Callable[[], bool]):
@@ -443,6 +448,10 @@ class GLTTestFail(Exception):
     """Exception class for failed GLT test case"""
 
 
+class GLTTestWarn(Exception):
+    """Exception class for warned GLT test case"""
+
+
 class GLTTestResult(Enum):
     """GLT Test results"""
 
@@ -450,6 +459,7 @@ class GLTTestResult(Enum):
     PASS = "PASSED"
     AFAIL = "Allowed FAILURE"
     FAIL = "FAILED"
+    WARN = "WARNED"
     NA = "N/A"
 
     @classmethod
@@ -461,6 +471,7 @@ class GLTTestResult(Enum):
             cls.SKIP: "\033[33m",  # Yellow
             cls.AFAIL: "\033[34m",  # Blue
             cls.NA: "\033[35m",  # Magenta
+            cls.WARN: "\033[36m",  # Cyan
         }
 
     @classmethod
@@ -497,6 +508,20 @@ class GLTTestResult(Enum):
             func.attr.result = (GLTTestResult.FAIL, reason)
 
         raise GLTTestFail(reason)
+
+    @staticmethod
+    def warn(reason="", func=None):
+        """Warn from the test case and apply reason to function"""
+        if not func:
+            caller_frame = inspect.stack()[1]
+            caller_func = caller_frame.function
+            func = caller_frame.frame.f_globals.get(caller_func)
+        if hasattr(func, "__wrapped__"):
+            func.__wrapped__.attr.result = (GLTTestResult.WARN, reason)
+        elif hasattr(func, "attr"):
+            func.attr.result = (GLTTestResult.WARN, reason)
+
+        raise GLTTestWarn(reason)
 
 
 # pylint: disable=too-many-instance-attributes

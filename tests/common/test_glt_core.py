@@ -12,6 +12,7 @@ from src.common.glt_core import (
     GLTTestAttr,
     GLTTestSkip,
     GLTTestFail,
+    GLTTestWarn,
     GLTTestResult,
     GLTRequires,
     GLTScheduler,
@@ -311,7 +312,7 @@ class TestGLTCore(GLTTestBase):
         self.assertTrue(len(output) > 0)
 
     def test_test_exceptions(self):
-        """Test GLTTestSkip and GLTTestFail exceptions"""
+        """Test GLTTestSkip, GLTTestFail, and GLTTestWarn exceptions"""
         # Test GLTTestSkip
         with self.assertRaises(GLTTestSkip):
             raise GLTTestSkip("Skip reason")
@@ -319,6 +320,10 @@ class TestGLTCore(GLTTestBase):
         # Test GLTTestFail
         with self.assertRaises(GLTTestFail):
             raise GLTTestFail("Fail reason")
+
+        # Test GLTTestWarn
+        with self.assertRaises(GLTTestWarn):
+            raise GLTTestWarn("Warn reason")
 
     def test_requires(self):
         """Test the GLTRequires class"""
@@ -441,15 +446,17 @@ class TestGLTCore(GLTTestBase):
         self.assertEqual(GLTTestResult.PASS.value, "PASSED")
         self.assertEqual(GLTTestResult.AFAIL.value, "Allowed FAILURE")
         self.assertEqual(GLTTestResult.FAIL.value, "FAILED")
+        self.assertEqual(GLTTestResult.WARN.value, "WARNED")
         self.assertEqual(GLTTestResult.NA.value, "N/A")
 
         # Test colors method
         colors = GLTTestResult.colors()
-        self.assertEqual(len(colors), 5)
+        self.assertEqual(len(colors), 6)
         self.assertIn(GLTTestResult.SKIP, colors)
         self.assertIn(GLTTestResult.PASS, colors)
         self.assertIn(GLTTestResult.AFAIL, colors)
         self.assertIn(GLTTestResult.FAIL, colors)
+        self.assertIn(GLTTestResult.WARN, colors)
         self.assertIn(GLTTestResult.NA, colors)
 
         # Test colorize method
@@ -476,6 +483,11 @@ class TestGLTCore(GLTTestBase):
         colored = GLTTestResult.colorize(GLTTestResult.NA)
         self.assertIn(GLTTestResult.NA.value, colored)
         self.assertIn("\033[35m", colored)  # Magenta color
+        self.assertIn("\033[0m", colored)  # Reset color
+
+        colored = GLTTestResult.colorize(GLTTestResult.WARN)
+        self.assertIn(GLTTestResult.WARN.value, colored)
+        self.assertIn("\033[36m", colored)  # Cyan color
         self.assertIn("\033[0m", colored)  # Reset color
 
         # Test skip static method with custom function
@@ -514,6 +526,24 @@ class TestGLTCore(GLTTestBase):
         )
         self.assertEqual(
             fail_test_func.__wrapped__.attr.result[1], "Fail reason"
+        )
+
+        # Test warn static method with custom function
+        @GLTTestAttr(cat="test_cat")
+        def warn_test_func():
+            return "should warn"
+
+        try:
+            GLTTestResult.warn("Warn reason", warn_test_func)
+        except GLTTestWarn:
+            pass
+
+        # Verify the result was set
+        self.assertEqual(
+            warn_test_func.__wrapped__.attr.result[0], GLTTestResult.WARN
+        )
+        self.assertEqual(
+            warn_test_func.__wrapped__.attr.result[1], "Warn reason"
         )
 
     def test_scheduler(self):

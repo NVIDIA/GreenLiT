@@ -95,6 +95,7 @@ class TestGLTLogger(GLTTestBase):
             GLTCore.GLTTestResult.PASS,
             GLTCore.GLTTestResult.SKIP,
             GLTCore.GLTTestResult.AFAIL,
+            GLTCore.GLTTestResult.WARN,
             GLTCore.GLTTestResult.NA,
         ):
             record = logging.LogRecord(

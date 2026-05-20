@@ -77,6 +77,7 @@ class ColorFormatter(GltFormatter):
                        GLTCore.GLTTestResult.PASS,
                        GLTCore.GLTTestResult.SKIP,
                        GLTCore.GLTTestResult.AFAIL,
+                       GLTCore.GLTTestResult.WARN,
                        GLTCore.GLTTestResult.NA):
             if result.value in base_message:
                 base_message = base_message.replace(result.value,
