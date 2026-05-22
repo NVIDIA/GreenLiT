@@ -281,6 +281,8 @@ def perform_tests(logger, scheduler):
                 res, reason = attr.func.allow_failure.can_fail()
                 if not res:
                     attr.result = (GLTCore.GLTTestResult.AFAIL, reason)
+        except GLTCore.GLTTestWarn as e:
+            test_logger.info("[%s] %s", attr.result[0].value, e)
         finally:
             scheduler.progress_update(attr.name, "Result", attr.result[0].value)
             scheduler.progress_update(attr.name, "ResultReason", attr.result[1])
@@ -297,6 +299,8 @@ def perform_tests(logger, scheduler):
                 post_hooks.postfail(scheduler, attr, test_logger)
             elif attr.result[0] == GLTCore.GLTTestResult.AFAIL:
                 post_hooks.postafail(scheduler, attr, test_logger)
+            elif attr.result[0] == GLTCore.GLTTestResult.WARN:
+                post_hooks.postwarn(scheduler, attr, test_logger)
             # Hook may not return (e.g. reboot); no further tests this run.
 
     ret, reason = glt_utils.collect_logs(scheduler.log_dir)
@@ -367,7 +371,7 @@ def setup_session(initial_args):
 def show_report(logger, scheduler):
     """Print the test report."""
     detail = ""
-    p = f = af = s = 0
+    p = f = af = s = w = 0
     for test_obj in scheduler.test_list:
         attr = test_obj.__wrapped__.attr
         reason = ""
@@ -382,6 +386,9 @@ def show_report(logger, scheduler):
         elif attr.result[0].value == GLTCore.GLTTestResult.SKIP.value:
             s += 1
             reason = f"- {_truncate_reason(attr.result[1])}"
+        elif attr.result[0].value == GLTCore.GLTTestResult.WARN.value:
+            w += 1
+            reason = f"- {_truncate_reason(attr.result[1])}"
         detail += f"\
 \t[{attr.result[0].value}] {scheduler.get_test_case_name(test_obj)}\n"
         if reason:
@@ -395,6 +402,7 @@ Summary:
 \t{GLTCore.GLTTestResult.FAIL.value:<18}: {f}
 \t{GLTCore.GLTTestResult.AFAIL.value:<18}: {af}
 \t{GLTCore.GLTTestResult.SKIP.value:<18}: {s}
+\t{GLTCore.GLTTestResult.WARN.value:<18}: {w}
 
 Details:
 {detail}

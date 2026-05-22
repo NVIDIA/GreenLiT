@@ -14,7 +14,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
   - [Naming and Formatting Rules](#naming-and-formatting-rules)
   - [Using GLTTestAttr](#using-glttestattr)
   - [Leveraging GreenLiT Utilities](#leveraging-greenlit-utilities)
-  - [Test Results: FAILED or SKIPPED](#test-results-failed-or-skipped)
+  - [Test Results: FAILED, SKIPPED, or WARNING](#test-results-failed-skipped-or-warning)
   - [Managing Test Case Dependencies](#managing-test-case-dependencies)
   - [Post-Test Actions with Post Hooks](#post-test-actions-with-post-hooks)
 - [Create a Test Case that Requires Reboots](#create-a-test-case-that-requires-reboots)
@@ -229,16 +229,19 @@ Various functions and methods are available under:
 
 If existing functions under these modules require an update to fit your needs, or if you feel that the commands you are about to use would likely be reused in other test cases in the future, instead of creating the steps inside your new test case, please update these modules and have your test case call them.
 
-### Test Results: FAILED or SKIPPED
+### Test Results: FAILED, SKIPPED, or WARNING
 
-Use `glt_core`'s test result methods to tell GreenLiT to fail or skip a test:
+Use `glt_core`'s test result methods to tell GreenLiT to fail, skip, or warn from a test:
 
 ```python
 GLTCore.GLTTestResult.skip("<error message>")
 GLTCore.GLTTestResult.fail("<error message>")
+GLTCore.GLTTestResult.warn("<advisory message>")
 ```
 
-**By default**, if none of the conditions required to skip or fail a test case are met, the test case **passes**.
+Use `warn()` when the test detects an advisory condition — something worth surfacing in the report but not a hard failure (e.g., a deprecated configuration, a suboptimal-but-functional hardware state). Like `skip()` and `fail()`, `warn()` stops the test immediately and must only be called from a function decorated with `@GLTCore.GLTTestAttr()`.
+
+**By default**, if none of the conditions required to skip, fail, or warn are met, the test case **passes**.
 
 **See also**: [Appendix: Allowing test result exceptions](#appendix-allowing-test-result-exceptions) for how to dynamically allow certain cases to be skipped and failed cases to not count towards fails. Note that these circumstances are usually special-case scenarios where the fail/skip criteria is not a long term logic that should go into the main test case function (e.g., ignore failure during bug fix period).
 

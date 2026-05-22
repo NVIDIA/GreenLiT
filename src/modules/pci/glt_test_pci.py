@@ -17,6 +17,7 @@
 Python script to test PCI.
 """
 
+import os
 import platform
 import re
 import subprocess
@@ -230,6 +231,125 @@ def test_pci_secondary_mabort(_, logger):
             GLTCore.GLTTestResult.fail(fail_msg)
     except subprocess.CalledProcessError as e:
         GLTCore.GLTTestResult.fail(f"Failed to run 'lspci -vv': {e}")
+
+
+def _has_usb_devices_behind_hub(controller_bdf: str) -> tuple[bool, str]:
+    """Return (found, reason) where found is True if a USB device is enumerated behind a hub.
+
+    """
+    ctrl_path = f"/sys/bus/pci/devices/{controller_bdf}"
+    bus_numbers = []
+    try:
+        for entry in os.listdir(ctrl_path):
+            if entry.startswith("usb") and entry[3:].isdigit():
+                bus_numbers.append(entry[3:])
+    except OSError as e:
+        return False, f"unable to inspect {ctrl_path}: {e}"
+    if not bus_numbers:
+        return False, f"no USB bus found under {ctrl_path}"
+
+    bus_alt = "|".join(re.escape(b) for b in bus_numbers)
+    behind_hub_re = re.compile(r"^(?:" + bus_alt + r")-\d+(?:\.\d+)+$")
+    try:
+        found = any(behind_hub_re.match(name) for name in os.listdir("/sys/bus/usb/devices"))
+    except OSError as e:
+        return False, f"unable to inspect /sys/bus/usb/devices: {e}"
+    if not found:
+        return False, "no USB devices enumerated behind hub"
+    return True, ""
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
+def test_aspeed_ast1150_bridge_alias_quirk(_, logger):
+    """
+    Verify devices behind an ASPEED AST1150 bridge are not affected by missing
+    PCI_BRIDGE_NO_ALIAS quirk.
+    If USB host controllers are present the test additionally checks that USB
+    devices are reachable behind the ASPEED hub.
+
+    JIRA: DGX-16330
+    PATCH: https://git.kernel.org/torvalds/c/eeb95c07d5fc
+    PATCH: https://git.kernel.org/torvalds/c/550a190494a0
+    PATCH: https://github.com/NVIDIA/NV-Kernels/commit/738fff0e2060
+    """
+    if not glt_utils.is_cli_available("lspci"):
+        GLTCore.GLTTestResult.skip("lspci not available; install 'pciutils' to perform the test.")
+
+    ast1150_bdfs = pci_utils.get_bdfs_by_pci_id(
+        pci_utils.ASPEED_VENDOR_ID,
+        pci_utils.ASPEED_AST1150_DEVICE_ID,
+    )
+    if not ast1150_bdfs:
+        GLTCore.GLTTestResult.skip(
+            "ASPEED AST1150 PCI-to-PCI bridge not found; quirk is not observable."
+        )
+
+    logger.info("Found ASPEED AST1150 bridge at: %s", ", ".join(ast1150_bdfs))
+
+    all_children: list[tuple[str, str]] = []  # (bridge_bdf, child_bdf)
+    for bridge_bdf in ast1150_bdfs:
+        for child_bdf in pci_utils.get_pci_children(bridge_bdf):
+            all_children.append((bridge_bdf, child_bdf))
+            logger.info("Found device %s behind AST1150 %s.", child_bdf, bridge_bdf)
+
+    if not all_children:
+        GLTCore.GLTTestResult.fail(
+            "No devices found behind AST1150; expected child devices on NVIDIA platforms."
+        )
+
+    aliasing_bdfs = []
+    usb_controllers: list[tuple[str, str]] = []  # (bridge_bdf, usb_bdf)
+    for bridge_bdf, child_bdf in all_children:
+        if glt_utils.check_kernel_log(f"pci {child_bdf}: Aliasing StreamID"):
+            aliasing_bdfs.append(child_bdf)
+            logger.error(
+                "Device %s behind AST1150 %s: kernel log shows 'Aliasing StreamID' — "
+                "PCI_BRIDGE_NO_ALIAS quirk is missing, DMA is broken.",
+                child_bdf, bridge_bdf,
+            )
+        dev_class = pci_utils.get_pci_class(child_bdf)
+        if dev_class and dev_class.startswith(pci_utils.PCI_CLASS_USB_HOST):
+            usb_controllers.append((bridge_bdf, child_bdf))
+            logger.info("USB controller %s found behind AST1150 %s.", child_bdf, bridge_bdf)
+
+    if aliasing_bdfs:
+        GLTCore.GLTTestResult.fail(
+            f"Aliasing StreamID errors in kernel log for devices behind AST1150: "
+            f"{', '.join(aliasing_bdfs)}. "
+            "The AST1150 PCI_BRIDGE_NO_ALIAS quirk is missing; DMA will be broken. "
+            "Apply https://git.kernel.org/torvalds/c/eeb95c07d5fc or equivalent."
+        )
+
+    if not usb_controllers:
+        logger.info("No USB controllers behind AST1150; hub enumeration check not applicable.")
+        return
+
+    no_devices_behind_hub = []  # list of (usb_bdf, reason)
+    for bridge_bdf, usb_bdf in usb_controllers:
+        ok, reason = _has_usb_devices_behind_hub(usb_bdf)
+        if not ok:
+            no_devices_behind_hub.append((usb_bdf, reason))
+            logger.warning(
+                "USB controller %s behind AST1150 %s: %s",
+                usb_bdf, bridge_bdf, reason,
+            )
+        else:
+            logger.info(
+                "USB controller %s behind AST1150 %s: USB devices behind hub OK.",
+                usb_bdf, bridge_bdf,
+            )
+
+    if no_devices_behind_hub:
+        details = "; ".join(f"{bdf}: {reason}" for bdf, reason in no_devices_behind_hub)
+        GLTCore.GLTTestResult.warn(
+            f"USB host controllers behind AST1150 with issues: {details}. "
+            "If no USB devices behind hub, apply "
+            "https://github.com/NVIDIA/NV-Kernels/commit/738fff0e2060"
+        )
 
 
 _acs_kexec_conditional_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
