@@ -11,7 +11,7 @@ GreenLiT uses Poetry for dependency management and packaging. Here's how to set 
 
 ## Requirements
 
-- Python 3.9 or higher
+- Python 3.10 or higher
 - Root/sudo privileges for system-level installation
 - Clone greenlit repository or untar source tarball
 
