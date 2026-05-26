@@ -18,6 +18,10 @@ set -e
 
 UNINSTALL=false
 LOCAL_WHL_DIR=""
+PYTHON_CMD="${PYTHON_CMD:-python3}"
+INSTALL_CONFIG="/usr/share/greenlit/install.env"
+SAVED_PYTHON=""
+SAVED_SCRIPTS=""
 
 # Default configuration for system-level installation
 export PIP_BREAK_SYSTEM_PACKAGES="${PIP_BREAK_SYSTEM_PACKAGES:-1}"
@@ -36,6 +40,72 @@ check_command() {
     return 1
   fi
   return 0
+}
+
+ensure_python_cmd() {
+  if ! check_command "${PYTHON_CMD}"; then
+    echo "ERROR: Python command '${PYTHON_CMD}' is not available."
+    echo "Set PYTHON_CMD to a Python >= 3.9 interpreter if needed."
+    exit 1
+  fi
+
+  PYTHON_CMD="$(command -v "${PYTHON_CMD}")"
+
+  if ! "${PYTHON_CMD}" - <<'PY' >/dev/null 2>&1
+import sys
+if sys.version_info < (3, 9):
+    raise SystemExit(1)
+PY
+  then
+    echo "ERROR: ${PYTHON_CMD} must be Python >= 3.9 for GreenLiT installation."
+    echo "Set PYTHON_CMD to a supported interpreter, e.g. PYTHON_CMD=python3.11."
+    exit 1
+  fi
+
+  if ! "${PYTHON_CMD}" -m pip --version >/dev/null 2>&1; then
+    echo "ERROR: pip is required for ${PYTHON_CMD}."
+    echo "Please install pip for ${PYTHON_CMD} and rerun install.sh."
+    exit 1
+  fi
+
+  SAVED_PYTHON="${PYTHON_CMD}"
+  SAVED_SCRIPTS="$("${PYTHON_CMD}" - <<'PY'
+import sysconfig
+print(sysconfig.get_path("scripts"))
+PY
+)"
+  echo "Using ${PYTHON_CMD} for GreenLiT Python package installation"
+}
+
+load_install_config() {
+  if [ -f "${INSTALL_CONFIG}" ]; then
+    # shellcheck disable=SC1090
+    . "${INSTALL_CONFIG}"
+  fi
+}
+
+write_install_config() {
+  mkdir -p /usr/share/greenlit
+  {
+    printf 'SAVED_PYTHON=%q\n' "${SAVED_PYTHON:-${PYTHON_CMD}}"
+    printf 'SAVED_SCRIPTS=%q\n' "${SAVED_SCRIPTS:-/usr/local/bin}"
+  } > "${INSTALL_CONFIG}"
+}
+
+enable_libvirt_services() {
+  if ! check_command virsh || ! check_command systemctl; then
+    return
+  fi
+
+  if systemctl enable --now libvirtd virtlogd virtlockd 2>/dev/null; then
+    return
+  fi
+  if systemctl enable --now virtqemud virtlogd virtlockd 2>/dev/null; then
+    return
+  fi
+
+  echo "WARNING: Unable to enable libvirt services automatically."
+  echo "WARNING: Please start libvirtd or virtqemud before running virtualization tests."
 }
 
 # Function to print usage information
@@ -93,22 +163,27 @@ parse_args() {
 # Function to check and update sudo secure_path
 check_sudo_secure_path() {
   echo "Checking sudo secure_path configuration..."
+  local scripts_dir="${SAVED_SCRIPTS:-/usr/local/bin}"
   if [ -f /etc/sudoers ] && grep -q "secure_path" /etc/sudoers; then
-    if ! grep -q "secure_path.*\/usr\/local\/bin" /etc/sudoers; then
-      echo "WARNING: /usr/local/bin not found in sudo secure_path"
+    if ! grep -q "secure_path.*${scripts_dir}" /etc/sudoers; then
+      echo "WARNING: ${scripts_dir} not found in sudo secure_path"
       echo "This may cause issues when running 'sudo glt-test-suite'"
       echo
       echo "Options to fix this issue:"
-      echo "1. Edit /etc/sudoers with 'sudo visudo' and add /usr/local/bin to secure_path"
-      echo "2. Create a symlink: sudo ln -s /usr/local/bin/glt-test-suite /usr/bin/glt-test-suite"
-      echo "3. Use the full path when running: sudo /usr/local/bin/glt-test-suite"
+      echo "1. Edit /etc/sudoers with 'sudo visudo' and add ${scripts_dir} to secure_path"
+      echo "2. Create a symlink: sudo ln -s ${scripts_dir}/glt-test-suite /usr/bin/glt-test-suite"
+      echo "3. Use the full path when running: sudo ${scripts_dir}/glt-test-suite"
       echo
-      read -p "Would you like to create a symlink to /usr/bin/glt-test-suite? (y/n): " -n 1 -r
-      echo
-      if [[ $REPLY =~ ^[Yy]$ ]]; then
-        echo "Creating symlink from /usr/local/bin/glt-test-suite to /usr/bin/glt-test-suite..."
-        ln -sf /usr/local/bin/glt-test-suite /usr/bin/glt-test-suite
-        echo "Symlink created successfully"
+      if [[ -t 0 ]]; then
+        read -p "Would you like to create a symlink to /usr/bin/glt-test-suite? (y/n): " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+          echo "Creating symlink from ${scripts_dir}/glt-test-suite to /usr/bin/glt-test-suite..."
+          ln -sf "${scripts_dir}/glt-test-suite" /usr/bin/glt-test-suite
+          echo "Symlink created successfully"
+        fi
+      else
+        echo "Skipping symlink prompt because stdin is not interactive."
       fi
     fi
   fi
@@ -127,6 +202,7 @@ install_prerequisites() {
     apt install -y ipmitool linux-tools-common
     apt install -y stress-ng # TPM QSPI interrupt timeout test and other stress tests
     apt install -y kexec-tools
+    apt install -y libvirt-clients libvirt-daemon-system qemu-system-arm qemu-utils # virsh/libvirt tests
 
     # Try to install kernel headers with error handling
     if ! apt install -y linux-headers-"$(uname -r)"; then
@@ -142,15 +218,18 @@ install_prerequisites() {
     echo "Red Hat/Fedora-based system detected"
     echo "Installing required system packages..."
     dnf install -y python3-pip tar ipmitool perf freeipmi kernel-devel kernel-headers libgpiod-utils stress-ng kexec-tools
+    dnf install -y libvirt-client libvirt-daemon libvirt-daemon-driver-qemu qemu-kvm qemu-img
   elif check_network && check_command zypper; then
     echo "openSUSE/SLES system detected"
     echo "Installing required system packages..."
     zypper --non-interactive refresh
     zypper --non-interactive install python3-pip tar ipmitool perf freeipmi kernel-default-devel linux-glibc-devel libgpiod stress-ng kexec-tools
+    zypper --non-interactive install libvirt-client libvirt-daemon libvirt-daemon-qemu qemu-arm qemu-tools
   elif check_network && check_command yum; then
     echo "Older Red Hat-based system detected"
     echo "Installing required system packages..."
     yum install -y python3-pip tar ipmitool perf freeipmi libgpiod-utils stress-ng kexec-tools
+    yum install -y libvirt-client libvirt-daemon libvirt-daemon-driver-qemu qemu-kvm qemu-img
   else
     echo "WARNING: Unable to detect package manager or network unavailable."
     echo "WARNING: Manual package installation required."
@@ -162,19 +241,19 @@ install_prerequisites() {
     echo "  - freeipmi"
     echo "  - stress-ng"
     echo "  - kexec-tools"
+    echo "  - virsh/libvirt and qemu-system-aarch64 or qemu-kvm support"
     echo "  - Linux kernel headers (matching your running kernel)"
   fi
 
-  if ! check_command pip3; then
-    echo "ERROR: pip3 is required but not installed. Please install Python pip manually."
-    exit 1
-  fi
+  enable_libvirt_services
+
+  ensure_python_cmd
 }
 
 uninstall_existing_greenlit() {
-  if pip3 show greenlit >/dev/null 2>&1; then
+  if "${PYTHON_CMD}" -m pip show greenlit >/dev/null 2>&1; then
     echo "Uninstalling existing GreenLiT package via pip..."
-    if ! pip3 uninstall -y greenlit; then
+    if ! "${PYTHON_CMD}" -m pip uninstall -y greenlit; then
       echo "ERROR: Existing GreenLiT package could not be uninstalled."
       exit 1
     fi
@@ -187,7 +266,7 @@ install_greenlit() {
   uninstall_existing_greenlit
 
   # Install from pyproject.toml (pip ≥ 21.3)
-  if ! pip3 install --ignore-installed .; then
+  if ! "${PYTHON_CMD}" -m pip install --ignore-installed .; then
     echo "ERROR: pip installation failed. Please check your Python environment."
     exit 1
   fi
@@ -219,7 +298,7 @@ install_from_local_wheels() {
   fi
 
   # Install wheels without internet access
-  if ! pip3 install --ignore-installed --no-index --find-links "$LOCAL_WHL_DIR" "${WHL_PKGS[@]}"; then
+  if ! "${PYTHON_CMD}" -m pip install --ignore-installed --no-index --find-links "$LOCAL_WHL_DIR" "${WHL_PKGS[@]}"; then
     echo "ERROR: Local wheel installation failed"
     exit 1
   fi
@@ -244,6 +323,7 @@ setup_configuration() {
     # Ensure all scripts are executable
     find /usr/share/greenlit/executing_dir -type f -name "*.sh" -exec chmod +x {} \;
   fi
+  write_install_config
 }
 
 setup_systemd() {
@@ -251,7 +331,8 @@ setup_systemd() {
   mkdir -p /usr/local/lib/systemd/system
 
   cp confs/greenlit.service /usr/local/lib/systemd/system/
-  sed -i 's|/usr/bin/glt-test-suite|/usr/local/bin/glt-test-suite|' /usr/local/lib/systemd/system/greenlit.service
+  sed -i "s|/usr/bin/glt-test-suite|${SAVED_SCRIPTS:-/usr/local/bin}/glt-test-suite|" \
+    /usr/local/lib/systemd/system/greenlit.service
 
   cp confs/greenlit.timer /usr/local/lib/systemd/system/
 
@@ -264,6 +345,7 @@ uninstall_greenlit() {
   echo "           Starting GreenLiT Uninstallation            "
   echo "======================================================="
   echo
+  load_install_config
 
   echo "Stopping and disabling GreenLiT systemd service..."
   systemctl disable --now greenlit.service 2>/dev/null || true
@@ -280,12 +362,15 @@ uninstall_greenlit() {
   rm -rf /usr/share/greenlit
 
   echo "Uninstalling GreenLiT package..."
-  if check_command pip3; then
-    pip3 uninstall -y greenlit 2>/dev/null || true
+  local uninstall_python="${SAVED_PYTHON:-${PYTHON_CMD}}"
+  if check_command "${uninstall_python}" && "${uninstall_python}" -m pip --version >/dev/null 2>&1; then
+    "${uninstall_python}" -m pip uninstall -y greenlit 2>/dev/null || true
+  else
+    echo "WARNING: Skipping Python package uninstall because ${uninstall_python} with pip is unavailable."
   fi
 
   echo "Removing GreenLiT executables..."
-  rm -f /usr/local/bin/glt-test-suite
+  rm -f "${SAVED_SCRIPTS:-/usr/local/bin}/glt-test-suite"
   rm -f /usr/bin/glt-test-suite
 
   echo

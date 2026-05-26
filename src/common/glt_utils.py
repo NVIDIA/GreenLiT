@@ -28,6 +28,7 @@ import shutil
 import signal
 import subprocess
 
+from common.kernel_cmdline import KernelCmdlineManager
 from common.nv_device import NvDev
 
 
@@ -131,6 +132,13 @@ def _find_sign_file():
         return sorted(matches)[-1]  # Use the latest version
 
     return None
+
+
+def _get_kernel_cmdline_transaction_root(session_dir):
+    """Return the kernel command-line metadata directory for a session."""
+    if session_dir is None or not str(session_dir).strip():
+        return None
+    return os.path.join(session_dir, "boot-config")
 
 
 def sign_kernel_module(module_path, logger=None):
@@ -392,8 +400,15 @@ def create_cache_session() -> str:
 def get_cache_session_list() -> list:
     """Returns a list of cached session path"""
     cache_dir = "/var/cache/greenlit"
+    if not os.path.isdir(cache_dir):
+        return []
     entries = os.listdir(cache_dir)
-    files = [os.path.join(cache_dir, f) for f in entries if os.path.isdir(os.path.join(cache_dir, f))]
+    files = []
+    for entry in entries:
+        session_path = os.path.join(cache_dir, entry)
+        progress_path = os.path.join(session_path, "glt-test-suite", "test_progress.json")
+        if os.path.isfile(progress_path):
+            files.append(session_path)
     return sorted(files)
 
 
@@ -534,6 +549,70 @@ def parse_linux_version(version):
                     parts.append(subpart)
 
     return parts
+
+
+def append_kernel_parameter(parameter, test_case_name=None, session_dir=None) -> tuple[bool, str]:
+    """
+    Append a kernel parameter through the detected boot backend.
+
+    Args:
+        parameter: Kernel command-line token to append.
+        test_case_name: GLT test case name used to track GreenLiT-owned config.
+        session_dir: GreenLiT session log directory. Kernel command-line
+            metadata is stored under ``<session_dir>/boot-config``.
+
+    Returns:
+        tuple: (True, "") if the append is complete or already configured;
+            otherwise (False, reason).
+    """
+    result = KernelCmdlineManager.detect(
+        transaction_root=_get_kernel_cmdline_transaction_root(session_dir)
+    ).append_parameter(
+        parameter, transaction_id=test_case_name
+    )
+    return result.ok, result.reason
+
+
+def check_kernel_parameter(parameter, test_case_name=None, session_dir=None):
+    """
+    Check whether a kernel parameter is active, configured, or GreenLiT-owned.
+
+    Args:
+        parameter: Kernel command-line token to check.
+        test_case_name: GLT test case name used to find GreenLiT-owned config.
+        session_dir: GreenLiT session log directory. Kernel command-line
+            metadata is read from ``<session_dir>/boot-config``.
+
+    Returns:
+        KernelParameterResult: Backend result with active/configured/owned state.
+    """
+    return KernelCmdlineManager.detect(
+        transaction_root=_get_kernel_cmdline_transaction_root(session_dir)
+    ).check_parameter(
+        parameter, transaction_id=test_case_name
+    )
+
+
+def remove_kernel_parameter(parameter, test_case_name=None, session_dir=None) -> tuple[bool, str]:
+    """
+    Remove a kernel parameter only from GreenLiT-owned boot config.
+
+    Args:
+        parameter: Kernel command-line token to remove.
+        test_case_name: GLT test case name used to find GreenLiT-owned config.
+        session_dir: GreenLiT session log directory. Kernel command-line
+            metadata is read from ``<session_dir>/boot-config``.
+
+    Returns:
+        tuple: (True, "") if the parameter is removed or was not GreenLiT-owned;
+            otherwise (False, reason).
+    """
+    result = KernelCmdlineManager.detect(
+        transaction_root=_get_kernel_cmdline_transaction_root(session_dir)
+    ).remove_parameter(
+        parameter, transaction_id=test_case_name
+    )
+    return result.ok, result.reason
 
 
 def reboot(testcase, sd):

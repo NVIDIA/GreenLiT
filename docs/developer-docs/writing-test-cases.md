@@ -14,6 +14,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
   - [Naming and Formatting Rules](#naming-and-formatting-rules)
   - [Using GLTTestAttr](#using-glttestattr)
   - [Leveraging GreenLiT Utilities](#leveraging-greenlit-utilities)
+  - [Using GLTLibvirt for Virtualization Tests](#using-gltlibvirt-for-virtualization-tests)
   - [Test Results: FAILED, SKIPPED, or WARNING](#test-results-failed-skipped-or-warning)
   - [Managing Test Case Dependencies](#managing-test-case-dependencies)
   - [Post-Test Actions with Post Hooks](#post-test-actions-with-post-hooks)
@@ -229,12 +230,84 @@ Various functions and methods are available under:
 
 If existing functions under these modules require an update to fit your needs, or if you feel that the commands you are about to use would likely be reused in other test cases in the future, instead of creating the steps inside your new test case, please update these modules and have your test case call them.
 
+### Using GLTLibvirt for Virtualization Tests
+
+Use `common.virt.glt_libvirt.GLTLibvirt` when a test case needs to create or
+manage local libvirt/QEMU domains. The helper centralizes `virsh` invocation,
+domain XML generation, debug logging, and common cleanup behavior.
+
+Before using it, fail or skip early if virtualization tools are unavailable:
+
+```python
+if not glt_utils.is_cli_available("virsh"):
+    GLTCore.GLTTestResult.fail("Please install 'virsh' to perform the test.")
+```
+
+Create the helper with the test logger. The constructor validates that `virsh`
+can connect to `qemu:///system`, so catch `ConnectionError` and convert it to a
+GreenLiT test result:
+
+```python
+try:
+    libvirt_conn = GLTLibvirt(logger=logger)
+except ConnectionError as e:
+    GLTCore.GLTTestResult.fail(str(e))
+```
+
+For direct-kernel boot domains, build XML through `generate_domain_xml()` and
+use `define_and_start()` for the common define/start flow:
+
+```python
+from common.virt.glt_libvirt import GLTLibvirt
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("stress")
+def test_my_virtualization_case(_, logger):
+    domain_name = "glt-my-test-vm"
+    libvirt_conn = GLTLibvirt(logger=logger)
+    xml_config = libvirt_conn.generate_domain_xml({
+        "domain_name": domain_name,
+        "memory_mb": 512,
+        "vcpus": 4,
+        "arch": "aarch64",
+        "kernel_path": "/var/lib/libvirt/boot/Image",
+        "initrd_path": "",
+        "kernel_args": "console=ttyAMA0 rdinit=/bin/sh panic=0",
+    })
+
+    try:
+        if not libvirt_conn.define_and_start(xml_config):
+            GLTCore.GLTTestResult.fail(f"Failed to start {domain_name}")
+
+        success, output, _ = libvirt_conn.run_virsh_command(["domstate", domain_name])
+        if not success or "running" not in output.lower():
+            GLTCore.GLTTestResult.fail(f"{domain_name} is not running: {output}")
+    finally:
+        libvirt_conn.cleanup(domain_name)
+```
+
+Guidelines:
+
+- Always clean up domains in a `finally` block. A failed test should not leave
+  `glt-*` domains behind for later test runs.
+- Use `define_and_start()` for the normal single-domain flow. Use `define()` and
+  `start()` separately only when a test needs to inspect or modify the domain
+  between those steps.
+- If a test creates many domains, destroy all domains first and then undefine
+  them. This mirrors stress scenarios where teardown fanout is part of the
+  behavior under test.
+- Keep generated kernel/initrd artifacts in a path libvirt can read, such as
+  `/var/lib/libvirt/boot`, and remove staged artifacts after the test.
+- The helper manages host-side libvirt only. Do not add guest command execution
+  APIs until a real test case needs them and the guest access method is clear.
+
 ### Test Results: FAILED, SKIPPED, or WARNING
 
 Use `glt_core`'s test result methods to tell GreenLiT to fail, skip, or warn from a test:
 
 ```python
-GLTCore.GLTTestResult.skip("<error message>")
+GLTCore.GLTTestResult.skip("<skip reason>")
 GLTCore.GLTTestResult.fail("<error message>")
 GLTCore.GLTTestResult.warn("<advisory message>")
 ```

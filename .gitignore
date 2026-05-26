@@ -5,13 +5,8 @@ poetry.lock
 *.tar.gz
 
 # Python cache
-src/common/__pycache__
-src/modules/__pycache__
-src/modules/*/__pycache__
-src/modules/*/*/__pycache__
-src/scripts/__pycache__
-tests/__pycache__
-tests/*/__pycache__
+**/__pycache__/
+*.py[cod]
 
 # Compiled CUDA binaries
 external_tests/iommu/test_tlb_shootdown

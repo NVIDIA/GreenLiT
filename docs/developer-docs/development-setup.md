@@ -7,6 +7,7 @@ GreenLiT uses Poetry for dependency management and packaging. Here's how to set 
 - [Requirements](#requirements)
 - [Setting up Development Environment](#setting-up-development-environment)
 - [Managing Dependencies](#managing-dependencies)
+- [Coding Style](#coding-style)
 
 ## Requirements
 
@@ -76,3 +77,6 @@ poetry show
 
 **Note**: `poetry add` and `poetry remove` automatically generate `poetry.lock`, please remove it manually since greenlit does not lock package versions.
 
+## Coding Style
+
+When adding or refactoring functions, keep them in alphabetical order within their local section unless lifecycle, dependency, or framework ordering is clearer. This applies to source files and related unit tests.

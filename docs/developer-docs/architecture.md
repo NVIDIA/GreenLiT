@@ -17,6 +17,7 @@ greenlit/
 ├── pyproject.toml          # Project build configuration
 ├── src/                    # Test framework source code
 │   ├── common/             # Common utilities
+│   │   └── virt/           # Libvirt/QEMU helper APIs for tests
 │   ├── greenlit/           # Main package
 │   └── modules/            # Test modules
 │       ├── acpi/           # ACPI and EFI tests
