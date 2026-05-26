@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 import tempfile
 from unittest.mock import MagicMock
 
@@ -269,6 +270,319 @@ class TestAnyCxlRegionCommitted(GLTTestBase):
         self.assertFalse(
             cxl_utils.any_cxl_region_committed(sysfs_root=self.tmpdir),
         )
+
+
+# ---------------------------------------------------------------------------
+# find_cxl_device_dvsec_base
+# ---------------------------------------------------------------------------
+
+LSPCI_VV_DEVICE_DVSEC_MATCH = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\tCapabilities: [600 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0000 Rev=2 Len=3c: CXL\n"
+)
+
+LSPCI_VV_DEVICE_DVSEC_WRONG_ID = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\tCapabilities: [600 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0003 Rev=2 Len=14: CXL\n"
+)
+
+LSPCI_VV_DEVICE_DVSEC_WRONG_VENDOR = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\tCapabilities: [600 v1] Designated Vendor-Specific: "
+    "Vendor=1234 ID=0000 Rev=2 Len=3c: Other\n"
+)
+
+LSPCI_VV_DEVICE_DVSEC_MULTI = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\tCapabilities: [400 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0003 Rev=2 Len=14: CXL\n"
+    "\tCapabilities: [600 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0000 Rev=2 Len=3c: CXL\n"
+    "\tCapabilities: [800 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0000 Rev=2 Len=3c: CXL\n"
+)
+
+
+class TestFindCxlDeviceDvsecBase(GLTTestBase):
+    """Tests for find_cxl_device_dvsec_base()."""
+
+    def test_returns_offset_when_device_dvsec_matches(self):
+        """Returns the bracketed offset from the matching Device DVSEC line."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_DEVICE_DVSEC_MATCH),
+        ) as run_mock:
+            self.assertEqual(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"), 0x600,
+            )
+        run_mock.assert_called_once_with(
+            ["lspci", "-vv", "-s", "0000:e1:00.0"],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_returns_first_matching_when_multiple(self):
+        """When multiple Device DVSECs exist, returns the first one seen."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_DEVICE_DVSEC_MULTI),
+        ):
+            self.assertEqual(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"), 0x600,
+            )
+
+    def test_returns_none_when_only_port_dvsec_present(self):
+        """A device with only the Port Extensions DVSEC (ID=0x0003) returns None."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_DEVICE_DVSEC_WRONG_ID),
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"),
+            )
+
+    def test_returns_none_on_wrong_vendor(self):
+        """Vendor != CXL Consortium yields None."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_DEVICE_DVSEC_WRONG_VENDOR),
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"),
+            )
+
+    def test_returns_none_when_lspci_missing(self):
+        """Returns None when lspci binary is not installed."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"),
+            )
+
+    def test_returns_none_on_calledprocesserror(self):
+        """Returns None when lspci exits non-zero (check=True raises)."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["lspci"]),
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"),
+            )
+
+    def test_returns_none_on_oserror(self):
+        """Returns None when lspci raises a generic OSError."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=OSError,
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_device_dvsec_base("0000:e1:00.0"),
+            )
+
+
+# ---------------------------------------------------------------------------
+# find_first_cxl_device_dvsec_bdf
+# ---------------------------------------------------------------------------
+
+LSPCI_D_TWO_DEVICES = (
+    "0000:00:01.0 PCI bridge: Some bridge\n"
+    "0000:e1:00.0 Coprocessor: Some accel\n"
+)
+
+
+def _make_lspci_dispatcher(d_stdout: str, per_bdf_stdout: dict[str, str]):
+    """Build a side_effect callable that responds to both lspci -D and
+    lspci -vv -s <bdf>. Unknown commands raise AssertionError so tests fail
+    loudly on unexpected calls.
+    """
+    def _side_effect(cmd, **_kwargs):
+        if cmd == ["lspci", "-D"]:
+            return _mock_run(stdout=d_stdout)
+        if len(cmd) == 4 and cmd[:3] == ["lspci", "-vv", "-s"]:
+            return _mock_run(stdout=per_bdf_stdout.get(cmd[3], ""))
+        raise AssertionError(f"unexpected subprocess.run call: {cmd!r}")
+    return _side_effect
+
+
+class TestFindFirstCxlDeviceDvsecBdf(GLTTestBase):
+    """Tests for find_first_cxl_device_dvsec_bdf()."""
+
+    def test_returns_first_bdf_with_device_dvsec(self):
+        """Skips devices without a Device DVSEC and returns the first that has one."""
+        side_effect = _make_lspci_dispatcher(
+            d_stdout=LSPCI_D_TWO_DEVICES,
+            per_bdf_stdout={
+                "0000:00:01.0": LSPCI_VV_DEVICE_DVSEC_WRONG_ID,
+                "0000:e1:00.0": LSPCI_VV_DEVICE_DVSEC_MATCH,
+            },
+        )
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run", side_effect=side_effect,
+        ):
+            self.assertEqual(
+                cxl_utils.find_first_cxl_device_dvsec_bdf(), "0000:e1:00.0",
+            )
+
+    def test_returns_none_when_no_device_dvsec_anywhere(self):
+        """Returns None when no device on the bus exposes a Device DVSEC."""
+        side_effect = _make_lspci_dispatcher(
+            d_stdout=LSPCI_D_TWO_DEVICES,
+            per_bdf_stdout={
+                "0000:00:01.0": LSPCI_VV_DEVICE_DVSEC_WRONG_ID,
+                "0000:e1:00.0": LSPCI_VV_DEVICE_DVSEC_WRONG_VENDOR,
+            },
+        )
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run", side_effect=side_effect,
+        ):
+            self.assertIsNone(cxl_utils.find_first_cxl_device_dvsec_bdf())
+
+    def test_returns_none_when_lspci_missing(self):
+        """Returns None when lspci binary is not installed."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            self.assertIsNone(cxl_utils.find_first_cxl_device_dvsec_bdf())
+
+    def test_returns_none_on_calledprocesserror(self):
+        """Returns None when lspci -D itself exits non-zero."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["lspci", "-D"]),
+        ):
+            self.assertIsNone(cxl_utils.find_first_cxl_device_dvsec_bdf())
+
+    def test_returns_none_when_no_devices(self):
+        """Empty lspci -D output yields None."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=""),
+        ):
+            self.assertIsNone(cxl_utils.find_first_cxl_device_dvsec_bdf())
+
+
+# ---------------------------------------------------------------------------
+# find_cxl_component_regs
+# ---------------------------------------------------------------------------
+
+LSPCI_VV_REGLOC_COMPONENT = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\tCapabilities: [800 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0008 Rev=0 Len=20: CXL\n"
+    "\t\tCXL RegisterLocator\n"
+    "\t\t\tBlock1: BIR: bar0, ID: component registers, offset: "
+    "0000000000ec0000\n"
+    "\t\t\tBlock2: BIR: bar0, ID: device registers, offset: "
+    "0000000000800000\n"
+)
+
+LSPCI_VV_REGLOC_NO_COMPONENT = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\tCapabilities: [800 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0008 Rev=0 Len=20: CXL\n"
+    "\t\tCXL RegisterLocator\n"
+    "\t\t\tBlock1: BIR: bar0, ID: device registers, offset: "
+    "0000000000800000\n"
+)
+
+LSPCI_VV_REGLOC_COMPONENT_BAR2 = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\t\t\tBlock3: BIR: bar2, ID: component registers, offset: "
+    "0000000000001000\n"
+)
+
+LSPCI_VV_REGLOC_MULTIPLE_COMPONENT = (
+    "0000:e1:00.0 Coprocessor: ...\n"
+    "\t\t\tBlock1: BIR: bar0, ID: component registers, offset: "
+    "0000000000ec0000\n"
+    "\t\t\tBlock4: BIR: bar4, ID: component registers, offset: "
+    "0000000000000000\n"
+)
+
+
+class TestFindCxlComponentRegs(GLTTestBase):
+    """Tests for find_cxl_component_regs()."""
+
+    def test_returns_bar_and_offset_for_component_block(self):
+        """Returns (bar, offset) from the first 'component registers' Block line."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_REGLOC_COMPONENT),
+        ) as run_mock:
+            self.assertEqual(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+                (0, 0xEC0000),
+            )
+        run_mock.assert_called_once_with(
+            ["lspci", "-vv", "-s", "0000:e1:00.0"],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_returns_none_when_no_component_block(self):
+        """Returns None when the Register Locator has only non-component blocks."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_REGLOC_NO_COMPONENT),
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+            )
+
+    def test_parses_non_bar0_correctly(self):
+        """Correctly parses Block lines with a BIR other than bar0."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_REGLOC_COMPONENT_BAR2),
+        ):
+            self.assertEqual(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+                (2, 0x1000),
+            )
+
+    def test_returns_first_when_multiple_component_blocks(self):
+        """When multiple 'component registers' blocks exist, returns the first."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            return_value=_mock_run(stdout=LSPCI_VV_REGLOC_MULTIPLE_COMPONENT),
+        ):
+            self.assertEqual(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+                (0, 0xEC0000),
+            )
+
+    def test_returns_none_when_lspci_missing(self):
+        """Returns None when lspci binary is not installed."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+            )
+
+    def test_returns_none_on_calledprocesserror(self):
+        """Returns None when lspci exits non-zero."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["lspci"]),
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+            )
+
+    def test_returns_none_on_oserror(self):
+        """Returns None on a generic OSError raised by lspci."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.subprocess.run",
+            side_effect=OSError,
+        ):
+            self.assertIsNone(
+                cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
+            )
 
 
 if __name__ == "__main__":

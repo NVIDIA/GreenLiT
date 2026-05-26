@@ -18,9 +18,11 @@ CXL bus tests.
 """
 
 import glob
+import mmap
 import os
 import platform
 import re
+import struct
 import subprocess
 import time
 
@@ -391,3 +393,349 @@ def test_cxl_switch_decoder_target_list_complete(_, logger):
             "No programmed interleaved CXL switch decoder found; "
             "patch path not exercised"
         )
+
+
+def _snapshot_dvsec(bdf: str, dvsec_off: int) -> dict[str, int]:
+    """
+    Read the Device DVSEC fields. Read via
+    /sys/bus/pci/devices/<bdf>/config and return them as {name: value}.
+    """
+    # (name, offset within Device DVSEC, access width: 'w'=u16, 'l'=u32)
+    saved_fields: list[tuple[str, int, str]] = [
+        ("CTRL",     0x0C, "w"),
+        ("CTRL2",    0x10, "w"),
+        ("LOCK",     0x14, "w"),
+        ("R0_SZ_HI", 0x18, "l"),
+        ("R0_SZ_LO", 0x1C, "l"),
+        ("R0_BS_HI", 0x20, "l"),
+        ("R0_BS_LO", 0x24, "l"),
+        ("R1_SZ_HI", 0x28, "l"),
+        ("R1_SZ_LO", 0x2C, "l"),
+        ("R1_BS_HI", 0x30, "l"),
+        ("R1_BS_LO", 0x34, "l"),
+    ]
+    cfg_path = f"/sys/bus/pci/devices/{bdf}/config"
+    with open(cfg_path, "rb") as f:
+        cfg = f.read()
+    out: dict[str, int] = {}
+    for name, offset, width in saved_fields:
+        fmt = "<H" if width == "w" else "<I"
+        (val,) = struct.unpack_from(fmt, cfg, dvsec_off + offset)
+        out[name] = val
+    return out
+
+
+# pylint: disable=too-many-locals
+def _snapshot_hdm(bdf: str, comp_bar: int, comp_off: int) -> dict[str, int]:
+    """
+    mmap resource<comp_bar>, walk the CXL Component Register CM cap array
+    at comp_off + CXL_CM_OFFSET to find the HDM Decoder cap (ID=0x5), then
+    read GLOBAL_CTRL and, for each decoder, BASE_LO/HI, SIZE_LO/HI, CTRL,
+    TL_LO/HI. Return a dict {name: int}.
+    """
+    # Offset of the CXL Component Register CM cap array within the component
+    # register block (CXL_CM_OFFSET in the kernel).
+    cxl_cm_offset = 0x1000
+    # CM Capability ID for HDM Decoder Capability (CXL_CM_CAP_CAP_ID_HDM).
+    cxl_cm_cap_id_hdm = 0x5
+    # 64 KiB is enough to cover the CM cap array plus all per-cap blocks
+    # (including HDM) on currently shipping CXL endpoints. Round up to the
+    # runtime page size so this works on both 4K (x86) and 64K (Grace/Vera
+    # ARM64) kernels.
+    page_size = mmap.PAGESIZE
+    read_span = 0x10000
+    map_base = comp_off & ~(page_size - 1)
+    map_span = (
+        (comp_off - map_base) + read_span + page_size - 1
+    ) & ~(page_size - 1)
+
+    resource_path = f"/sys/bus/pci/devices/{bdf}/resource{comp_bar}"
+    with open(resource_path, "rb") as f:
+        mm = mmap.mmap(
+            f.fileno(), map_span,
+            mmap.MAP_SHARED, mmap.PROT_READ,
+            offset=map_base,
+        )
+    try:
+        # All reads below are u32 little-endian at an absolute BAR offset
+        # `off`; the mmap starts at `map_base`, so the in-buffer position is
+        # `off - map_base`.
+        cm_base = comp_off + cxl_cm_offset
+        cap_hdr = struct.unpack_from("<I", mm, cm_base - map_base)[0]
+        cap_count = (cap_hdr >> 24) & 0xFF
+        hdm_cap_off: int | None = None
+        for i in range(1, cap_count + 1):
+            hdr = struct.unpack_from(
+                "<I", mm, (cm_base + 4 * i) - map_base,
+            )[0]
+            cap_id = hdr & 0xFFFF
+            cap_offset = (hdr >> 20) & 0xFFF
+            if cap_id == cxl_cm_cap_id_hdm:
+                hdm_cap_off = cap_offset
+                break
+        if hdm_cap_off is None:
+            return {}
+
+        hdm_base = cm_base + hdm_cap_off
+        # CXL r3.1 8.2.4.20.1 HDM Decoder Capability:
+        #   Decoder Count [3:0] encodes 1, 2, 4, 6, 8, ... decoders.
+        dec_count_field = struct.unpack_from(
+            "<I", mm, (hdm_base + 0x0) - map_base,
+        )[0] & 0xF
+        decoders = dec_count_field * 2 if dec_count_field else 1
+
+        out: dict[str, int] = {
+            "GLOBAL_CTRL": struct.unpack_from(
+                "<I", mm, (hdm_base + 0x4) - map_base,
+            )[0],
+        }
+        for d in range(decoders):
+            db = hdm_base + 0x10 + 0x20 * d
+            out[f"D{d}_BASE_LO"] = struct.unpack_from(
+                "<I", mm, (db + 0x00) - map_base,
+            )[0]
+            out[f"D{d}_BASE_HI"] = struct.unpack_from(
+                "<I", mm, (db + 0x04) - map_base,
+            )[0]
+            out[f"D{d}_SIZE_LO"] = struct.unpack_from(
+                "<I", mm, (db + 0x08) - map_base,
+            )[0]
+            out[f"D{d}_SIZE_HI"] = struct.unpack_from(
+                "<I", mm, (db + 0x0C) - map_base,
+            )[0]
+            out[f"D{d}_CTRL"] = struct.unpack_from(
+                "<I", mm, (db + 0x10) - map_base,
+            )[0]
+            out[f"D{d}_TL_LO"] = struct.unpack_from(
+                "<I", mm, (db + 0x14) - map_base,
+            )[0]
+            out[f"D{d}_TL_HI"] = struct.unpack_from(
+                "<I", mm, (db + 0x18) - map_base,
+            )[0]
+        return out
+    finally:
+        mm.close()
+# pylint: enable=too-many-locals
+
+
+def _restore_reset_method(_scheduler, attr, logger):
+    """
+    Restore /sys/bus/pci/devices/<bdf>/reset_method to its pre-test value.
+    """
+    state = getattr(attr, "cleanup_state", None)
+    if state is None:
+        return
+    bdf = state["bdf"]
+    orig = state["orig_reset_method"]
+    try:
+        with open(
+            f"/sys/bus/pci/devices/{bdf}/reset_method", "w", encoding="utf-8",
+        ) as f:
+            f.write(orig)
+    except OSError as e:
+        logger.warning(
+            "CXL cleanup: could not restore reset_method on %s: %s", bdf, e,
+        )
+
+
+# A failed cxl_bus reset can leave the CXL link in an indeterminate state;
+# a reboot is the only reliable recovery. The for_conditional_reboot pattern
+# with a `lambda: True` condition is effectively unconditional once the
+# gating progress key is recorded (just before the reset trigger).
+_cxl_bus_reset_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
+    "CxlBusResetTriggered",
+    lambda: True,
+)
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches,too-many-statements,too-many-locals
+def test_cxl_save_restore_across_cxl_bus_reset(sd, logger):
+    """
+    Verify that CXL Device DVSEC and HDM decoder state are preserved across
+    a `cxl_bus` PCI reset on a Type-2 CXL endpoint.
+
+    JIRA: DGX-16568
+    PATCH: 
+    https://lore.kernel.org/linux-cxl/SA3PR12MB9131BF1477CA8B87E8FD70EBBB40A@SA3PR12MB9131.namprd12.prod.outlook.com/T/#u
+    """
+
+    kconfig_path = "/boot/config-" + platform.release()
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.skip(
+            f"Kernel config not found at {kconfig_path}"
+        )
+    if kconfig.get("CONFIG_PCI_CXL") != "y":
+        GLTCore.GLTTestResult.skip(
+            "CONFIG_PCI_CXL is not enabled in the running kernel; "
+            "the CXL DVSEC/HDM save/restore code path under test does not exist"
+        )
+
+    if (not glt_utils.is_cli_available("lspci")
+            or not glt_utils.is_cli_available("setpci")):
+        GLTCore.GLTTestResult.skip(
+            "lspci/setpci not available; install pciutils"
+        )
+
+    bdf = cxl_utils.find_first_cxl_device_dvsec_bdf()
+    if bdf is None:
+        GLTCore.GLTTestResult.skip(
+            "No PCI device exposes a CXL Device DVSEC (Vendor=0x1E98, ID=0x0000)"
+        )
+    logger.info("Candidate CXL endpoint: %s", bdf)
+
+    if cxl_utils.any_cxl_region_committed():
+        GLTCore.GLTTestResult.skip(
+            "CXL regions are committed/online, "
+            "refusing to reset a device with active mappings"
+        )
+
+    # Stash cleanup state BEFORE the first reset_method write so any
+    # subsequent skip/fail path's post-hook can restore the original method.
+    reset_method_path = f"/sys/bus/pci/devices/{bdf}/reset_method"
+    try:
+        with open(reset_method_path, "r", encoding="utf-8") as f:
+            orig_reset_method = f.read().strip()
+    except OSError as e:
+        GLTCore.GLTTestResult.skip(
+            f"Could not read reset_method on {bdf}: {e}"
+        )
+    logger.info("Original reset_method on %s: %r", bdf, orig_reset_method)
+
+    test_cxl_save_restore_across_cxl_bus_reset.attr.cleanup_state = {
+        "bdf": bdf,
+        "orig_reset_method": orig_reset_method,
+    }
+
+    try:
+        with open(reset_method_path, "w", encoding="utf-8") as f:
+            f.write("cxl_bus")
+    except OSError as e:
+        GLTCore.GLTTestResult.skip(
+            f"cxl_bus not selectable as reset_method on {bdf}: {e}"
+        )
+    try:
+        with open(reset_method_path, "r", encoding="utf-8") as f:
+            selected = f.read().strip()
+    except OSError as e:
+        GLTCore.GLTTestResult.skip(
+            f"Could not read back reset_method on {bdf}: {e}"
+        )
+    if selected != "cxl_bus":
+        GLTCore.GLTTestResult.skip(
+            f"Could not select cxl_bus reset method on {bdf} "
+            f"(got {selected!r}); kernel does not support the reset path"
+        )
+
+    dvsec_off = cxl_utils.find_cxl_device_dvsec_base(bdf)
+    if dvsec_off is None:
+        # The candidate was discovered via this exact DVSEC; a None here
+        # means the device disappeared between discovery and now.
+        GLTCore.GLTTestResult.fail(
+            f"CXL Device DVSEC not found on {bdf} (re-discovery failed)"
+        )
+    logger.info("CXL Device DVSEC base on %s: %#x", bdf, dvsec_off)
+
+    comp_regs = cxl_utils.find_cxl_component_regs(bdf)
+    if comp_regs is None:
+        GLTCore.GLTTestResult.skip(
+            f"Register Locator DVSEC not found / unparseable on {bdf}; "
+            "cannot locate component registers to snapshot HDM state"
+        )
+    comp_bar, comp_off = comp_regs
+
+    try:
+        pre_dvsec = _snapshot_dvsec(bdf, dvsec_off)
+    except OSError as e:
+        # /sys/.../config unreadable: device disappeared between discovery
+        # and now, permission denied, etc. Skip rather than crash.
+        GLTCore.GLTTestResult.skip(
+            f"Could not read PCI config on {bdf} for PRE DVSEC snapshot: {e}"
+        )
+    try:
+        pre_hdm = _snapshot_hdm(bdf, comp_bar, comp_off)
+    except OSError as e:
+        # BAR not assigned, permissions, etc. Treat as skip per spec.
+        GLTCore.GLTTestResult.skip(
+            f"Could not mmap BAR{comp_bar} on {bdf} for PRE HDM snapshot: {e}"
+        )
+    if not pre_hdm:
+        GLTCore.GLTTestResult.skip(
+            f"HDM Decoder cap absent in CM cap array on {bdf}; "
+            "nothing for the save/restore patches to preserve"
+        )
+    logger.info("PRE DVSEC snapshot on %s: %s", bdf, pre_dvsec)
+    logger.info("PRE HDM snapshot on %s: %s", bdf, pre_hdm)
+
+    # Past this point a failure leaves the CXL link in an indeterminate
+    # state; record the progress key so postfail/postafail triggers a reboot.
+    sd.progress_record_time(
+        test_cxl_save_restore_across_cxl_bus_reset.__name__,
+        "CxlBusResetTriggered",
+    )
+    logger.info("Triggering cxl_bus reset on %s", bdf)
+    try:
+        with open(
+            f"/sys/bus/pci/devices/{bdf}/reset", "w", encoding="utf-8",
+        ) as f:
+            f.write("1")
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(f"cxl_bus reset on {bdf} failed: {e}")
+
+    sysfs_path = f"/sys/bus/pci/devices/{bdf}"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        if os.path.exists(sysfs_path):
+            break
+        time.sleep(0.1)
+    if not os.path.exists(sysfs_path):
+        GLTCore.GLTTestResult.fail(
+            f"Device {bdf} did not reappear under sysfs within 5s "
+            "after cxl_bus reset"
+        )
+
+    try:
+        post_dvsec = _snapshot_dvsec(bdf, dvsec_off)
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(
+            f"Could not read PCI config on {bdf} for POST DVSEC snapshot: {e}"
+        )
+    try:
+        post_hdm = _snapshot_hdm(bdf, comp_bar, comp_off)
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(
+            f"Could not mmap BAR{comp_bar} on {bdf} for POST HDM snapshot: {e}"
+        )
+    logger.info("POST DVSEC snapshot on %s: %s", bdf, post_dvsec)
+    logger.info("POST HDM snapshot on %s: %s", bdf, post_hdm)
+
+    if pre_dvsec != post_dvsec:
+        GLTCore.GLTTestResult.fail(
+            f"DVSEC drift across cxl_bus reset on {bdf}: "
+            f"pre={pre_dvsec} post={post_dvsec}. "
+            "Consider backporting the CXL DVSEC/HDM save/restore patch series "
+            "(https://lore.kernel.org/linux-cxl/"
+            "20260306080014.116789-1-smadhavan@nvidia.com/)"
+        )
+    if pre_hdm != post_hdm:
+        GLTCore.GLTTestResult.fail(
+            f"HDM drift across cxl_bus reset on {bdf}: "
+            f"pre={pre_hdm} post={post_hdm}. "
+            "Consider backporting the CXL DVSEC/HDM save/restore patch series "
+            "(https://lore.kernel.org/linux-cxl/"
+            "20260306080014.116789-1-smadhavan@nvidia.com/)"
+        )
+# pylint: enable=too-many-branches,too-many-statements,too-many-locals
+
+
+test_cxl_save_restore_across_cxl_bus_reset.attr.post_hooks = GLTCore.PostHooks.create(
+    postsuccess=_restore_reset_method,
+    postskip=_restore_reset_method,
+    postfail=_cxl_bus_reset_reboot_hook,
+    postafail=_cxl_bus_reset_reboot_hook,
+)
