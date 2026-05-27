@@ -739,3 +739,131 @@ test_cxl_save_restore_across_cxl_bus_reset.attr.post_hooks = GLTCore.PostHooks.c
     postfail=_cxl_bus_reset_reboot_hook,
     postafail=_cxl_bus_reset_reboot_hook,
 )
+
+
+# A failed cxl_reset can leave the device's CXL state machine in an
+# indeterminate place; a reboot is the only reliable recovery. The
+# for_conditional_reboot pattern with a `lambda: True` condition is
+# effectively unconditional once the gating progress key is recorded
+# (just before the write to the cxl_reset sysfs attribute). Failures
+# before that point leave the system in a clean state and do not trigger
+# a reboot.
+_cxl_reset_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
+    "CxlResetTriggered",
+    lambda: True,
+)
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches,too-many-statements
+def test_cxl_reset_dvsec_sysfs(sd, logger):
+    """
+    Exercise the cxl_reset sysfs attribute (in-band CXL DVSEC reset).
+
+    Verifies kernel gating (file presence matches RST_CAPABLE) and that
+    writing the file triggers the DVSEC reset sequence - not SBR - and
+    completes with the expected STATUS2 bits.
+
+    JIRA: DGX-16578
+    PATCH:
+    https://lore.kernel.org/linux-cxl/20260306092322.148765-1-smadhavan@nvidia.com/
+    """
+
+    if not glt_utils.is_cli_available("lspci"):
+        GLTCore.GLTTestResult.skip("lspci not available; install pciutils")
+
+    bdf = cxl_utils.find_first_cxl_device_dvsec_bdf()
+    if bdf is None:
+        GLTCore.GLTTestResult.skip(
+            "No PCI device exposes a CXL Device DVSEC "
+            "(Vendor=0x1E98, ID=0x0000)"
+        )
+    logger.info("Candidate CXL endpoint: %s", bdf)
+
+    if cxl_utils.any_cxl_region_committed():
+        GLTCore.GLTTestResult.skip(
+            "CXL regions are committed/online, "
+            "refusing to reset a device with active mappings"
+        )
+
+    dvsec_off = cxl_utils.find_cxl_device_dvsec_base(bdf)
+
+    cap = cxl_utils.read_cxl_device_dvsec_cap_bits(bdf, dvsec_off)
+    if cap is None:
+        GLTCore.GLTTestResult.fail(
+            f"Could not read CXL Device DVSEC CAP on {bdf}"
+        )
+    logger.info(
+        "CXL Device DVSEC base on %s: %#x; CAP bits: %s",
+        bdf, dvsec_off, cap,
+    )
+
+    if not cap["rst_capable"]:
+        GLTCore.GLTTestResult.skip(
+            f"{bdf} does not advertise RST_CAPABLE; nothing to exercise"
+        )
+
+    # Kernel gating: with RST_CAPABLE=1, the kernel must have exposed the
+    # cxl_reset sysfs attribute.
+    sysfs_path = f"/sys/bus/pci/devices/{bdf}/cxl_reset"
+    if not os.path.exists(sysfs_path):
+        GLTCore.GLTTestResult.fail(
+            f"RST_CAPABLE set on {bdf} but cxl_reset attribute is missing. "
+            "The most likely cause is that the kernel under test lacks the "
+            "cxl_reset patch series; consider backporting it "
+            "(https://lore.kernel.org/linux-cxl/"
+            "20260306092322.148765-1-smadhavan@nvidia.com/)"
+        )
+
+    # Past this point a failure can leave the CXL state machine in an
+    # indeterminate state.
+    sd.progress_record_time(
+        test_cxl_reset_dvsec_sysfs.__name__,
+        "CxlResetTriggered",
+    )
+    logger.info("Triggering cxl_reset on %s", bdf)
+    try:
+        with open(sysfs_path, "w", encoding="utf-8") as f:
+            f.write("1")
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(
+            f"write to {sysfs_path} failed: {e}"
+        )
+
+    time.sleep(0.1)
+
+    s2 = cxl_utils.read_cxl_device_dvsec_status2_bits(bdf, dvsec_off)
+    if s2 is None:
+        GLTCore.GLTTestResult.fail(
+            f"Could not read CXL Device DVSEC STATUS2 on {bdf} after write"
+        )
+
+    if not s2["rst_done"]:
+        GLTCore.GLTTestResult.fail(
+            f"RST_DONE not set in STATUS2 on {bdf} after successful "
+            "cxl_reset write"
+        )
+    if s2["rst_err"]:
+        GLTCore.GLTTestResult.fail(
+            f"RST_ERR set in STATUS2 on {bdf} after cxl_reset"
+        )
+    if cap["cache_wbi_capable"] and not s2["cache_inv"]:
+        GLTCore.GLTTestResult.fail(
+            f"{bdf} advertised CACHE_WBI_CAPABLE but CACHE_INV was not "
+            "set in STATUS2 after reset - WB+I phase did not run"
+        )
+
+    if not os.path.exists(f"/sys/bus/pci/devices/{bdf}"):
+        GLTCore.GLTTestResult.fail(
+            f"device {bdf} disappeared from sysfs after cxl_reset"
+        )
+# pylint: enable=too-many-branches,too-many-statements
+
+
+test_cxl_reset_dvsec_sysfs.attr.post_hooks = GLTCore.PostHooks.create(
+    postfail=_cxl_reset_reboot_hook,
+    postafail=_cxl_reset_reboot_hook,
+)
