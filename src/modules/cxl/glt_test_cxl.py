@@ -370,3 +370,103 @@ test_cxl_link_disable_led_error.attr.post_hooks = GLTCore.PostHooks.create(
     postfail=_link_down_reboot_hook,
     postafail=_link_down_reboot_hook,
 )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cxl_switch_decoder_target_list_complete(_, logger):
+    """
+    Verify programmed interleaved CXL switch decoders have a fully populated
+    target_list. A switch decoder with interleave_ways > 1 whose target_list
+    is empty or shorter than interleave_ways is the failure of the bug.
+
+    JIRA: DGX-16570
+    PATCH: https://git.kernel.org/torvalds/c/3e8aaacdad4f
+    """
+    qualifying_found = False
+
+    for decoder_dir in sorted(glob.glob("/sys/bus/cxl/devices/decoder*")):
+        devtype = ""
+        interleave_ways = 0
+        region = ""
+        decoder_size = 0
+        target_list_raw = ""
+        target_list_entries = []
+        try:
+            with open(os.path.join(decoder_dir, "devtype"),
+                      "r", encoding="utf-8") as f:
+                devtype = f.read().strip()
+        except OSError:
+            continue
+        if devtype != "cxl_decoder_switch":
+            continue
+
+        decoder_name = os.path.basename(decoder_dir)
+        try:
+            with open(os.path.join(decoder_dir, "interleave_ways"),
+                      "r", encoding="utf-8") as f:
+                interleave_ways = int(f.read().strip())
+        except (OSError, ValueError) as e:
+            GLTCore.GLTTestResult.fail(
+                f"Unable to read CXL switch decoder interleave_ways: "
+                f"{decoder_name}: {e}"
+            )
+        if interleave_ways <= 1:
+            continue
+
+        try:
+            with open(os.path.join(decoder_dir, "region"),
+                      "r", encoding="utf-8") as f:
+                region = f.read().strip()
+        except OSError:
+            region = ""
+        try:
+            with open(os.path.join(decoder_dir, "size"),
+                      "r", encoding="utf-8") as f:
+                decoder_size = int(f.read().strip(), 0)
+        except (OSError, ValueError) as e:
+            GLTCore.GLTTestResult.fail(
+                f"Unable to read CXL switch decoder size: "
+                f"{decoder_name}: {e}"
+            )
+        # Zero-size decoders are idle slots, not programmed decode windows.
+        if decoder_size == 0:
+            continue
+
+        qualifying_found = True
+        try:
+            with open(os.path.join(decoder_dir, "target_list"),
+                      "r", encoding="utf-8") as f:
+                target_list_raw = f.read().strip()
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Unable to read CXL switch decoder target_list: "
+                f"{decoder_name}: {e}"
+            )
+        target_list_entries = [
+            entry.strip()
+            for entry in target_list_raw.split(",")
+            if entry.strip()
+        ]
+        logger.info(
+            "CXL switch decoder %s: interleave_ways=%d size=%#x "
+            "region=%s target_list=%s",
+            decoder_name, interleave_ways, decoder_size, region,
+            target_list_entries,
+        )
+        if len(target_list_entries) < interleave_ways:
+            GLTCore.GLTTestResult.fail(
+                f"Incomplete CXL switch decoder target list: "
+                f"{decoder_name} interleave_ways={interleave_ways} "
+                f"size={decoder_size:#x} region={region!r} "
+                f"target_list={target_list_entries}. "
+                f"Consider backporting commit 3e8aaacdad4f"
+            )
+
+    if not qualifying_found:
+        GLTCore.GLTTestResult.skip(
+            "No programmed interleaved CXL switch decoder found; "
+            "patch path not exercised"
+        )
