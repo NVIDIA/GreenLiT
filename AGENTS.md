@@ -42,6 +42,8 @@ Checks:
 - Do **not** add new test categories without also updating `docs/developer-docs/architecture.md`.
 - In non-root/CI environments, only run unit tests and lint.
 - Do **not** call `GLTCore.GLTTestResult.fail()` or `GLTCore.GLTTestResult.skip()` from any function that is not decorated with `@GLTCore.GLTTestAttr()`.
+- If the test validates a kernel, firmware, or userspace patch, inspect the related patch or source repository when available. If it is not available, ask for the relevant link, commit, or repository before guessing test behavior.
+- If a test may contain non-public or sensitive details, stop and ask whether it belongs in the public GreenLiT repository.
 - **Must** follow the [Recommended workflow](docs/user-guides/user-manual.md#recommended-workflow) in order when running GreenLiT on a target system, unless the user requests otherwise.
 - Do **not** continue that workflow on macOS — stop after OS detection and tell the user Linux is required.
 - Do **not** guess or assume platform, paths, or test plan; ask the user when uncertain.

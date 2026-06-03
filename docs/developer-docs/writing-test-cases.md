@@ -7,6 +7,8 @@ This guide explains how to write effective test cases for the GreenLiT test fram
 - [Introduction & Objectives](#introduction--objectives)
 - [Prerequisites](#prerequisites)
 - [Do We Need a New Test Case?](#do-we-need-a-new-test-case)
+- [Choosing the Implementation Path](#choosing-the-implementation-path)
+  - [When Starting from an Existing Script](#when-starting-from-an-existing-script)
 - [Create a Test Case that Does Not Require Reboots](#create-a-test-case-that-does-not-require-reboots)
   - [Example Test Case Structure](#example-test-case-structure)
   - [Categorizing Your Test Case](#categorizing-your-test-case)
@@ -67,6 +69,56 @@ Before creating a new test case, check if existing test cases cover what you'd l
 - Upstream kselftests that are included in test cycles
 
 There will be no need to create a duplicated test case if either of the above two already covers what you'd like to check.
+
+## Choosing the Implementation Path
+
+GreenLiT supports both native Python tests and standalone executable tests.
+Choose the implementation path based on how the test should be run, maintained,
+and integrated with the framework.
+
+Prefer a native GreenLiT Python test under
+`src/modules/<category>/glt_test_<feature>.py` when possible. Native tests can
+use GreenLiT decorators, test plans, dependencies, scheduler state, post hooks,
+common helpers, and consistent skip/fail handling.
+
+GreenLiT also supports standalone executable tests for cases where another test
+suite or validation script already exists. During installation, files from the
+repository's `external_tests/` directory are copied into the installed external
+test directory, `/usr/share/greenlit/executing_dir`. Users can also place their
+own executable tests in that installed directory, or use `glt-test-suite
+--ext-dir <path>`, without contributing those tests to the GreenLiT repository.
+
+External executable tests let users run native GreenLiT tests and standalone
+tests with a single `glt-test-suite` command and collect one report format.
+
+The `external_tests/` name describes the execution mechanism: GreenLiT launches
+an executable from the external test directory instead of discovering a
+decorated Python test under `src/modules/`. For tests submitted to the GreenLiT
+repository, this does not change the normal contribution or review process.
+
+For tests contributed to the GreenLiT repository, treat `external_tests/` as an
+integration and staging path, not the preferred long-term home for
+GreenLiT-specific test logic. If the test should reuse GreenLiT framework
+features or APIs from `src/common/`, plan to migrate the logic into a native
+Python test under `src/modules/`.
+
+### When Starting from an Existing Script
+
+When an existing shell, Python, or binary validation script is provided, first
+decide whether the script's logic should be converted into a native test or
+staged as a standalone executable:
+
+- Check whether existing GreenLiT tests or upstream kselftests already cover the same behavior. If they partially cover it, extend the existing test instead of adding a duplicate.
+- If the test validates a kernel, firmware, or userspace patch, review the related patch or source repository when available so the test checks the intended behavior instead of only reproducing the script structure.
+- Convert to a native Python test when the test needs GreenLiT helpers, dependencies, scheduler state, reboot handling, post hooks, multiple test plans, or reusable framework logic.
+- Before adding local helpers, adapters, or launchers, check `src/common/` and nearby module utilities. Reuse or extend existing helpers when the behavior already exists or is likely to be reused.
+- Consider `external_tests/` as a staging path when short-term integration is needed, the script is already maintained as a separate executable test, or the script already fits GreenLiT's standalone executable contract.
+- Preserve the script's intended pass/fail/skip behavior when converting it or adapting it for `external_tests/`.
+- If the script needs arguments, environment variables, setup/cleanup, or result-code translation, provide a small adapter that normalizes those details for GreenLiT. A launcher that only invokes the script without adapting anything usually does not improve integration.
+
+Standalone executable scripts are case-by-case. For repository submissions,
+document the prerequisites, required tools, root or hardware assumptions,
+arguments, environment variables, setup and cleanup steps, and result mapping.
 
 ## Create a Test Case that Does Not Require Reboots
 
@@ -229,6 +281,11 @@ Various functions and methods are available under:
 **Important:** Chances are a command you'd like to use in your test case has a ready-to-be-called function available in the above modules. Use those instead of creating your own to prevent reinventing the wheel.
 
 If existing functions under these modules require an update to fit your needs, or if you feel that the commands you are about to use would likely be reused in other test cases in the future, instead of creating the steps inside your new test case, please update these modules and have your test case call them.
+
+Apply the same rule to helper code and adapters. Before adding a local wrapper,
+launcher, parser, or setup helper inside a test file, check `src/common/` and
+nearby module utilities first. Keep helper logic local only when it is specific
+to that one test and unlikely to be reused.
 
 ### Using GLTLibvirt for Virtualization Tests
 
@@ -441,7 +498,25 @@ arguments (e.g. `custom_cmdline="pci=config_acs=101xxxx@0000:00:01.0"`).
 
 ## Create an External Test Case
 
-External tests are standalone executable scripts (shell, Python, or any executable) that run outside the standard GreenLiT test framework but are automatically discovered and executed by GreenLiT.
+External tests are standalone executable scripts (shell, Python, or any
+executable) that run outside the native GreenLiT Python test framework but are
+automatically discovered and executed by GreenLiT.
+
+The repository's `external_tests/` directory is packaged with GreenLiT. During
+installation, its contents are copied to `/usr/share/greenlit/executing_dir`,
+which is the default external test directory used by `glt-test-suite`. Users can
+also add their own executable tests directly under
+`/usr/share/greenlit/executing_dir`, or point `glt-test-suite` at a different
+directory with `--ext-dir <path>`.
+
+This allows GreenLiT to launch native test cases and standalone executable tests
+from one `glt-test-suite` command and collect one report format. Adding tests to
+the installed external test directory does not require contributing them to the
+GreenLiT repository.
+
+The term "external" describes the implementation mechanism only. For tests
+submitted to the GreenLiT repository, standalone executable tests follow the
+same contribution and review process as other test changes.
 
 ### When to Use External Tests
 
@@ -451,10 +526,23 @@ Use external tests when:
 - You want to integrate third-party test tools
 - Your test is a one-off or experimental test
 - You prefer a simpler approach without Python decorators and GreenLiT utilities
+- You need a short-term staging path before converting the logic into a native
+  GreenLiT Python test
+
+Before choosing this path, confirm the script can be launched without hidden
+assumptions. If it needs command-line arguments, special environment variables,
+setup/cleanup, non-standard result codes, or tighter interaction with GreenLiT
+state, either provide a small adapter with clear documentation or convert the
+logic into a native Python test.
+
+For GreenLiT-specific test logic, prefer migrating from `external_tests/` into
+`src/modules/` over time so the test can reuse the framework and common helper
+APIs.
 
 ### Directory Structure
 
-External tests are placed in the `external_tests/` directory:
+For tests contributed to the GreenLiT repository, external tests are placed in
+the `external_tests/` directory:
 
 ```
 greenlit/
@@ -464,6 +552,11 @@ greenlit/
     └── your_category/
         └── your_test_script.sh
 ```
+
+After installation, repository external tests are copied to
+`/usr/share/greenlit/executing_dir`. For local-only or site-specific executable
+tests, place them directly under `/usr/share/greenlit/executing_dir` on the
+device under test, or run `glt-test-suite --ext-dir <path>`.
 
 ### Exit Codes
 
@@ -481,7 +574,8 @@ External tests communicate their results through exit codes:
 
 #### Step 1: Create Your Test Script
 
-Create an executable script in `external_tests/`:
+For a repository contribution, create an executable script in
+`external_tests/`:
 
 ```bash
 #!/bin/bash
@@ -691,7 +785,11 @@ Executables that cannot be installed through a distro's software management syst
 
 ## Licensing Considerations
 
-**TBD** - Beware of potential licensing issues when including third-party packages or code.
+Beware of potential licensing issues when including third-party packages or
+code. GreenLiT is a public project, so contributions should not include
+non-public, embargoed, confidential, or otherwise sensitive implementation
+details. If you are unsure whether a test belongs in the public repository, ask
+before submitting it.
 
 ## Follow Ups
 

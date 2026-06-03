@@ -11,7 +11,7 @@ greenlit/
 ├── confs/                  # Test configuration files
 ├── data/                   # Test data files
 ├── docs/                   # Wiki Documentation
-├── external_tests/         # External category of test scripts
+├── external_tests/         # Packaged standalone executable tests
 ├── install.sh              # Installation script
 ├── poetry.toml             # Poetry configuration file
 ├── pyproject.toml          # Project build configuration
