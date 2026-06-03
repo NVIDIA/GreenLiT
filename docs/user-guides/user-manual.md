@@ -17,6 +17,7 @@ GreenLiT provides automated tests to verify system functionality and stability o
   - [Skipping Tests](#skipping-tests)
 - [Test Categories](#test-categories)
 - [Test Reports](#test-reports)
+- [Recommended workflow](#recommended-workflow)
 - [Advanced Usage](#advanced-usage)
   - [Adding External Tests](#adding-external-tests-to-greenlit)
   - [Enabling Kexec Tests](#enabling-kexec-tests-optional)
@@ -305,6 +306,52 @@ Test sessions and logs are stored in the `/var/cache/greenlit/` directory with a
 - View previous test sessions: `ls /var/cache/greenlit/`
 - Resume a specific test session: `sudo glt-test-suite --resume <session-number>`
   - Example: `sudo glt-test-suite --resume -1` (resume the most recent session)
+
+## Recommended workflow
+
+On a **Linux** target system, a typical end-to-end run follows this order. Use one or more `<reference-files>` per platform (Grace: `grace.txt`; Vera: `grace.txt` and `vera.txt`); see the kernel checker sections above.
+
+1. **Check the host** — GreenLiT requires Linux (install, kernel checks, and tests are not supported on macOS).
+
+   ```bash
+   uname -s
+   cat /etc/os-release
+   uname -m
+   uname -r
+   ```
+
+2. **Install** — See [Installation](#installation).
+
+   ```bash
+   sudo ./install.sh
+   ```
+
+3. **Verify kernel patches** (optional, when validating a kernel branch) — See [Kernel Patch Checker](#kernel-patch-checker-pre-requisite).
+
+   ```bash
+   cd /path/to/linux-source
+   check-kernel-patches -b <branch> \
+     /usr/share/greenlit/data/kernel-patches/<reference-files>
+   ```
+
+   `<reference-files>` are one or more patch list paths (for example `grace.txt`, or `grace.txt` and `vera.txt` for Vera).
+
+4. **Verify kernel configuration** — See [Kernel Configuration Checker](#kernel-configuration-checker-pre-requisite).
+
+   ```bash
+   check-kernel-config -c /boot/config-$(uname -r) \
+     /usr/share/greenlit/data/kernel-config/<reference-files>
+   ```
+
+   `<reference-files>` are one or more config reference paths (same Grace/Vera pattern as above).
+
+5. **Run tests** — See [Running Tests](#running-tests) and [Test Plans](#test-plans).
+
+   ```bash
+   sudo glt-test-suite --sanity
+   ```
+
+6. **Review results** — See [Test Reports](#test-reports). Session logs are under `/var/cache/greenlit/`.
 
 ## Advanced Usage
 
