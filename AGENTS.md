@@ -13,6 +13,28 @@ Guidance for AI coding agents working in this repository.
 | Test configuration (YAML) | `docs/user-guides/configuration.md` |
 | Commit conventions | `CONTRIBUTING.md` |
 
+## Local Checks
+
+Always run before creating a commit or MR. Skip any check whose tool is not installed.
+
+- `shellcheck` and `jq` are system tools.
+- `pylint` and `pytest` require the `gltenv` venv below.
+
+One-time venv setup:
+
+```bash
+python3 -m venv gltenv && source gltenv/bin/activate && pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org . pylint pytest pytest-cov
+```
+
+Checks:
+
+| Tool | Command |
+|------|---------|
+| Python lint | `source gltenv/bin/activate && find . -not -path "./gltenv/*" -name "*.py" -print0 \| xargs -0 pylint --init-hook="import sys; sys.path.extend(['src', '.'])"` |
+| Shell lint | `find . -name "*.sh" -print0 \| xargs -0 shellcheck` |
+| JSON validation | `find . -name "*.json" -print0 \| xargs -0 jq -r . > /dev/null` |
+| Unit tests | `source gltenv/bin/activate && python -m pytest tests/ -v --cov=src --cov-report=term-missing` |
+
 ## Boundaries
 
 - Do **not** create or commit `poetry.lock` — GreenLiT intentionally does not lock package versions.
