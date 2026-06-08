@@ -17,8 +17,6 @@
 CXL bus tests.
 """
 
-from __future__ import annotations
-
 import glob
 import os
 import platform
@@ -26,33 +24,11 @@ import re
 import subprocess
 import time
 
+from common import cxl_utils
 from common import glt_core as GLTCore
 from common import glt_utils
 from common.nv_device import NvDev
 from scripts import check_kernel_config
-
-
-def _find_first_cxl_bdf() -> str | None:
-    """Return the BDF of the first PCI device.
-
-    Returns None if no CXL device is found, lspci is missing, or lspci exits
-    non-zero.
-    """
-    try:
-        result = subprocess.run(
-            ["lspci", "-d", "::0502", "-D"],
-            capture_output=True, text=True, check=False,
-        )
-    except FileNotFoundError:
-        return None
-    if result.returncode != 0:
-        return None
-    for line in result.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        return line.split()[0]
-    return None
 
 
 def _find_root_port_bdf(dev_bdf: str, sysfs_root: str = "/") -> str | None:
@@ -85,61 +61,6 @@ def _find_root_port_bdf(dev_bdf: str, sysfs_root: str = "/") -> str | None:
     if len(ancestors) < 2:
         return None
     return ancestors[-1]
-
-
-def _find_cxl_port_dvsec_base(bdf: str) -> int | None:
-    """Find the absolute config-space offset of the CXL Port Extensions DVSEC
-    on `bdf` by parsing `lspci -vv` output.
-
-    Returns None if lspci is missing or fails, or no DVSEC line on `bdf`
-    matches the CXL Port Extensions vendor (0x1E98) and DVSEC ID (0x0003) pair.
-    """
-    cxl_dvsec_vendor = 0x1E98       # DVSEC Vendor ID assigned to the CXL Consortium.
-    cxl_port_ext_dvsec_id = 0x0003  # DVSEC ID for "PCIe DVSEC for CXL Ports".
-
-    try:
-        result = subprocess.run(
-            ["lspci", "-vv", "-s", bdf],
-            capture_output=True, text=True, check=False,
-        )
-    except (FileNotFoundError, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-
-    # Lines look like:
-    #   Capabilities: [468 v1] Designated Vendor-Specific: Vendor=1e98 ID=0003 Rev=2 Len=14: CXL
-    dvsec_line = re.compile(
-        r"Capabilities:\s*\[([0-9a-fA-F]+)\s+v\d+\]\s+"
-        r"Designated Vendor-Specific:\s+"
-        r"Vendor=([0-9a-fA-F]+)\s+ID=([0-9a-fA-F]+)",
-        re.IGNORECASE,
-    )
-    for line in result.stdout.splitlines():
-        m = dvsec_line.search(line)
-        if not m:
-            continue
-        if (int(m.group(2), 16) == cxl_dvsec_vendor
-                and int(m.group(3), 16) == cxl_port_ext_dvsec_id):
-            return int(m.group(1), 16)
-    return None
-
-
-def _any_cxl_region_committed(sysfs_root: str = "/") -> bool:
-    """Return True if any CXL region directory under `sysfs_root` is committed."""
-    pattern = os.path.join(
-        sysfs_root, "sys", "bus", "cxl", "devices", "region*",
-    )
-    for region_dir in glob.glob(pattern):
-        commit_path = os.path.join(region_dir, "commit")
-        try:
-            with open(commit_path, "r", encoding="utf-8") as f:
-                value = f.read().strip()
-        except (FileNotFoundError, PermissionError, OSError):
-            return True
-        if value == "1":
-            return True
-    return False
 
 
 def _setpci_read_word(bdf: str, offset: str) -> int | None:
@@ -233,7 +154,7 @@ def _postsuccess_restore_link(_scheduler, attr, logger):
     # device state.
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
-        if _find_first_cxl_bdf() is not None:
+        if cxl_utils.find_first_cxl_bdf() is not None:
             return
         time.sleep(0.5)
     logger.warning(
@@ -288,12 +209,12 @@ def test_cxl_link_disable_led_error(sd, logger):
     if not glt_utils.is_cli_available("setpci"):
         GLTCore.GLTTestResult.skip("setpci not available; install pciutils")
 
-    cxl_bdf = _find_first_cxl_bdf()
+    cxl_bdf = cxl_utils.find_first_cxl_bdf()
     if cxl_bdf is None:
         GLTCore.GLTTestResult.skip("No CXL device found")
     logger.info("CXL device BDF: %s", cxl_bdf)
 
-    if _any_cxl_region_committed():
+    if cxl_utils.any_cxl_region_committed():
         GLTCore.GLTTestResult.skip(
             "CXL regions are committed/online, "
             "refusing to bring the link down"
@@ -306,7 +227,7 @@ def test_cxl_link_disable_led_error(sd, logger):
         )
     logger.info("CXL root port BDF: %s", rp_bdf)
 
-    dvsec_base = _find_cxl_port_dvsec_base(rp_bdf)
+    dvsec_base = cxl_utils.find_cxl_port_dvsec_base(rp_bdf)
     if dvsec_base is None:
         GLTCore.GLTTestResult.fail(
             f"CXL Port Extensions DVSEC not found on root port {rp_bdf}"
