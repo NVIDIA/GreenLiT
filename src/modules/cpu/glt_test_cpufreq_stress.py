@@ -26,6 +26,7 @@ import time
 
 from common import glt_core as GLTCore
 from common import glt_utils
+from common.nv_device import NvDev
 
 # =============================================================================
 # Configuration Constants
@@ -58,6 +59,7 @@ HIGH_PERF_CPU_FREQ_MHZ = 1000
 # Minimum CPU frequency as a percentage of the CPU's rated max under stress.
 # Applies to platforms using the cppc_cpufreq driver.
 SCALING_FREQ_MIN_PERCENT = 70
+CPPC_PERF_LIMITED_CLEAR_MASK = "0x3"
 
 REQUIRED_PATCHES = (
     "https://lore.kernel.org/all/173982791748.4020779.2848639862581042284.b4-ty@arm.com/",
@@ -71,6 +73,124 @@ REQUIRED_PATCHES = (
 def _cpu_cpufreq_glob(filename):
     """Return glob results for a cpufreq sysfs file across all CPUs."""
     return glob.glob(f"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/{filename}")
+
+
+def _read_sysfs_int_value(path):
+    """Read and validate a decimal or base-prefixed integer sysfs value."""
+    try:
+        value = glt_utils.read_sysfs_value(path)
+    except (IOError, OSError) as e:
+        raise OSError(f"cannot read {path}: {e}") from e
+    try:
+        int(value, 0)
+    except ValueError as e:
+        raise ValueError(f"{path} is not an integer: {value}") from e
+    return value
+
+
+def _get_first_cppc_cpufreq_dir():
+    """Return the first cpu cpufreq directory using cppc_cpufreq."""
+    driver_paths = sorted(_cpu_cpufreq_glob("scaling_driver"))
+    if not driver_paths:
+        return None, "cpufreq sysfs not available; cannot read scaling_driver."
+
+    non_cppc_drivers = []
+    for driver_path in driver_paths:
+        try:
+            scaling_driver = glt_utils.read_sysfs_value(driver_path)
+        except (IOError, OSError) as e:
+            return None, f"Cannot read {driver_path}: {e}"
+        if scaling_driver == "cppc_cpufreq":
+            return os.path.dirname(driver_path), None
+        non_cppc_drivers.append(scaling_driver)
+
+    drivers = ", ".join(sorted(set(non_cppc_drivers))) or "unknown"
+    return None, f"cppc_cpufreq not active (current driver: {drivers})."
+
+
+def _validate_cppc_sysfs_helpers(logger):
+    """Validate Vera CPPC sysfs files added or exercised by DGX-16332."""
+    cpufreq_dir, reason = _get_first_cppc_cpufreq_dir()
+    if cpufreq_dir is None:
+        return False, reason
+
+    scaling_min_path = os.path.join(cpufreq_dir, "scaling_min_freq")
+    scaling_max_path = os.path.join(cpufreq_dir, "scaling_max_freq")
+    perf_limited_path = os.path.join(cpufreq_dir, "perf_limited")
+    original_min = original_max = None
+
+    try:
+        cpuinfo_min = _read_sysfs_int_value(
+            os.path.join(cpufreq_dir, "cpuinfo_min_freq")
+        )
+        cpuinfo_max = _read_sysfs_int_value(
+            os.path.join(cpufreq_dir, "cpuinfo_max_freq")
+        )
+        original_min = _read_sysfs_int_value(scaling_min_path)
+        original_max = _read_sysfs_int_value(scaling_max_path)
+        perf_limited_before = _read_sysfs_int_value(perf_limited_path)
+
+        logger.info("CPPC policy path: %s", cpufreq_dir)
+        logger.info("cpuinfo_min_freq=%s cpuinfo_max_freq=%s", cpuinfo_min, cpuinfo_max)
+        logger.info("scaling_min_freq=%s scaling_max_freq=%s", original_min, original_max)
+        logger.info("perf_limited before clear=%s", perf_limited_before)
+
+        glt_utils.write_sysfs_value(scaling_max_path, original_max)
+        glt_utils.write_sysfs_value(scaling_min_path, original_min)
+
+        current_min = _read_sysfs_int_value(scaling_min_path)
+        current_max = _read_sysfs_int_value(scaling_max_path)
+        if current_min != original_min:
+            return False, (
+                f"{scaling_min_path} did not round-trip "
+                f"({current_min} != {original_min})."
+            )
+        if current_max != original_max:
+            return False, (
+                f"{scaling_max_path} did not round-trip "
+                f"({current_max} != {original_max})."
+            )
+
+        glt_utils.write_sysfs_value(
+            perf_limited_path, CPPC_PERF_LIMITED_CLEAR_MASK
+        )
+        perf_limited_after = _read_sysfs_int_value(perf_limited_path)
+        logger.info("perf_limited after clear=%s", perf_limited_after)
+    except (IOError, OSError, ValueError) as e:
+        return False, f"CPPC sysfs validation failed: {e}"
+    finally:
+        if original_max is not None:
+            try:
+                glt_utils.write_sysfs_value(scaling_max_path, original_max)
+            except (IOError, OSError):
+                logger.warning("Failed to restore %s", scaling_max_path)
+        if original_min is not None:
+            try:
+                glt_utils.write_sysfs_value(scaling_min_path, original_min)
+            except (IOError, OSError):
+                logger.warning("Failed to restore %s", scaling_min_path)
+
+    return True, None
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_vera_cppc_sysfs_helpers(_, logger):
+    """
+    Validate Vera CPPC sysfs helper coverage.
+
+    JIRA: DGX-16332
+    PATCH: https://git.kernel.org/torvalds/c/13c45a26635f
+    """
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("The CPU is not Vera.")
+
+    ok, reason = _validate_cppc_sysfs_helpers(logger)
+    if not ok:
+        GLTCore.GLTTestResult.fail(reason)
 
 
 def _get_cpu_max_freq_khz():
