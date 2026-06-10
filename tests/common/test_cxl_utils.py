@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import struct
 import subprocess
 import tempfile
 from unittest.mock import MagicMock
@@ -583,6 +584,284 @@ class TestFindCxlComponentRegs(GLTTestBase):
             self.assertIsNone(
                 cxl_utils.find_cxl_component_regs("0000:e1:00.0"),
             )
+
+
+# ---------------------------------------------------------------------------
+# read_cxl_device_dvsec_cap_bits / read_cxl_device_dvsec_status2_bits
+# ---------------------------------------------------------------------------
+
+
+def _write_sparse_config(path: str, words: dict[int, int]) -> None:
+    """Write a fake config-space file at `path`.
+
+    `words` maps absolute byte offsets to 16-bit little-endian values.
+    Bytes outside the listed words are zero-filled. The file is sized just
+    large enough to hold the highest word.
+    """
+    size = (max(words.keys()) + 2) if words else 0
+    buf = bytearray(size)
+    for off, val in words.items():
+        struct.pack_into("<H", buf, off, val)
+    with open(path, "wb") as fh:
+        fh.write(bytes(buf))
+
+
+def _make_device_config(
+    sysfs_root: str, bdf: str, words: dict[int, int],
+) -> str:
+    """Create <sysfs_root>/sys/bus/pci/devices/<bdf>/config containing `words`.
+
+    Returns the absolute path to the device directory.
+    """
+    device_dir = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", bdf,
+    )
+    os.makedirs(device_dir, exist_ok=True)
+    _write_sparse_config(os.path.join(device_dir, "config"), words)
+    return device_dir
+
+
+class TestReadCxlDeviceDvsecCapBits(GLTTestBase):
+    """Tests for read_cxl_device_dvsec_cap_bits()."""
+
+    # The CAP register sits 0xA bytes into the CXL Device DVSEC.
+    _CAP_REG_OFF = 0xA
+    _DVSEC_OFF = 0x10C
+    _CAP_ABS_OFF = _DVSEC_OFF + _CAP_REG_OFF  # 0x116
+    _BDF = "0002:81:00.0"
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def _run(self, cap_word: int) -> dict[str, bool] | None:
+        """Build fake sysfs with CAP=cap_word at the test's DVSEC and read."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._CAP_ABS_OFF: cap_word},
+        )
+        return cxl_utils.read_cxl_device_dvsec_cap_bits(
+            self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+        )
+
+    def test_decodes_observed_hardware_value(self):
+        """Hardware-observed value 0x8bd7 → all four decoded bits True.
+
+        Baseline from VR-NVL72 box, GPU 0002:81:00.0: CAP=0x8bd7 advertises
+        RST_CAPABLE=1, CACHE_WBI_CAPABLE=1, CACHE_CAPABLE=1, MEM_CAPABLE=1.
+        """
+        self.assertEqual(
+            self._run(0x8BD7),
+            {
+                "cache_capable":     True,
+                "mem_capable":       True,
+                "cache_wbi_capable": True,
+                "rst_capable":       True,
+            },
+        )
+
+    def test_all_bits_clear_when_raw_zero(self):
+        """Raw word 0x0000 → every decoded flag is False."""
+        self.assertEqual(
+            self._run(0x0000),
+            {
+                "cache_capable":     False,
+                "mem_capable":       False,
+                "cache_wbi_capable": False,
+                "rst_capable":       False,
+            },
+        )
+
+    def test_only_rst_capable_when_only_bit7_set(self):
+        """Raw word 0x0080 (bit 7) → only rst_capable is True."""
+        self.assertEqual(
+            self._run(0x0080),
+            {
+                "cache_capable":     False,
+                "mem_capable":       False,
+                "cache_wbi_capable": False,
+                "rst_capable":       True,
+            },
+        )
+
+    def test_ignores_undecoded_bits(self):
+        """Bits the helper doesn't decode (e.g. bit 1, bit 3, bit 4) don't
+        leak into the returned dict."""
+        # 0x003A = bits 1, 3, 4, 5; none of which are decoded.
+        self.assertEqual(
+            self._run(0x003A),
+            {
+                "cache_capable":     False,
+                "mem_capable":       False,
+                "cache_wbi_capable": False,
+                "rst_capable":       False,
+            },
+        )
+
+    def test_returns_none_when_config_missing(self):
+        """Device directory absent → None."""
+        # Don't materialize any device under self.tmpdir.
+        self.assertIsNone(
+            cxl_utils.read_cxl_device_dvsec_cap_bits(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_returns_none_on_short_read(self):
+        """Config file too small to cover the CAP offset → None."""
+        device_dir = os.path.join(
+            self.tmpdir, "sys", "bus", "pci", "devices", self._BDF,
+        )
+        os.makedirs(device_dir)
+        # Only 0x10 bytes; CAP would be at 0x116 - way out of range.
+        with open(os.path.join(device_dir, "config"), "wb") as fh:
+            fh.write(b"\x00" * 0x10)
+        self.assertIsNone(
+            cxl_utils.read_cxl_device_dvsec_cap_bits(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_returns_none_on_oserror(self):
+        """A generic OSError on open() → None.
+
+        The fake config file is materialized first so that, without the
+        patch, the helper would succeed; this guarantees the None result
+        comes from the patched PermissionError path and not from a missing
+        path (which would also raise OSError and produce a false pass).
+        """
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._CAP_ABS_OFF: 0x0000},
+        )
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.open",
+            side_effect=PermissionError("no perm"),
+            create=True,
+        ) as open_mock:
+            self.assertIsNone(
+                cxl_utils.read_cxl_device_dvsec_cap_bits(
+                    self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+                )
+            )
+        open_mock.assert_called_once()
+
+
+class TestReadCxlDeviceDvsecStatus2Bits(GLTTestBase):
+    """Tests for read_cxl_device_dvsec_status2_bits()."""
+
+    # The STATUS2 register sits 0x12 bytes into the CXL Device DVSEC.
+    _STATUS2_REG_OFF = 0x12
+    _DVSEC_OFF = 0x10C
+    _STATUS2_ABS_OFF = _DVSEC_OFF + _STATUS2_REG_OFF  # 0x11E
+    _BDF = "0002:81:00.0"
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def _run(self, status2_word: int) -> dict[str, bool] | None:
+        """Build fake sysfs with STATUS2=status2_word and read."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._STATUS2_ABS_OFF: status2_word},
+        )
+        return cxl_utils.read_cxl_device_dvsec_status2_bits(
+            self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+        )
+
+    def test_all_three_bits_set(self):
+        """Raw word 0x0007 → cache_inv, rst_done, rst_err all True."""
+        self.assertEqual(
+            self._run(0x0007),
+            {"cache_inv": True, "rst_done": True, "rst_err": True},
+        )
+
+    def test_all_bits_clear_when_raw_zero(self):
+        """Raw word 0x0000 → every decoded flag is False."""
+        self.assertEqual(
+            self._run(0x0000),
+            {"cache_inv": False, "rst_done": False, "rst_err": False},
+        )
+
+    def test_only_cache_inv_when_only_bit0_set(self):
+        """Raw word 0x0001 (bit 0) → only cache_inv is True."""
+        self.assertEqual(
+            self._run(0x0001),
+            {"cache_inv": True, "rst_done": False, "rst_err": False},
+        )
+
+    def test_only_rst_done_when_only_bit1_set(self):
+        """Raw word 0x0002 (bit 1) → only rst_done is True."""
+        self.assertEqual(
+            self._run(0x0002),
+            {"cache_inv": False, "rst_done": True, "rst_err": False},
+        )
+
+    def test_only_rst_err_when_only_bit2_set(self):
+        """Raw word 0x0004 (bit 2) → only rst_err is True."""
+        self.assertEqual(
+            self._run(0x0004),
+            {"cache_inv": False, "rst_done": False, "rst_err": True},
+        )
+
+    def test_ignores_undecoded_bits(self):
+        """Bits the helper doesn't decode (e.g. bit 3+) don't leak."""
+        # 0xFFF8 = every bit set except bits 0/1/2.
+        self.assertEqual(
+            self._run(0xFFF8),
+            {"cache_inv": False, "rst_done": False, "rst_err": False},
+        )
+
+    def test_returns_none_when_config_missing(self):
+        """Device directory absent → None."""
+        self.assertIsNone(
+            cxl_utils.read_cxl_device_dvsec_status2_bits(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_returns_none_on_short_read(self):
+        """Config file too small to cover the STATUS2 offset → None."""
+        device_dir = os.path.join(
+            self.tmpdir, "sys", "bus", "pci", "devices", self._BDF,
+        )
+        os.makedirs(device_dir)
+        with open(os.path.join(device_dir, "config"), "wb") as fh:
+            fh.write(b"\x00" * 0x10)
+        self.assertIsNone(
+            cxl_utils.read_cxl_device_dvsec_status2_bits(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_returns_none_on_oserror(self):
+        """A generic OSError on open() → None.
+
+        The fake config file is materialized first so that, without the
+        patch, the helper would succeed; this guarantees the None result
+        comes from the patched PermissionError path and not from a missing
+        path (which would also raise OSError and produce a false pass).
+        """
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._STATUS2_ABS_OFF: 0x0000},
+        )
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.open",
+            side_effect=PermissionError("no perm"),
+            create=True,
+        ) as open_mock:
+            self.assertIsNone(
+                cxl_utils.read_cxl_device_dvsec_status2_bits(
+                    self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+                )
+            )
+        open_mock.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ into skip/fail/pass outcomes.
 import glob
 import os
 import re
+import struct
 import subprocess
 
 
@@ -189,6 +190,86 @@ def find_cxl_component_regs(bdf: str) -> tuple[int, int] | None:
             continue
         return int(m.group(1)), int(m.group(3), 16)
     return None
+
+
+def read_cxl_device_dvsec_cap_bits(
+    bdf: str, dvsec_off: int, sysfs_root: str = "/",
+) -> dict[str, bool] | None:
+    """
+    Read the CXL Device DVSEC CAP register on `bdf` (CXL r3.2 §8.1.3.1)
+    via <sysfs_root>/sys/bus/pci/devices/<bdf>/config and return its decoded
+    bit flags (cache_capable, mem_capable, cache_wbi_capable, rst_capable).
+
+    `dvsec_off` is the absolute config-space offset of the CXL Device DVSEC,
+    as returned by find_cxl_device_dvsec_base().
+
+    Returns None if the config-space read fails (device gone, permission
+    denied, short read).
+    """
+    # Bit positions per CXL r3.2 §8.1.3.1.
+    cap_reg_off = 0xA
+    cache_capable_bit = 1 << 0
+    mem_capable_bit = 1 << 2
+    cache_wbi_capable_bit = 1 << 6
+    rst_capable_bit = 1 << 7
+
+    cfg_path = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", bdf, "config",
+    )
+    try:
+        with open(cfg_path, "rb") as f:
+            f.seek(dvsec_off + cap_reg_off)
+            raw_bytes = f.read(2)
+    except OSError:
+        return None
+    if len(raw_bytes) < 2:
+        return None
+    (raw,) = struct.unpack("<H", raw_bytes)
+    return {
+        "cache_capable":     bool(raw & cache_capable_bit),
+        "mem_capable":       bool(raw & mem_capable_bit),
+        "cache_wbi_capable": bool(raw & cache_wbi_capable_bit),
+        "rst_capable":       bool(raw & rst_capable_bit),
+    }
+
+
+def read_cxl_device_dvsec_status2_bits(
+    bdf: str, dvsec_off: int, sysfs_root: str = "/",
+) -> dict[str, bool] | None:
+    """
+    Read the CXL Device DVSEC STATUS2 register on `bdf` (CXL r3.2 §8.1.3.1)
+    via <sysfs_root>/sys/bus/pci/devices/<bdf>/config and return its decoded
+    bit flags (cache_inv, rst_done, rst_err).
+
+    `dvsec_off` is the absolute config-space offset of the CXL Device DVSEC,
+    as returned by find_cxl_device_dvsec_base().
+
+    Returns None if the config-space read fails (device gone, permission
+    denied, short read).
+    """
+    # Bit positions per CXL r3.2 §8.1.3.1.
+    status2_reg_off = 0x12
+    cache_inv_bit = 1 << 0
+    rst_done_bit = 1 << 1
+    rst_err_bit = 1 << 2
+
+    cfg_path = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", bdf, "config",
+    )
+    try:
+        with open(cfg_path, "rb") as f:
+            f.seek(dvsec_off + status2_reg_off)
+            raw_bytes = f.read(2)
+    except OSError:
+        return None
+    if len(raw_bytes) < 2:
+        return None
+    (raw,) = struct.unpack("<H", raw_bytes)
+    return {
+        "cache_inv": bool(raw & cache_inv_bit),
+        "rst_done":  bool(raw & rst_done_bit),
+        "rst_err":   bool(raw & rst_err_bit),
+    }
 
 
 def any_cxl_region_committed(sysfs_root: str = "/") -> bool:
