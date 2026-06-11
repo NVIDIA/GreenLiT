@@ -25,6 +25,7 @@ from packaging import version
 
 from common import glt_core as GLTCore
 from common import glt_utils
+from common import perf_utils
 from common.nv_device import NvDev
 from scripts import check_kernel_config
 
@@ -97,16 +98,14 @@ def test_all_pmu_events(_, logger):
     if not glt_utils.is_cli_available("perf"):
         GLTCore.GLTTestResult.fail("Please install 'perf' to peform the test.")
 
-    try:
-        cmd_output = subprocess.run("perf test -vv 'perf all PMU test'",
-                                    shell=True, executable="/bin/bash", check=True, text=True,
-                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logger.debug(cmd_output)
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"Error executing command: {e}")
-
-    if not cmd_output.stderr.strip().endswith(": Ok"):
-        GLTCore.GLTTestResult.fail(f"perf test 'perf all PMU test' didn't get PASS with:\n{cmd_output}")
+    result = perf_utils.run_perf_test_candidates(
+        ["perf all PMU test", "Parsing of all PMU events from sysfs"]
+    )
+    logger.debug(
+        "perf PMU test status=%s test_name=%s reason=%s",
+        result.status.value, result.test_name, result.reason)
+    if result.status != perf_utils.PerfTestStatus.PASS:
+        GLTCore.GLTTestResult.fail(f"perf PMU test failed: {result.reason}")
 
 
 @GLTCore.GLTTestAttr()

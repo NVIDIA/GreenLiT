@@ -1,0 +1,168 @@
+"""Unit tests for common/perf_utils.py."""
+# pylint: disable=wrong-import-position
+
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+from tests.test_base import GLTTestBase
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+
+from common.perf_utils import (
+    PerfTestStatus,
+    has_coresight_fallback_evidence,
+    run_perf_test_candidates,
+)
+
+
+class TestPerfUtils(GLTTestBase):
+    """Test perf helper behavior without requiring real perf hardware."""
+
+    def _completed(self, stdout="", stderr="", returncode=0):
+        return subprocess.CompletedProcess(
+            args=["perf"],
+            returncode=returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_accepts_617_pmu_name(self, mock_run):
+        """A perf 6.17 PMU selftest name can satisfy the candidate list."""
+        mock_run.side_effect = [
+            self._completed(stdout="  5.2: Parsing of all PMU events from sysfs\n"),
+            self._completed(
+                stderr="  5.2: Parsing of all PMU events from sysfs           : Ok\n"
+            ),
+        ]
+
+        result = run_perf_test_candidates(
+            ["perf all PMU test", "Parsing of all PMU events from sysfs"]
+        )
+
+        self.assertEqual(result.status, PerfTestStatus.PASS)
+        self.assertEqual(result.test_name, "Parsing of all PMU events from sysfs")
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_accepts_old_name_first(self, mock_run):
+        """Existing perf selftest names remain preferred when listed."""
+        mock_run.side_effect = [
+            self._completed(
+                stdout=(
+                    "  5.2: perf all PMU test\n"
+                    "  5.3: Parsing of all PMU events from sysfs\n"
+                )
+            ),
+            self._completed(stderr="  5.2: perf all PMU test           : Ok\n"),
+        ]
+
+        result = run_perf_test_candidates(
+            ["perf all PMU test", "Parsing of all PMU events from sysfs"]
+        )
+
+        self.assertEqual(result.status, PerfTestStatus.PASS)
+        self.assertEqual(result.test_name, "perf all PMU test")
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_matches_substring_names(self, mock_run):
+        """Perf selftest candidates match longer upstream test names."""
+        mock_run.side_effect = [
+            self._completed(
+                stdout=(
+                    "  71: Check Arm CoreSight trace data recording "
+                    "and synthesized samples\n"
+                )
+            ),
+            self._completed(
+                stderr=(
+                    "  71: Check Arm CoreSight trace data recording "
+                    "and synthesized samples           : Ok\n"
+                )
+            ),
+        ]
+
+        result = run_perf_test_candidates(["arm coresight"])
+
+        self.assertEqual(result.status, PerfTestStatus.PASS)
+        self.assertEqual(result.test_name, "arm coresight")
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_reports_empty_output_as_no_match(self, mock_run):
+        """Perf can return 0 with empty output for no matched test names."""
+        mock_run.side_effect = [
+            self._completed(stdout="  5.2: perf all PMU test\n"),
+            self._completed(stdout="", stderr="", returncode=0),
+        ]
+
+        result = run_perf_test_candidates(["perf all PMU test"])
+
+        self.assertEqual(result.status, PerfTestStatus.NO_MATCH)
+        self.assertIn("empty output", result.reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_reports_nonzero_failure(self, mock_run):
+        """A non-zero perf selftest result is reported as a failure."""
+        mock_run.side_effect = [
+            self._completed(
+                stdout=(
+                    "  71: Check Arm CoreSight trace data recording "
+                    "and synthesized samples\n"
+                )
+            ),
+            self._completed(stderr="broken\n", returncode=1),
+        ]
+
+        result = run_perf_test_candidates(["arm coresight"])
+
+        self.assertEqual(result.status, PerfTestStatus.FAIL)
+        self.assertIn("broken", result.reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_reports_unlisted_candidates(self, mock_run):
+        """Missing candidate names are reported before running perf test."""
+        mock_run.return_value = self._completed(stdout="  1: other test\n")
+
+        result = run_perf_test_candidates(["arm coresight"])
+
+        self.assertEqual(result.status, PerfTestStatus.NO_MATCH)
+        self.assertIn("No matching perf test", result.reason)
+        mock_run.assert_called_once()
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_reports_generator_candidates(self, mock_run):
+        """Generator candidates are preserved in no-match failure reasons."""
+        mock_run.return_value = self._completed(stdout="  1: other test\n")
+
+        result = run_perf_test_candidates(name for name in ["arm coresight"])
+
+        self.assertEqual(result.status, PerfTestStatus.NO_MATCH)
+        self.assertIn("arm coresight", result.reason)
+
+    def test_has_coresight_fallback_evidence_requires_cs_etm_and_devices(self):
+        """Coresight fallback requires both cs_etm and a Coresight device."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            event_sources = base / "event_source" / "devices"
+            coresight = base / "coresight" / "devices"
+            event_sources.mkdir(parents=True)
+            coresight.mkdir(parents=True)
+
+            self.assertFalse(
+                has_coresight_fallback_evidence(event_sources, coresight)
+            )
+
+            (event_sources / "cs_etm").mkdir()
+            self.assertFalse(
+                has_coresight_fallback_evidence(event_sources, coresight)
+            )
+
+            (coresight / "tmc_etf0").mkdir()
+            self.assertTrue(
+                has_coresight_fallback_evidence(event_sources, coresight)
+            )
+
+
+if __name__ == "__main__":
+    GLTTestBase.unittest.main()
