@@ -867,3 +867,65 @@ test_cxl_reset_dvsec_sysfs.attr.post_hooks = GLTCore.PostHooks.create(
     postfail=_cxl_reset_reboot_hook,
     postafail=_cxl_reset_reboot_hook,
 )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cxl_zero_size_committed_decoder(_, __):
+    """
+    Verify the kernel enumerates a BIOS-committed, LOCKed zero-size HDM decoder
+    into the CXL topology instead of rejecting it with -ENXIO and aborting port
+    enumeration.
+
+    JIRA: DGX-16569
+    PATCH: https://lore.kernel.org/all/cover.1779957270.git.icheng@nvidia.com/
+    """
+    kconfig_path = "/boot/config-" + platform.release()
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.skip(f"Kernel config not found at {kconfig_path}")
+
+    missing = [
+        cfg for cfg in ("CONFIG_CXL_PCI", "CONFIG_CXL_MEM", "CONFIG_CXL_ACPI")
+        if kconfig.get(cfg) not in ("y", "m")
+    ]
+    if missing:
+        GLTCore.GLTTestResult.skip(
+            "Required CXL kernel config not enabled: " + ", ".join(missing)
+        )
+
+    zero_size_warning = "Committed with zero size"
+    if glt_utils.check_kernel_log(zero_size_warning):
+        GLTCore.GLTTestResult.fail(
+            "Kernel rejected a committed zero-size HDM decoder "
+            "and aborted port enumeration. "
+            "Backport the zero-size committed HDM decoder support patch at "
+            "https://lore.kernel.org/all/"
+            "cover.1779957270.git.icheng@nvidia.com/"
+        )
+
+    committed_zero = cxl_utils.find_committed_zero_size_decoders()
+
+    if not committed_zero:
+        GLTCore.GLTTestResult.skip(
+            "No committed zero-size HDM decoder exercised on this boot; "
+            "patch path not verified"
+        )
+
+    listed = cxl_utils.cxl_listed_decoder_names()
+    if listed is None:
+        GLTCore.GLTTestResult.skip(
+            "cxl list unavailable or produced no parseable output; "
+            "cannot verify zero-size HDM decoder enumeration"
+        )
+    shown = sorted(name for name in committed_zero if name in listed)
+    if not shown:
+        GLTCore.GLTTestResult.fail(
+            "Committed zero-size HDM decoder(s) enumerated but not shown by "
+            "cxl list. Backport the zero-size committed HDM decoder support "
+            "patch at https://lore.kernel.org/all/"
+            "cover.1779957270.git.icheng@nvidia.com/)"
+        )

@@ -22,6 +22,7 @@ into skip/fail/pass outcomes.
 """
 
 import glob
+import json
 import os
 import re
 import struct
@@ -289,3 +290,68 @@ def any_cxl_region_committed(sysfs_root: str = "/") -> bool:
         if value == "1":
             return True
     return False
+
+
+def find_committed_zero_size_decoders(sysfs_root: str = "/") -> list[str]:
+    """Return names of decoders committed and LOCKed with size 0.
+
+    A size-0 decoder on its own is just an idle slot; locked == 1 marks the
+    slot BIOS committed and locked, which is the case the kernel must
+    enumerate. Decoders whose size/locked attributes cannot be read are skipped
+    so they are never mistaken for the target.
+    """
+    pattern = os.path.join(
+        sysfs_root, "sys", "bus", "cxl", "devices", "decoder*",
+    )
+    names = []
+    for decoder_dir in sorted(glob.glob(pattern)):
+        try:
+            with open(os.path.join(decoder_dir, "size"),
+                      "r", encoding="utf-8") as f:
+                size = int(f.read().strip(), 0)
+            with open(os.path.join(decoder_dir, "locked"),
+                      "r", encoding="utf-8") as f:
+                locked = int(f.read().strip())
+        except (OSError, ValueError):
+            continue
+        if size == 0 and locked == 1:
+            names.append(os.path.basename(decoder_dir))
+    return names
+
+
+def cxl_listed_decoder_names() -> set[str] | None:
+    """Return the set of decoder names reported by `cxl list`.
+
+    Uses `-i` so a committed but region-less (idle-looking) decoder is still
+    listed. The output is walked recursively so the result is independent of
+    how a given cxl-cli version nests decoder objects.
+    """
+    try:
+        result = subprocess.run(
+            ["cxl", "list", "-D", "-i"],
+            capture_output=True, text=True, check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+
+    names: set[str] = set()
+
+    def _collect(node):
+        if isinstance(node, dict):
+            name = node.get("decoder")
+            if isinstance(name, str):
+                names.add(name)
+            for value in node.values():
+                _collect(value)
+        elif isinstance(node, list):
+            for item in node:
+                _collect(item)
+
+    _collect(data)
+    return names
