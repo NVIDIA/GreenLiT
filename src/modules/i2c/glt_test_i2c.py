@@ -45,6 +45,76 @@ def _first_eligible_tegra_i2c_device() -> str | None:
     return sorted(candidates)[0]
 
 
+def _tegra_i2c_devices(prefix: str = "NVDA2017:",
+                       drv: Path = Path("/sys/bus/platform/drivers/tegra-i2c")) -> list[str]:
+    """
+    Return sorted tegra-i2c platform devices whose names start with prefix.
+    """
+    if not drv.is_dir():
+        return []
+
+    try:
+        entries = list(drv.iterdir())
+    except OSError:
+        return []
+
+    return sorted(
+        entry.name
+        for entry in entries
+        if entry.name.startswith(prefix) and entry.is_symlink() and entry.exists()
+    )
+
+
+def _tegra_i2c_kernel_error_messages(dev_name: str) -> list[str]:
+    """Return kernel log fragments that indicate Tegra I2C probe/transfer failure."""
+    return [
+        f"tegra-i2c {dev_name}: probe with driver tegra-i2c failed",
+        f"tegra-i2c {dev_name}: config load timed out",
+        f"tegra-i2c {dev_name}: i2c transfer timed out",
+        f"tegra-i2c {dev_name}: rx fifo flush timed out",
+        f"tegra-i2c {dev_name}: tx fifo flush timed out",
+    ]
+
+
+def _kernel_log_text() -> str:
+    """Return the current boot kernel log text, or an empty string if unavailable."""
+    if glt_utils.is_cli_available("journalctl"):
+        try:
+            result = subprocess.run(["journalctl", "--no-pager", "-b0", "-k"],
+                                    capture_output=True, text=True, check=False, timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        else:
+            if result.returncode == 0:
+                return result.stdout
+
+    if glt_utils.is_cli_available("dmesg"):
+        try:
+            result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False, timeout=10)
+        except subprocess.TimeoutExpired:
+            return ""
+        if result.returncode == 0:
+            return result.stdout
+
+    return ""
+
+
+def _new_tegra_i2c_kernel_errors(dev_name: str, previous_log: str, current_log: str) -> list[str]:
+    """Return Tegra I2C errors added after previous_log was captured."""
+    if not previous_log:
+        current_log = ""
+    elif current_log.startswith(previous_log):
+        current_log = current_log[len(previous_log):]
+    else:
+        current_log = ""
+
+    return [
+        message
+        for message in _tegra_i2c_kernel_error_messages(dev_name)
+        if message in current_log
+    ]
+
+
 def _dev_unbind_bind(dev_name: str) -> tuple[bool, str]:
     """Unbind then rebind dev_name on the tegra-i2c platform driver.
     Returns (True, "") on success, or (False, reason) on any OSError so
@@ -162,8 +232,14 @@ def test_ipmi_i2c_pec(_, logger):
 
 
 def _restore_tegra_i2c_binding(_scheduler, attr, logger):
-    dev_name = getattr(attr, "picked_device", None)
-    if dev_name is not None:
+    dev_names = getattr(attr, "rebind_devices", None)
+    if dev_names is None:
+        dev_name = getattr(attr, "picked_device", None)
+        dev_names = () if dev_name is None else (dev_name,)
+    elif isinstance(dev_names, str):
+        dev_names = (dev_names,)
+
+    for dev_name in dev_names:
         try:
             with open("/sys/bus/platform/drivers/tegra-i2c/bind", "w", encoding="ascii") as fh:
                 fh.write(dev_name)
@@ -224,6 +300,83 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
         GLTCore.GLTTestResult.fail(
             f"missing '{message}' in kernel log for {dev_name} after rebind, "
             "consider backporting kernel commit b53232fd220a")
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_tegra410_i2c_device(_, logger):
+    """
+    Verify Tegra410 I2C controllers bind and survive driver rebind on Vera.
+
+    JIRA: DGX-16337
+    PATCH: https://git.kernel.org/torvalds/c/4eeb19aaff55
+    PATCH: https://git.kernel.org/torvalds/c/0c0e440b0c93
+    PATCH: https://git.kernel.org/torvalds/c/59717f260183
+    """
+
+    test_tegra410_i2c_device.attr.rebind_devices = None
+
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("The CPU is not Vera.")
+
+    if not Path("/sys/firmware/acpi").is_dir():
+        GLTCore.GLTTestResult.skip(
+            "System is not ACPI-booted; Tegra410 I2C ACPI coverage is not applicable.")
+
+    devices = _tegra_i2c_devices()
+    if not devices:
+        GLTCore.GLTTestResult.fail(
+            "No NVDA2017 Tegra410 I2C device is bound to tegra-i2c. "
+            "Include kernel commit 59717f260183 to add Tegra410 support.")
+    test_tegra410_i2c_device.attr.rebind_devices = tuple(devices)
+
+    logger.info("Detected Tegra410 I2C platform devices: %s", ", ".join(devices))
+
+    kernel_log = _kernel_log_text()
+    if not kernel_log:
+        GLTCore.GLTTestResult.skip(
+            "Kernel log is unavailable; cannot validate Tegra410 I2C probe/transfer errors.")
+    kernel_errors = []
+
+    for dev_name in devices:
+        ok, reason = _dev_unbind_bind(dev_name)
+        if not ok:
+            GLTCore.GLTTestResult.fail(
+                f"unbind/bind cycle on {dev_name} failed: {reason}. "
+                "Include kernel commits 0c0e440b0c93 and 59717f260183 to fix Tegra410 "
+                "I2C support.")
+
+        if dev_name not in _tegra_i2c_devices():
+            GLTCore.GLTTestResult.fail(
+                f"{dev_name} is not bound to tegra-i2c after rebind. "
+                "Include kernel commit 59717f260183 to add Tegra410 support.")
+
+        current_log = _kernel_log_text()
+        if not current_log:
+            GLTCore.GLTTestResult.skip(
+                f"Kernel log unavailable after rebinding {dev_name}; cannot validate new errors.")
+        if not current_log.startswith(kernel_log):
+            GLTCore.GLTTestResult.skip(
+                "Kernel log cursor is non-contiguous; cannot reliably diff new Tegra410 I2C errors.")
+        kernel_errors.extend(_new_tegra_i2c_kernel_errors(dev_name, kernel_log, current_log))
+        kernel_log = current_log
+
+    if kernel_errors:
+        GLTCore.GLTTestResult.fail(
+            "Found Tegra410 I2C kernel errors after probing devices: "
+            f"{'; '.join(kernel_errors)}. Include kernel commits 0c0e440b0c93 "
+            "and 59717f260183 to fix Tegra410 register-offset support.")
+
+
+test_tegra410_i2c_device.attr.post_hooks = GLTCore.PostHooks.create(
+    postsuccess=_restore_tegra_i2c_binding,
+    postskip=_restore_tegra_i2c_binding,
+    postfail=_restore_tegra_i2c_binding,
+    postafail=_restore_tegra_i2c_binding,
+)
 
 
 test_tegra_i2c_dma_pio_fallback.attr.post_hooks = GLTCore.PostHooks.create(
