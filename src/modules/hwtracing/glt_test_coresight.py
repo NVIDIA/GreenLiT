@@ -16,10 +16,10 @@
 """
 Python script to test ARM coresight.
 """
-import subprocess
 from packaging import version
 from common import glt_core as GLTCore
 from common import glt_utils
+from common import perf_utils
 from common.nv_device import NvDev
 
 @GLTCore.GLTTestAttr()
@@ -43,14 +43,19 @@ def test_perf_coresight(_, logger):
     if not glt_utils.is_cli_available("perf"):
         GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
 
-    try:
-        cmd_output = subprocess.run(
-            "perf test -vv 'arm coresight'",
-            shell=True, executable='/bin/bash', check=True, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logger.debug(cmd_output)
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail("Error executing command: %s", e)
+    result = perf_utils.run_perf_test_candidates(["arm coresight"])
+    logger.debug(
+        "perf Coresight test status=%s test_name=%s reason=%s",
+        result.status.value, result.test_name, result.reason)
+    if result.status == perf_utils.PerfTestStatus.PASS:
+        return
 
-    if not cmd_output.stderr.strip().endswith(": Ok"):
-        GLTCore.GLTTestResult.fail(f"perf test 'arm coresight' didn't get PASS with: {cmd_output}")
+    # Some perf builds expose CoreSight through cs_etm/sysfs but do not
+    # install or list the CoreSight shell selftest. In that case, avoid a
+    # false hardware failure and accept this lightweight availability check.
+    if result.status == perf_utils.PerfTestStatus.NO_MATCH and \
+            perf_utils.has_coresight_fallback_evidence():
+        logger.info("No perf Coresight selftest found; using cs_etm/sysfs fallback.")
+        return
+
+    GLTCore.GLTTestResult.fail(f"perf Coresight test failed: {result.reason}")

@@ -42,6 +42,8 @@ greenlit/
 │       ├── tpm/            # TPM tests
 │       └── virt/           # Virtualization tests
 ├── tests                   # Unit tests files
+│   ├── common/             # Unit tests for common helpers
+│   └── modules/            # Unit tests for module test logic
 ├── COPYRIGHT               # Copyright information
 ├── README.md               # Project README
 └── VERSION                 # Project version
@@ -74,7 +76,10 @@ Use this table when modifying the repository. For how to run the suite on a syst
 | Hardware manifest | `confs/hardware-manifest.json` | — |
 | Reference data (patches, kernel config lists, etc.) | `data/` (installed to `/usr/share/greenlit/data/`) | — |
 | Standalone checker entry points | `src/scripts/` | `pyproject.toml` `[tool.poetry.scripts]` |
-| Framework unit test | `tests/` (typically mirrors `src/common/`) | [development-setup.md](development-setup.md), [AGENTS.md](../../AGENTS.md) |
+| Framework unit test | `tests/` (typically `tests/common/` for helpers or `tests/modules/` for module test logic) | [development-setup.md](development-setup.md), [AGENTS.md](../../AGENTS.md) |
+
+Unit tests under `tests/modules/` validate module test logic with mocks. They do not define
+new GreenLiT runtime test categories; runtime categories remain under `src/modules/`.
 
 ## Read also
 * docs/user-guides/user-manual.md -> Runtime, CLI, automation on hardware
