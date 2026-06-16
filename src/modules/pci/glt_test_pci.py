@@ -27,6 +27,102 @@ from common import pci_utils
 from common.nv_device import NvDev
 from scripts import check_kernel_config
 
+ASPM_POLICY_PATH = "/sys/module/pcie_aspm/parameters/policy"
+ASPM_PROBE_PROC_PATH = "/proc/greenlit_pci_aspm_saved_state"
+ASPM_SAVED_STATE_MODULE = "aspm_saved_state_probe"
+ASPM_REQUIRED_CONFIGS = ("CONFIG_PCIEASPM", "CONFIG_KPROBES", "CONFIG_KRETPROBES")
+
+
+def _parse_aspm_policy_content(content):
+    """Return (available policies, current policy) from the ASPM policy file."""
+    policies = []
+    current_policy = None
+
+    for token in content.split():
+        is_current = token.startswith("[") and token.endswith("]")
+        policy = token.strip("[]")
+        policies.append(policy)
+        if is_current:
+            current_policy = policy
+
+    return policies, current_policy
+
+
+def _candidate_aspm_policies(policies, current_policy):
+    """Return deterministic ASPM policy candidates that differ from current."""
+    candidates = []
+    for policy in ("performance", "powersave", "powersupersave", "default"):
+        if policy in policies and policy != current_policy and policy not in candidates:
+            candidates.append(policy)
+    for policy in policies:
+        if policy != current_policy and policy not in candidates:
+            candidates.append(policy)
+    return candidates
+
+
+def _check_aspm_saved_state_kernel_config():
+    """Return missing kernel configs required by the ASPM saved-state test."""
+    kconfig_path = "/boot/config-" + platform.uname().release
+    kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    return [
+        config for config in ASPM_REQUIRED_CONFIGS
+        if kconfig.get(config) not in ("y", "m")
+    ]
+
+
+def _cleanup_aspm_saved_state_probe(module_loaded, policy_changed, original_policy, logger):
+    """Restore ASPM policy and unload the saved-state probe module."""
+    if policy_changed:
+        try:
+            _write_aspm_policy(original_policy)
+        except OSError as e:
+            logger.error(
+                "Failed to restore PCIe ASPM policy %s: %s",
+                original_policy,
+                e,
+            )
+    if module_loaded:
+        result = subprocess.run(
+            ["rmmod", ASPM_SAVED_STATE_MODULE],
+            capture_output=True,
+            check=False,
+            shell=False,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            logger.error("Failed to unload %s: %s", ASPM_SAVED_STATE_MODULE, detail)
+    if glt_utils.is_cli_available("make"):
+        subprocess.run(["make", "clean"], check=False, shell=False)
+
+
+def _read_aspm_probe_hits(proc_path=ASPM_PROBE_PROC_PATH):
+    """Read ASPM config and saved-state probe counters."""
+    values = {}
+    with open(proc_path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            key, value = line.strip().split("=", maxsplit=1)
+            values[key] = int(value)
+    return values
+
+
+def _read_aspm_policy(policy_path=ASPM_POLICY_PATH):
+    """Read the ASPM policy sysfs file."""
+    with open(policy_path, "r", encoding="utf-8") as fh:
+        return _parse_aspm_policy_content(fh.read())
+
+
+def _write_aspm_policy(policy, policy_path=ASPM_POLICY_PATH):
+    """Write the ASPM policy sysfs file."""
+    with open(policy_path, "w", encoding="utf-8") as fh:
+        fh.write(policy)
+    _, current_policy = _read_aspm_policy(policy_path)
+    if current_policy != policy:
+        raise OSError(
+            f"PCIe ASPM policy write to {policy} did not take effect; "
+            f"current policy is {current_policy or 'unknown'}."
+        )
+
 
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
@@ -231,6 +327,193 @@ def test_pci_secondary_mabort(_, logger):
             GLTCore.GLTTestResult.fail(fail_msg)
     except subprocess.CalledProcessError as e:
         GLTCore.GLTTestResult.fail(f"Failed to run 'lspci -vv': {e}")
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
+def test_pci_aspm_saved_state_update(_, logger):
+    """
+    Verify ASPM policy changes update PCIe saved Link Control state.
+
+    The test changes the system-wide PCIe ASPM policy and restores it in cleanup.
+    SIGKILL or host failure before cleanup can leave the policy changed.
+
+    JIRA: DGX-8962
+    PATCH: https://git.kernel.org/torvalds/c/6d4266675279
+    """
+    if not os.path.exists(ASPM_POLICY_PATH):
+        GLTCore.GLTTestResult.skip(
+            "PCIe ASPM policy control is not available; CONFIG_PCIEASPM may be disabled."
+        )
+
+    try:
+        missing_configs = _check_aspm_saved_state_kernel_config()
+    except OSError as e:
+        GLTCore.GLTTestResult.skip(f"Cannot read running kernel config: {e}")
+    if missing_configs:
+        GLTCore.GLTTestResult.skip(
+            "Required kernel config not enabled: " + ", ".join(missing_configs)
+        )
+
+    try:
+        policies, original_policy = _read_aspm_policy()
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(f"Cannot read PCIe ASPM policy: {e}")
+
+    if not original_policy:
+        GLTCore.GLTTestResult.fail("Cannot determine current PCIe ASPM policy.")
+
+    for command in ("make", "insmod", "rmmod"):
+        if not glt_utils.is_cli_available(command):
+            GLTCore.GLTTestResult.skip(
+                f"{command} is unavailable; cannot build or load the ASPM saved-state probe."
+            )
+
+    candidate_policies = _candidate_aspm_policies(policies, original_policy)
+    if not candidate_policies:
+        GLTCore.GLTTestResult.skip(
+            "Only one PCIe ASPM policy is available; policy-change path is not observable."
+        )
+
+    module_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        ASPM_SAVED_STATE_MODULE,
+    )
+    module_loaded = False
+    policy_changed = False
+
+    with glt_utils.chdir_managed(module_dir):
+        try:
+            subprocess.run(["make"], check=True, shell=False)
+            if not glt_utils.sign_kernel_module(f"{ASPM_SAVED_STATE_MODULE}.ko", logger):
+                GLTCore.GLTTestResult.fail(
+                    f"Cannot sign {ASPM_SAVED_STATE_MODULE}.ko for Secure Boot. "
+                    "See docs/user-guides/secure-boot.md for setup."
+                )
+
+            result = subprocess.run(
+                ["insmod", f"{ASPM_SAVED_STATE_MODULE}.ko"],
+                capture_output=True,
+                shell=False,
+                text=True,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or result.stdout.strip() or "insmod failed"
+                GLTCore.GLTTestResult.skip(
+                    "Cannot load ASPM saved-state probe module; kprobes or "
+                    f"pcie_config_aspm_link() are unavailable. Detail: {detail}"
+                )
+            module_loaded = True
+
+            before_counts = _read_aspm_probe_hits()
+            after_counts = before_counts
+            observed_policy = None
+
+            for alternate_policy in candidate_policies:
+                logger.info(
+                    "Switching PCIe ASPM policy from %s to %s.",
+                    original_policy,
+                    alternate_policy,
+                )
+                _write_aspm_policy(alternate_policy)
+                policy_changed = True
+                _write_aspm_policy(original_policy)
+                policy_changed = False
+                after_counts = _read_aspm_probe_hits()
+
+                transition_delta = (
+                    after_counts.get("transition_hits", 0) -
+                    before_counts.get("transition_hits", 0)
+                )
+                if transition_delta > 0:
+                    observed_policy = alternate_policy
+                    break
+
+            config_delta = (
+                after_counts.get("config_hits", 0) -
+                before_counts.get("config_hits", 0)
+            )
+            saved_state_delta = (
+                after_counts.get("saved_state_hits", 0) -
+                before_counts.get("saved_state_hits", 0)
+            )
+
+            if config_delta <= 0:
+                GLTCore.GLTTestResult.skip(
+                    "PCIe ASPM policy changed but did not reprogram any link; "
+                    "saved-state update path is not observable on this system."
+                )
+
+            if transition_delta <= 0:
+                GLTCore.GLTTestResult.skip(
+                    "PCIe ASPM policy changed but did not change any inspected "
+                    "Link Control ASPM/CLKREQ bits; saved-state update path is "
+                    "not observable on this system."
+                )
+
+            inspection_delta = (
+                after_counts.get("saved_state_inspections", 0) -
+                before_counts.get("saved_state_inspections", 0)
+            )
+            mismatch_delta = (
+                after_counts.get("saved_state_mismatches", 0) -
+                before_counts.get("saved_state_mismatches", 0)
+            )
+            missed_delta = (
+                after_counts.get("probe_missed_instances", 0) -
+                before_counts.get("probe_missed_instances", 0)
+            )
+
+            if inspection_delta <= 0:
+                GLTCore.GLTTestResult.skip(
+                    "PCIe ASPM policy changed, but no saved PCIe Link Control "
+                    "state was available to inspect on the reprogrammed links."
+                )
+
+            if missed_delta > 0:
+                GLTCore.GLTTestResult.skip(
+                    "ASPM saved-state probe missed kretprobe instances; "
+                    "saved-state update path is not fully observable on this system."
+                )
+
+            if mismatch_delta > 0:
+                GLTCore.GLTTestResult.fail(
+                    "PCIe ASPM link configuration changed, but "
+                    "saved PCIe Link Control state did not match live state; "
+                    "ASPM state may remain stale across PCIe error recovery. Apply "
+                    "commit 6d4266675279."
+                )
+
+            if saved_state_delta <= 0:
+                GLTCore.GLTTestResult.fail(
+                    "PCIe ASPM link configuration changed, but no matching "
+                    "saved PCIe Link Control state was observed; apply commit "
+                    "6d4266675279."
+                )
+
+            logger.info(
+                "ASPM policy %s produced %d config writes, %d Link Control "
+                "transitions, and %d saved-state matches.",
+                observed_policy,
+                config_delta,
+                transition_delta,
+                saved_state_delta,
+            )
+        except subprocess.CalledProcessError as e:
+            GLTCore.GLTTestResult.fail(f"Error executing command: {e}")
+        except (OSError, ValueError) as e:
+            GLTCore.GLTTestResult.fail(f"PCIe ASPM saved-state validation failed: {e}")
+        finally:
+            _cleanup_aspm_saved_state_probe(
+                module_loaded,
+                policy_changed,
+                original_policy,
+                logger,
+            )
 
 
 def _has_usb_devices_behind_hub(controller_bdf: str) -> tuple[bool, str]:
