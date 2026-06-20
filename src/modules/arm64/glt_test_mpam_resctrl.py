@@ -19,6 +19,7 @@ Python script to verify the ARM64 MPAM resctrl filesystem can be mounted.
 
 import os
 import platform
+import re
 import subprocess
 
 from common import glt_core as GLTCore
@@ -260,6 +261,87 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                     f"features: {', '.join(missing_features)}."
                 )
 
+    finally:
+        if mounted_by_test:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
+                               RESCTRL_MOUNT_POINT, detail)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_resctrl_schemata(_, logger):
+    """
+    Verify the ARM64 MPAM resctrl schemata interface is readable.
+
+    JIRA: DGX-16761
+    """
+    schemata_path = os.path.join(RESCTRL_MOUNT_POINT, "schemata")
+    schemata_line_re = re.compile(r"^\s*\S+:\d+=\S+")
+    mounted_by_test = False
+
+    if not _resctrl_is_mounted():
+        for cli in ("mount", "umount"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available, cannot test resctrl schemata.")
+
+        try:
+            subprocess.run(
+                ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE,
+                 RESCTRL_MOUNT_POINT],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, shell=False,
+            )
+        except subprocess.CalledProcessError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
+            )
+        mounted_by_test = True
+
+        if not _resctrl_is_mounted():
+            GLTCore.GLTTestResult.fail(
+                f"mount reported success but no resctrl entry for "
+                f"{RESCTRL_MOUNT_POINT} found in {PROC_MOUNTS}; "
+                "cannot test resctrl schemata."
+            )
+
+    try:
+        if not os.path.isfile(schemata_path):
+            GLTCore.GLTTestResult.fail(
+                f"resctrl schemata {schemata_path} does not exist or is not "
+                "a file after mount."
+            )
+
+        try:
+            with open(schemata_path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+                if not content.strip():
+                    GLTCore.GLTTestResult.fail(
+                        f"resctrl schemata {schemata_path} is empty."
+                    )
+
+                if not any(schemata_line_re.match(line) for line in content.splitlines()):
+                    GLTCore.GLTTestResult.fail(
+                        f"resctrl schemata {schemata_path} contains no "
+                        "well-formed resource control line."
+                    )
+
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read resctrl schemata {schemata_path}: {e}"
+            )
     finally:
         if mounted_by_test:
             try:
