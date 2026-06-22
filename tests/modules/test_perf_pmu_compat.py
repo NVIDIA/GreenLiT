@@ -323,6 +323,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS,
         )
 
     def test_find_arm_spe_pmu_returns_first_existing_pmu(self):
@@ -482,6 +483,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            timeout=glt_test_pmu.ARM_SPE_RECORD_TIMEOUT_SECONDS,
         )
 
     def test_olympus_data_source_test_skips_on_grace(self):

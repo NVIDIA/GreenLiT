@@ -104,6 +104,8 @@ def _parse_nvidia_perf_units(perf_list_json):
 
 ARM_SPE_EVENT_SOURCE_PATH = "/sys/bus/event_source/devices"
 ARM_SPE_PMUS = ("arm_spe_0", "arm_spe_1", "arm_spe_2", "arm_spe_3")
+ARM_SPE_RECORD_TIMEOUT_SECONDS = 180
+ARM_SPE_DECODE_TIMEOUT_SECONDS = 120
 COMMON_DATA_SOURCE_LEVELS = ("LVL L2", "LVL Local RAM", "LVL Remote RAM")
 DATA_SOURCE_OPS = ("OP LOAD", "OP STORE")
 
@@ -126,6 +128,7 @@ def _decode_arm_spe(perf_cmd, perf_data_path, logger):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=ARM_SPE_DECODE_TIMEOUT_SECONDS,
     )
 
 
@@ -484,6 +487,7 @@ def _record_arm_spe(perf_cmd, perf_data_path, pmu, logger):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        timeout=ARM_SPE_RECORD_TIMEOUT_SECONDS,
     )
 
 
@@ -715,13 +719,24 @@ def test_perf_arm_spe_olympus_data_source(sd, logger):
 
     perf_data_path = os.path.join(sd.log_dir, "test_perf_arm_spe_olympus_data_source.perf.data")
 
-    result = _record_arm_spe(perf_cmd, perf_data_path, pmu, logger)
+    try:
+        result = _record_arm_spe(perf_cmd, perf_data_path, pmu, logger)
+    except subprocess.TimeoutExpired as err:
+        GLTCore.GLTTestResult.fail(
+            f"perf ARM SPE record timed out after {err.timeout} seconds"
+        )
+
     if result.returncode != 0:
         GLTCore.GLTTestResult.fail(
             f"perf ARM SPE record failed: stdout={result.stdout}, stderr={result.stderr}"
         )
 
-    result = _decode_arm_spe(perf_cmd, perf_data_path, logger)
+    try:
+        result = _decode_arm_spe(perf_cmd, perf_data_path, logger)
+    except subprocess.TimeoutExpired as err:
+        GLTCore.GLTTestResult.fail(
+            f"perf ARM SPE decode timed out after {err.timeout} seconds"
+        )
     if result.returncode != 0:
         GLTCore.GLTTestResult.fail(
             f"perf ARM SPE decode failed: stdout={result.stdout}, stderr={result.stderr}"
