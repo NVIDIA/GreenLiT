@@ -1,0 +1,1 @@
+"""CPU module tests."""

@@ -87,6 +87,18 @@ def has_mok_keys():
         os.path.isfile(MOK_CERTIFICATE)
 
 
+def read_sysfs_value(path):
+    """Read a sysfs file and return its stripped value."""
+    with open(path, 'r', encoding='utf-8') as f:
+        return f.read().strip()
+
+
+def write_sysfs_value(path, value):
+    """Write a value to a sysfs file."""
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(f"{value}\n")
+
+
 # Well-known path where users can place sign-file manually (e.g. from
 # Buildroot or a custom kernel build).
 SIGN_FILE_OVERRIDE = "/usr/local/bin/sign-file"
