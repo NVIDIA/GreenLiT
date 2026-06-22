@@ -17,6 +17,7 @@
 Python script to verify the ARM64 MPAM resctrl filesystem can be mounted.
 """
 
+import glob
 import os
 import platform
 import re
@@ -344,6 +345,109 @@ def test_mpam_resctrl_schemata(_, logger):
             )
     finally:
         if mounted_by_test:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
+                               RESCTRL_MOUNT_POINT, detail)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify the ARM64 MPAM L3 cache occupancy monitor is exposed and readable.
+
+    JIRA: DGX-16762
+    """
+    schemata_path = RESCTRL_MOUNT_POINT + "/schemata"
+    l3_line_re = re.compile(r"^\s*L3:")
+    l3_mon_features = RESCTRL_MOUNT_POINT + "/info/L3_MON/mon_features"
+    l3_occupancy_glob = "mon_data/mon_L3_*/llc_occupancy"
+    fs_mounted = False
+
+    if not _resctrl_is_mounted():
+        for cli in ("mount", "umount"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available, cannot test L3 occupancy.")
+
+        try:
+            subprocess.run(
+                ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE,
+                 RESCTRL_MOUNT_POINT],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, shell=False,
+            )
+        except subprocess.CalledProcessError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
+            )
+        fs_mounted = True
+
+        if not _resctrl_is_mounted():
+            GLTCore.GLTTestResult.fail(
+                f"mount reported success but no resctrl entry for "
+                f"{RESCTRL_MOUNT_POINT} found in {PROC_MOUNTS}; "
+                "cannot test L3 occupancy."
+            )
+
+    try:
+        # the L3 resource must be present in the schemata.
+        try:
+            with open(schemata_path, "r", encoding="utf-8") as f:
+                l3_present = any(l3_line_re.match(line) for line in f)
+        except OSError:
+            l3_present = False
+        if not l3_present:
+            GLTCore.GLTTestResult.fail(
+                "L3 resource not present in resctrl schemata.")
+
+        # L3_MON must advertise the llc_occupancy feature.
+        try:
+            with open(l3_mon_features, "r", encoding="utf-8") as f:
+                occupancy_advertised = any(
+                    field == "llc_occupancy"
+                    for line in f for field in line.split())
+        except OSError:
+            occupancy_advertised = False
+        if not occupancy_advertised:
+            GLTCore.GLTTestResult.fail(
+                "L3 occupancy monitoring not advertised.")
+
+        # a concrete L3 occupancy counter file must exist.
+        matches = sorted(glob.glob(
+            os.path.join(RESCTRL_MOUNT_POINT, l3_occupancy_glob)))
+        occupancy_file = matches[0] if matches else None
+        if occupancy_file is None:
+            GLTCore.GLTTestResult.fail(
+                "L3 occupancy advertised but no mon_L3 occupancy file found."
+            )
+
+        # the counter must read back as a non-negative integer.
+        try:
+            with open(occupancy_file, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read L3 occupancy file {occupancy_file}: {e}"
+            )
+
+        if not raw.isdigit():
+            GLTCore.GLTTestResult.fail(
+                f"L3 occupancy file {occupancy_file} did not contain a "
+                f"non-negative integer (read {raw!r})."
+            )
+    finally:
+        if fs_mounted:
             try:
                 subprocess.run(
                     ["umount", RESCTRL_MOUNT_POINT],
