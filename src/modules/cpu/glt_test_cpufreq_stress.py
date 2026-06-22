@@ -61,6 +61,8 @@ HIGH_PERF_CPU_FREQ_MHZ = 1000
 SCALING_FREQ_MIN_PERCENT = 70
 CPPC_PERF_LIMITED_CLEAR_MASK = "0x3"
 
+CPUFREQ_ONLINE_GET_FAILED_MSG = "cpufreq: cpufreq_online: ->get() failed"
+
 REQUIRED_PATCHES = (
     "https://lore.kernel.org/all/173982791748.4020779.2848639862581042284.b4-ty@arm.com/",
     "https://lore.kernel.org/all/20250131155842.3839098-1-beata.michalska@arm.com/",
@@ -73,6 +75,20 @@ REQUIRED_PATCHES = (
 def _cpu_cpufreq_glob(filename):
     """Return glob results for a cpufreq sysfs file across all CPUs."""
     return glob.glob(f"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/{filename}")
+
+
+def _is_cpu_online(cpu_num, logger=None):
+    """Return whether the CPU is online, treating absent cpu0 online files as online."""
+    online_path = f"/sys/devices/system/cpu/cpu{cpu_num}/online"
+    if not os.path.exists(online_path):
+        return True
+    try:
+        with open(online_path, 'r', encoding='utf-8') as f:
+            return f.read().strip() != "0"
+    except (IOError, OSError):
+        if logger:
+            logger.warning("Cannot read online state for cpu%d", cpu_num)
+        return True
 
 
 def _read_sysfs_int_value(path):
@@ -233,6 +249,23 @@ def _get_cpu_scaling_cur_freqs(logger=None):
             if logger:
                 logger.warning("Cannot read scaling_cur_freq for cpu%d", cpu_num)
     return freqs
+
+
+def _get_cpus_with_invalid_scaling_cur_freq(logger=None):
+    """
+    Return CPUs that expose cpufreq but do not report positive scaling_cur_freq.
+    """
+    cpufreq_cpus = set()
+    for path in _cpu_cpufreq_glob("scaling_driver"):
+        match = re.search(r'cpu(\d+)', path)
+        if not match:
+            continue
+        cpu_num = int(match.group(1))
+        if _is_cpu_online(cpu_num, logger=logger):
+            cpufreq_cpus.add(cpu_num)
+
+    freqs = _get_cpu_scaling_cur_freqs(logger=logger)
+    return sorted(cpufreq_cpus - set(freqs))
 
 
 def _is_amu_extension_enabled():
@@ -429,9 +462,9 @@ def _check_stress_ng_alive(process):
     return False, reason
 
 
-def _validate_cppc_stress_prerequisites():
+def _validate_cppc_prerequisites(require_stress_ng=False):
     """
-    Validate common prerequisites for CPU frequency stress tests.
+    Validate cppc_cpufreq prerequisites on the target system.
 
     Returns:
         (True, None) if all checks pass,
@@ -440,21 +473,59 @@ def _validate_cppc_stress_prerequisites():
     driver_paths = sorted(_cpu_cpufreq_glob("scaling_driver"))
     if not driver_paths:
         return False, "cpufreq sysfs not available; cannot read scaling_driver."
+    non_cppc_drivers = []
     try:
-        with open(driver_paths[0], 'r', encoding='utf-8') as f:
-            scaling_driver = f.read().strip()
-        if scaling_driver != "cppc_cpufreq":
-            return False, (f"cppc_cpufreq not active "
-                           f"(current driver: {scaling_driver}).")
+        for driver_path in driver_paths:
+            with open(driver_path, 'r', encoding='utf-8') as f:
+                scaling_driver = f.read().strip()
+            if scaling_driver != "cppc_cpufreq":
+                non_cppc_drivers.append(f"{driver_path}: {scaling_driver}")
     except (IOError, OSError):
         return False, "cpufreq sysfs not available; cannot read scaling_driver."
 
-    if not glt_utils.is_cli_available("stress-ng"):
+    if non_cppc_drivers:
+        return False, ("cppc_cpufreq not active for all cpufreq policies "
+                       f"({', '.join(non_cppc_drivers)}).")
+
+    if require_stress_ng and not glt_utils.is_cli_available("stress-ng"):
         return False, ("stress-ng is not available. Please follow the user guide "
                        "to install it on your distribution or build it from source: "
                        "https://github.com/ColinIanKing/stress-ng")
 
     return True, None
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cppc_cpufreq_online_get_did_not_fail(_, logger):
+    """
+    Verify cppc_cpufreq did not fail CPU policy creation in the current boot.
+
+    JIRA: DGX-10543
+    PATCH: https://git.kernel.org/torvalds/c/c47195631960
+    """
+    ok, reason = _validate_cppc_prerequisites()
+    if not ok:
+        GLTCore.GLTTestResult.fail(reason)
+
+    if glt_utils.check_kernel_log(CPUFREQ_ONLINE_GET_FAILED_MSG):
+        GLTCore.GLTTestResult.fail(
+            f"Found cppc_cpufreq online failure in current boot log: "
+            f"{CPUFREQ_ONLINE_GET_FAILED_MSG}. Apply patch "
+            "c47195631960 (cppc_cpufreq: Use desired perf if feedback ctrs are 0 or unchanged)."
+        )
+
+    invalid_cpus = _get_cpus_with_invalid_scaling_cur_freq(logger=logger)
+    if invalid_cpus:
+        GLTCore.GLTTestResult.fail(
+            "CPUs expose cppc_cpufreq but do not report positive scaling_cur_freq: "
+            f"{invalid_cpus}. Apply patch c47195631960 "
+            "(cppc_cpufreq: Use desired perf if feedback ctrs are 0 or unchanged)."
+        )
+
+    logger.info("PASS: cppc_cpufreq online get check completed successfully")
 
 
 @GLTCore.GLTTestAttr()
@@ -474,7 +545,7 @@ def test_cpu_frequency_under_stress(_, logger):
     """
     patches_msg = "Required patches:\n" + "\n".join(f"  - {p}" for p in REQUIRED_PATCHES)
 
-    ok, reason = _validate_cppc_stress_prerequisites()
+    ok, reason = _validate_cppc_prerequisites(require_stress_ng=True)
     if not ok:
         GLTCore.GLTTestResult.fail(reason)
 
@@ -593,7 +664,7 @@ def test_cpu_scaling_frequency(_, logger):
     JIRA: DGX-11768
     PATCH: https://lore.kernel.org/all/OS3P286MB2490EB027398DDB852BE2169B1C02@OS3P286MB2490.JPNP286.PROD.OUTLOOK.COM/
     """
-    ok, reason = _validate_cppc_stress_prerequisites()
+    ok, reason = _validate_cppc_prerequisites(require_stress_ng=True)
     if not ok:
         GLTCore.GLTTestResult.fail(reason)
 
