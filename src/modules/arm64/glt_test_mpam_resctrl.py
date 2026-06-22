@@ -21,7 +21,10 @@ import glob
 import os
 import platform
 import re
+import signal
 import subprocess
+import threading
+import time
 
 from common import glt_core as GLTCore
 from common import glt_utils
@@ -72,6 +75,42 @@ def _resctrl_is_mounted() -> bool:
     except OSError:
         return False
     return False
+
+
+def _cpus_of_node(node) -> list:
+    """Return the list of online CPU ids owned by a NUMA node.
+
+    Parses /sys/devices/system/node/node<N>/cpulist (e.g. "0-15,88-103").
+    Returns an empty list if the node has no CPUs or cannot be read.
+    """
+    cpus = []
+    try:
+        with open(f"/sys/devices/system/node/node{node}/cpulist",
+                  "r", encoding="utf-8") as f:
+            spec = f.read().strip()
+    except OSError:
+        return cpus
+    for part in spec.split(","):
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                lo, hi = part.split("-")
+                cpus.extend(range(int(lo), int(hi) + 1))
+            else:
+                cpus.append(int(part))
+        except ValueError:
+            continue
+    return cpus
+
+
+def _sum_l3_occupancy(occupancy_files) -> int:
+    """Return total llc_occupancy summed across the given mon_L3 domains."""
+    total = 0
+    for occ in occupancy_files:
+        with open(occ, "r", encoding="utf-8") as f:
+            total += int(f.read().strip())
+    return total
 
 
 @GLTCore.GLTTestAttr()
@@ -458,3 +497,303 @@ def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
                 detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
                 logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
                                RESCTRL_MOUNT_POINT, detail)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_l3_occupancy")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+    """
+    Verify the ARM64 MPAM L3 cache allocation bounds occupancy under load.
+
+    Restricts a resctrl control group to a partial L3 allocation (CBM) and
+    drives a cache-filling stress-ng workload, verifying that the group's
+    peak llc_occupancy stays bounded by the allocated capacity and does not
+    leak past the CBM.
+
+    JIRA: DGX-16956
+    """
+    workload_duration_sec = 10
+    sample_interval_sec = 1
+    tolerance = 0.25
+    alloc_fraction = 4
+    stress_workers = 4
+    stress_vm_bytes = "256M"
+
+    fs_mounted = False
+
+    if not _resctrl_is_mounted():
+        for cli in ("mount", "umount"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available, cannot test L3 occupancy "
+                    "workload.")
+
+        try:
+            subprocess.run(
+                ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE,
+                 RESCTRL_MOUNT_POINT],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, shell=False,
+            )
+        except subprocess.CalledProcessError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
+            )
+        fs_mounted = True
+
+    try:
+        for cli in ("stress-ng", "numactl"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available, cannot drive L3 occupancy "
+                    "workload.")
+
+        # Pick the first NUMA node that actually owns CPUs (default node 0).
+        node = 0
+        for cpulist in sorted(glob.glob(
+                "/sys/devices/system/node/node*/cpulist")):
+            try:
+                with open(cpulist, "r", encoding="utf-8") as f:
+                    if f.read().strip():
+                        match = re.search(r"node(\d+)", cpulist)
+                        if match is None:
+                            continue
+                        node = int(match.group(1))
+                        break
+            except OSError:
+                continue
+
+        group = RESCTRL_MOUNT_POINT + "/glt_l3_occ_" + str(os.getpid())
+        try:
+            os.mkdir(group)
+        except FileExistsError:
+            # Stale own-named group from a prior killed run / PID reuse.
+            # Removing it auto-reparents any stray tasks; retry once.
+            try:
+                os.rmdir(group)
+                os.mkdir(group)
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not create a clean resctrl group {group}: {e}"
+                )
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Could not create resctrl group {group}: {e}"
+            )
+
+        time.sleep(1)
+        proc = None
+        pgid = None
+        try:
+            node_l3_ids = set()
+            node_l3_size = None
+            for cpu in _cpus_of_node(node):
+                for idx in glob.glob(
+                        f"/sys/devices/system/cpu/cpu{cpu}/cache/index*"):
+                    try:
+                        with open(idx + "/level", encoding="utf-8") as f:
+                            if f.read().strip() != "3":
+                                continue
+                        with open(idx + "/id", encoding="utf-8") as f:
+                            node_l3_ids.add(int(f.read().strip()))
+                        if node_l3_size is None:
+                            with open(idx + "/size", encoding="utf-8") as f:
+                                node_l3_size = f.read().strip()
+                    except (OSError, ValueError):
+                        continue
+
+            occupancy_files = []
+            for path in sorted(glob.glob(
+                    os.path.join(group, "mon_data/mon_L3_*/llc_occupancy"))):
+                m = re.search(r"mon_L3_(\d+)", path)
+                if m and (not node_l3_ids or int(m.group(1)) in node_l3_ids):
+                    occupancy_files.append(path)
+            if not occupancy_files:
+                GLTCore.GLTTestResult.fail(
+                    f"No L3 monitoring domain matched node {node} "
+                    f"(L3 cache id(s) {sorted(node_l3_ids)}) under "
+                    f"{group}/mon_data; cannot correlate occupancy with the "
+                    "bound workload."
+                )
+
+            try:
+                baseline = _sum_l3_occupancy(occupancy_files)
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not read baseline L3 occupancy from "
+                    f"{occupancy_files}: {e}"
+                )
+
+            # Derive L3 geometry so the allocation cap can be expressed in
+            # bytes.
+            try:
+                with open(RESCTRL_MOUNT_POINT + "/info/L3/cbm_mask",
+                          "r", encoding="utf-8") as f:
+                    total_ways = bin(int(f.read().strip(), 16)).count("1")
+                with open(RESCTRL_MOUNT_POINT + "/info/L3/min_cbm_bits",
+                          "r", encoding="utf-8") as f:
+                    min_cbm_bits = int(f.read().strip())
+                if node_l3_size is None:
+                    raise ValueError(
+                        f"no level-3 cache found for CPUs of node {node}")
+                size_str = node_l3_size
+                unit = size_str[-1]
+                multiplier = {"K": 1024, "M": 1024 ** 2,
+                              "G": 1024 ** 3}.get(unit.upper())
+                if multiplier is not None:
+                    l3_bytes = int(size_str[:-1]) * multiplier
+                else:
+                    l3_bytes = int(size_str)
+                if total_ways <= 0:
+                    raise ValueError("non-positive way count")
+                bytes_per_way = l3_bytes // total_ways
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not determine L3 geometry for allocation test: {e}"
+                )
+
+
+            allocated_ways = max(min_cbm_bits, total_ways // alloc_fraction)
+            partial_mask_val = (1 << allocated_ways) - 1
+            partial_mask = format(partial_mask_val, "x")
+            with open(group + "/schemata", "r", encoding="utf-8") as f:
+                l3_line = next(
+                    (ln for ln in f.read().splitlines()
+                     if ln.strip().startswith("L3:")), None)
+            domains = [entry.split("=", 1)[0].strip()
+                       for entry in l3_line.strip()[len("L3:"):].split(";")
+                       if "=" in entry]
+            write_line = "L3:" + ";".join(
+                f"{dom}={partial_mask}" for dom in domains)
+            try:
+                with open(group + "/schemata", "w", encoding="utf-8") as f:
+                    f.write(write_line + "\n")
+                with open(group + "/schemata", "r", encoding="utf-8") as f:
+                    readback = next(
+                        (ln for ln in f.read().splitlines()
+                         if ln.strip().startswith("L3:")), "")
+                applied = [entry.split("=", 1)[1].strip()
+                           for entry in readback.strip()[len("L3:"):].split(";")
+                           if "=" in entry]
+                # Compare numeric masks: kernels may zero-pad hex on readback
+                # (e.g. write "ff", read "00ff") without changing the value.
+                if (not applied
+                        or any(int(m, 16) != partial_mask_val for m in applied)):
+                    raise OSError(f"readback {readback.strip()!r}")
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not apply partial L3 allocation {partial_mask}: {e}"
+                )
+
+            capacity_bound = int(
+                allocated_ways * bytes_per_way * (1 + tolerance))
+
+
+            try:
+                with open(group + "/tasks", "w", encoding="utf-8") as f:
+                    f.write(f"{threading.get_native_id()}\n")
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not move the test task into {group}: {e}"
+                )
+            try:
+                proc = subprocess.Popen(  # pylint: disable=consider-using-with
+                    [
+                        "numactl", f"--cpunodebind={node}",
+                        f"--membind={node}",
+                        "stress-ng", "--vm", str(stress_workers),
+                        "--vm-bytes", stress_vm_bytes,
+                        "--vm-keep", "--timeout", f"{workload_duration_sec}s",
+                    ],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                pgid = proc.pid
+            finally:
+                with open(RESCTRL_MOUNT_POINT + "/tasks", "w",
+                          encoding="utf-8") as f:
+                    f.write(f"{threading.get_native_id()}\n")
+
+            # Sample peak occupancy live, it decays slowly after the workload
+            # exits, so the meaningful value is captured during the run.
+            peak = baseline
+            for _i in range(workload_duration_sec + 1):
+                exited = proc.poll() is not None
+                try:
+                    peak = max(peak, _sum_l3_occupancy(occupancy_files))
+                except (OSError, ValueError):
+                    pass
+                if exited:
+                    break
+                time.sleep(sample_interval_sec)
+
+            logger.info(
+                "L3 occupancy under workload: baseline=%.1f MiB, "
+                "peak=%.1f MiB, cap=%.1f MiB (%d way(s) allocated).",
+                baseline / (1024 * 1024), peak / (1024 * 1024),
+                capacity_bound / (1024 * 1024), allocated_ways)
+
+            try:
+                returncode = proc.wait(timeout=workload_duration_sec + 5)
+            except subprocess.TimeoutExpired:
+                GLTCore.GLTTestResult.fail(
+                    "stress-ng workload did not exit within the expected "
+                    "duration, cannot verify L3 occupancy under load."
+                )
+            if returncode != 0:
+                GLTCore.GLTTestResult.fail(
+                    f"stress-ng workload exited with status {returncode}. "
+                    "Cannot verify L3 occupancy under load."
+                )
+
+            if peak <= baseline:
+                GLTCore.GLTTestResult.fail(
+                    f"L3 occupancy did not rise above the "
+                    f"{baseline / (1024 * 1024):.1f} MiB baseline. The "
+                    "workload may not have been bound to the resctrl group."
+                )
+
+            if peak > capacity_bound:
+                GLTCore.GLTTestResult.fail(
+                    f"L3 occupancy {peak / (1024 * 1024):.1f} MiB exceeded the "
+                    f"{capacity_bound / (1024 * 1024):.1f} MiB cap for a "
+                    f"{allocated_ways}-way allocation (leaked past CBM)."
+                )
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+            try:
+                os.rmdir(group)
+            except OSError as e:
+                logger.warning(
+                    "Failed to remove resctrl group %s during cleanup: %s",
+                    group, e)
+    finally:
+        if fs_mounted:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning(
+                    "Failed to unmount resctrl at %s during cleanup: %s",
+                    RESCTRL_MOUNT_POINT, detail)
