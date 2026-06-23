@@ -152,6 +152,16 @@ class TestPerfPmuCompatibility(GLTTestBase):
             glt_test_pmu._parse_perf_stat_csv(stderr, 0, 1)
         self.assertIn("CPU 0", str(ctx.exception))
 
+    def test_parse_perf_stat_csv_accepts_cycles_event_modifier(self):
+        """Perf event modifiers keep cycles as the base event name."""
+        stderr = (
+            "CPU0,500000000,,cycles:u,1000004265,100.00,,\n"
+            "CPU1,40000,,cycles:k,1000004265,100.00,,\n"
+        )
+        busy, idle = glt_test_pmu._parse_perf_stat_csv(stderr, 0, 1)
+        self.assertEqual(busy, 500000000)
+        self.assertEqual(idle, 40000)
+
     # --- _probe_pmccntr_smt ---
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")

@@ -164,7 +164,7 @@ def _parse_perf_stat_csv(stderr, busy_cpu, idle_cpu):
         if len(parts) < 4 or parts[0] not in {
                 str(busy_cpu), f"CPU{busy_cpu}", str(idle_cpu), f"CPU{idle_cpu}"}:
             continue
-        if parts[3] != "cycles":
+        if parts[3].split(":", 1)[0] != "cycles":
             continue
         cpu_label = parts[0]
         count_field = parts[1]
