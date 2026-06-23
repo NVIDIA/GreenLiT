@@ -172,6 +172,14 @@ class TestPerfPmuCompatibility(GLTTestBase):
             glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger)
         self.assertIn("timed out", str(ctx.exception))
 
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    def test_probe_pmccntr_smt_os_error_raises_value_error(self, mock_run):
+        """Subprocess startup errors are converted to probe failures."""
+        mock_run.side_effect = PermissionError("perf not executable")
+        with self.assertRaises(ValueError) as ctx:
+            glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger)
+        self.assertIn("failed to start", str(ctx.exception))
+
     # --- test_pmccntr_smt_handling (decorated function) ---
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._probe_pmccntr_smt")

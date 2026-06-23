@@ -216,6 +216,8 @@ def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger):
             "perf stat PMCCNTR SMT probe timed out after "
             f"{_PMCCNTR_SMT_PROBE_TIMEOUT_SECONDS} seconds"
         ) from exc
+    except OSError as exc:
+        raise ValueError(f"perf stat PMCCNTR SMT probe failed to start: {exc}") from exc
     logger.debug(
         "perf stat rc=%d stderr=%r",
         result.returncode, (result.stderr or "")[:500],
