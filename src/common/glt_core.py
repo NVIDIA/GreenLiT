@@ -163,14 +163,15 @@ class GLTRequires:
         self.any_true = []  # At least one must return True
         self.any_false = []  # At least one must return False
 
-    def _dependency_names(self):
+    def dependency_names(self):
+        """Return all dependency test IDs referenced by this requirement set."""
         return self.all_true + self.all_false + self.any_true + self.any_false
 
     def categories(self):
         """Return the set of category prefixes from "category:name" entries."""
         return {
             dep.split(":", 1)[0]
-            for dep in self._dependency_names()
+            for dep in self.dependency_names()
             if ":" in dep
         }
 
@@ -561,7 +562,8 @@ class GLTScheduler:
         """Add a dependency: the case depends on depends_on."""
         self.dependencies[depends_on].append(case)
 
-    def get_test_case_name(self, test_obj):
+    @staticmethod
+    def get_test_case_name(test_obj):
         """Return the test case name for structuring"""
         return (
             f"{test_obj.__wrapped__.attr.category}:"
@@ -633,7 +635,7 @@ class GLTScheduler:
                 continue
 
             for case, status in item.items():
-                if not case.startswith("test_"):
+                if not isinstance(status, dict) or not status.get("Category"):
                     continue
                 obj_name = f"{status['Category']}:{case}"
                 test_obj = self.get_test_obj_by_name(obj_name)
@@ -670,9 +672,17 @@ class GLTScheduler:
         in_degree = {
             self.get_test_case_name(node): 0 for node in self.test_list
         }
-        for case in self.dependencies:
-            for depends_on in self.dependencies[case]:
-                in_degree[depends_on] += 1
+        for dependency_id, dependent_ids in self.dependencies.items():
+            for dependent_id in dependent_ids:
+                if dependency_id not in in_degree:
+                    raise ValueError(
+                        f"Dependency {dependency_id} required by "
+                        f"{dependent_id} not found")
+                if dependent_id not in in_degree:
+                    raise ValueError(
+                        f"Test {dependent_id} depends on {dependency_id} "
+                        "but is not in the scheduler")
+                in_degree[dependent_id] += 1
 
         # Collect nodes with no dependencies
         queue = deque(self.test_list)
@@ -683,8 +693,8 @@ class GLTScheduler:
             node = queue.popleft()
             test_case_name = self.get_test_case_name(node)
             if in_degree[test_case_name] == 0:
-                for depends_on in self.dependencies[test_case_name]:
-                    in_degree[depends_on] -= 1
+                for dependent_id in self.dependencies[test_case_name]:
+                    in_degree[dependent_id] -= 1
                 self.test_list.append(node)
             else:
                 queue.append(node)

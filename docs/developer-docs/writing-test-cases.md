@@ -9,6 +9,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
 - [Do We Need a New Test Case?](#do-we-need-a-new-test-case)
 - [Choosing the Implementation Path](#choosing-the-implementation-path)
   - [When Starting from an Existing Script](#when-starting-from-an-existing-script)
+- [Unit Tests](#unit-tests)
 - [Create a Test Case that Does Not Require Reboots](#create-a-test-case-that-does-not-require-reboots)
   - [Example Test Case Structure](#example-test-case-structure)
   - [Categorizing Your Test Case](#categorizing-your-test-case)
@@ -119,6 +120,10 @@ staged as a standalone executable:
 Standalone executable scripts are case-by-case. For repository submissions,
 document the prerequisites, required tools, root or hardware assumptions,
 arguments, environment variables, setup and cleanup steps, and result mapping.
+
+## Unit Tests
+
+Add unit tests for hardware-independent framework, CLI, parser, scheduler, or helper logic. Hardware-dependent test cases under `src/modules/` may rely on targeted review or hardware validation instead, but shared logic should be covered under `tests/` when practical.
 
 ## Create a Test Case that Does Not Require Reboots
 

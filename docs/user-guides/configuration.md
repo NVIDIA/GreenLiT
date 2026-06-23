@@ -54,13 +54,16 @@ Examples include:
 - `tpm` - TPM module tests
 - And others as listed in the help output
 
-#### Test Case Name
+##### Test Case Name
 The name of the specific test case within a category.
 
 You can retrieve the list of test cases with:
 ```bash
 sudo glt-test-suite --list
 ```
+
+Test case identifiers use the `category:test_case_name` format described in the
+user manual.
 
 ##### Operation
 Specifies how the test case should be handled.
