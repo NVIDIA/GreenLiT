@@ -24,7 +24,7 @@ def _args(categories, test_cases=None, list_tests=False, resume=None):
     return argparse.Namespace(**values)
 
 
-class TestGreenlitHelpers(GLTTestBase):
+class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test pure helper functions used by glt-test-suite."""
 
     def test_parse_test_selector_accepts_category_test_name(self):
@@ -101,6 +101,46 @@ class TestGreenlitHelpers(GLTTestBase):
 
         self.assertEqual(
             len(test_prereq.__wrapped__.attr.conditional_skip.any_true), 1)
+
+    def test_apply_glt_configs_later_yaml_overwrites_test_definition(self):
+        """Later YAML files replace earlier definitions for the same test."""
+
+        @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        def test_prereq():
+            return "prereq"
+
+        scheduler = GLTCore.GLTScheduler([test_prereq])
+        scheduler.sort()
+        yaml_data = [
+            {
+                "hwtracing:test_prereq": {
+                    "conditional-skip": [{
+                        "condition": {"name": "old skip", "script": "true"}
+                    }]
+                },
+            },
+            {
+                "hwtracing:test_prereq": {
+                    "allow-failure": [{
+                        "condition": {"name": "new allow", "script": "true"}
+                    }]
+                },
+            },
+        ]
+
+        with mock.patch.object(
+                greenlit.GLTConf, "load_glt_yaml_files",
+                return_value=yaml_data), \
+                mock.patch.object(
+                    greenlit.GLTConf, "cond_to_func",
+                    return_value=lambda: True):
+            greenlit.apply_glt_configs(scheduler, self.mock_logger)
+
+        self.assertEqual(
+            len(test_prereq.__wrapped__.attr.conditional_skip.any_true), 0)
+        self.assertEqual(
+            len(test_prereq.__wrapped__.attr.allow_failure.any_true), 1)
 
     def test_validate_test_case_args_rejects_list(self):
         """--list cannot be combined with parsed --test-case selectors."""

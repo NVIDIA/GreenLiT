@@ -63,31 +63,34 @@ def apply_glt_configs(scheduler, logger):
         scheduler.get_test_case_name(test_obj)
         for test_obj in scheduler.test_list
     }
+    merged_config = {}
     for yaml_data in GLTConf.load_glt_yaml_files(logger):
         if not yaml_data:
             continue
-        for test_item, contents in yaml_data.items():
-            if test_item not in runnable_ids:
-                logger.debug(f"Skipping {test_item} from config: test not in run targets.")
-                continue
-            obj = scheduler.get_test_obj_by_name(test_item)
-            if not obj:
-                raise ValueError(f"Not found {test_item} from test cases.")
-            logger.debug(f"Detected {test_item} from config.")
-            if "allow-failure" in contents:
-                logger.debug(" contains allow-failure:")
-                for cond_list in contents["allow-failure"]:
-                    logger.debug(f"  condition: {cond_list['condition']}")
-                    func = GLTConf.cond_to_func(logger, cond_list["condition"])
-                    setattr(func, "desc", cond_list["condition"]["name"])
-                    obj.__wrapped__.attr.allow_failure.any_true.append(func)
-            if "conditional-skip" in contents:
-                logger.debug(" contains conditional-skip:")
-                for cond_list in contents["conditional-skip"]:
-                    logger.debug(f"  condition: {cond_list['condition']}")
-                    func = GLTConf.cond_to_func(logger, cond_list["condition"])
-                    setattr(func, "desc", cond_list["condition"]["name"])
-                    obj.__wrapped__.attr.conditional_skip.any_true.append(func)
+        merged_config.update(yaml_data)
+
+    for test_item, contents in merged_config.items():
+        if test_item not in runnable_ids:
+            logger.debug(f"Skipping {test_item} from config: test not in run targets.")
+            continue
+        obj = scheduler.get_test_obj_by_name(test_item)
+        if not obj:
+            raise ValueError(f"Not found {test_item} from test cases.")
+        logger.debug(f"Detected {test_item} from config.")
+        if "allow-failure" in contents:
+            logger.debug(" contains allow-failure:")
+            for cond_list in contents["allow-failure"]:
+                logger.debug(f"  condition: {cond_list['condition']}")
+                func = GLTConf.cond_to_func(logger, cond_list["condition"])
+                setattr(func, "desc", cond_list["condition"]["name"])
+                obj.__wrapped__.attr.allow_failure.any_true.append(func)
+        if "conditional-skip" in contents:
+            logger.debug(" contains conditional-skip:")
+            for cond_list in contents["conditional-skip"]:
+                logger.debug(f"  condition: {cond_list['condition']}")
+                func = GLTConf.cond_to_func(logger, cond_list["condition"])
+                setattr(func, "desc", cond_list["condition"]["name"])
+                obj.__wrapped__.attr.conditional_skip.any_true.append(func)
 
 
 def check_required_commands(logger):
