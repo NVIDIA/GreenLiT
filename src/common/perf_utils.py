@@ -15,6 +15,7 @@
 
 """Helpers for running perf selftests across perf versions."""
 
+import platform
 import re
 import subprocess
 from dataclasses import dataclass
@@ -135,10 +136,38 @@ def _summarize_output(output: str) -> str:
     return "\n".join(lines[-10:])
 
 
-def _run_perf_test(test_name: str) -> PerfTestResult:
+def _get_perf_candidates():
+    """Return perf command candidates without requiring them to exist."""
+    candidates = ["perf"]
+    candidates.extend(
+        str(path) for path in sorted(Path("/usr/lib").glob("linux-tools*/perf"))
+    )
+    candidates.extend(
+        str(path) for path in sorted(Path("/usr/lib/linux-tools").glob("*/perf"))
+    )
+    return list(dict.fromkeys(candidates))
+
+
+def _candidate_matches_kernel(
+    candidate: str,
+    kernel_release: str,
+    kernel_version: str,
+    perf_version: str,
+) -> bool:
+    """Return True when a perf candidate matches the running kernel."""
+    if perf_version == kernel_version:
+        return True
+
+    tool_dir = Path(candidate).parent.name
+    if tool_dir == kernel_release or tool_dir == kernel_version:
+        return True
+    return tool_dir.startswith(f"{kernel_version}-")
+
+
+def _run_perf_test(perf_cmd: str, test_name: str) -> PerfTestResult:
     """Run one perf selftest by name and normalize the result."""
     result = subprocess.run(
-        ["perf", "test", "-vv", test_name],
+        [perf_cmd, "test", "-vv", test_name],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -187,11 +216,59 @@ def has_coresight_fallback_evidence(
     return any(coresight_devices_dir.iterdir())
 
 
-def run_perf_test_candidates(candidates: Iterable[str]) -> PerfTestResult:
+def resolve_perf_command(logger=None) -> Optional[str]:
+    """Resolve a perf command that works for the running kernel."""
+    kernel_release = platform.uname().release
+    kernel_version = kernel_release.split("-", 1)[0]
+
+    for candidate in _get_perf_candidates():
+        try:
+            result = subprocess.run(
+                [candidate, "--version"],
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as err:
+            if logger:
+                logger.debug("perf resolver skipped candidate %s: %s", candidate, err)
+            continue
+
+        output = result.stdout or ""
+        if result.returncode != 0 or "perf not found for kernel" in output:
+            if logger:
+                logger.debug(
+                    "perf resolver rejected candidate: %s --version returned %r",
+                    candidate,
+                    output.strip(),
+                )
+            continue
+
+        version_match = re.search(r"perf version\s+([^\s]+)", output)
+        perf_version = version_match.group(1) if version_match else ""
+        if _candidate_matches_kernel(
+                candidate, kernel_release, kernel_version, perf_version):
+            return candidate
+
+        if logger:
+            logger.debug(
+                "perf resolver skipped non-matching candidate: %s reports %r",
+                candidate,
+                perf_version,
+            )
+
+    return None
+
+
+def run_perf_test_candidates(
+    candidates: Iterable[str],
+    perf_cmd: str = "perf",
+) -> PerfTestResult:
     """Run the first listed perf selftest candidate that exists."""
     candidate_names = tuple(candidates)
     list_result = subprocess.run(
-        ["perf", "test", "list"],
+        [perf_cmd, "test", "list"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -208,7 +285,7 @@ def run_perf_test_candidates(candidates: Iterable[str]) -> PerfTestResult:
     available_tests = _extract_perf_test_names(list_result.stdout or "")
     for candidate in candidate_names:
         if _candidate_matches(candidate, available_tests):
-            return _run_perf_test(candidate)
+            return _run_perf_test(perf_cmd, candidate)
 
     return PerfTestResult(
         PerfTestStatus.NO_MATCH,

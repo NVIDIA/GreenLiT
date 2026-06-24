@@ -15,6 +15,7 @@ from common.perf_utils import (
     get_perf_kernel_version_warning,
     get_perf_version,
     has_coresight_fallback_evidence,
+    resolve_perf_command,
     run_perf_test_candidates,
 )
 
@@ -95,6 +96,85 @@ class TestPerfUtils(GLTTestBase):
         self.assertIn("6.17.0-1018-nvidia-64k", warning)
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_prefers_kernel_matching_binary(self, mock_run):
+        """Perf resolver ignores broken wrappers and picks the matching version."""
+        candidates = [
+            "perf",
+            "/usr/lib/linux-tools/6.18/perf",
+            "/usr/lib/linux-tools/6.17/perf",
+        ]
+        results = {
+            "perf": self._completed(
+                stdout="WARNING: perf not found for kernel 6.17.13\n"
+            ),
+            "/usr/lib/linux-tools/6.18/perf": self._completed(
+                stdout="perf version 6.18.0\n"
+            ),
+            "/usr/lib/linux-tools/6.17/perf": self._completed(
+                stdout="perf version 6.17.13\n"
+            ),
+        }
+
+        def fake_run(cmd, **_):
+            return results[cmd[0]]
+
+        mock_run.side_effect = fake_run
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(self.mock_logger),
+                "/usr/lib/linux-tools/6.17/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_returns_none_when_no_candidate_matches_kernel(
+        self, mock_run
+    ):
+        """Perf resolver does not fall back to an unrelated valid perf binary."""
+        mock_run.return_value = self._completed(stdout="perf version 6.18.0\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.18/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertIsNone(resolve_perf_command(self.mock_logger))
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_rejects_similar_version_path_prefix(self, mock_run):
+        """Do not match linux-tools/6.17.130 when the running kernel is 6.17.13."""
+        mock_run.return_value = self._completed(stdout="perf version 6.17.130\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.17.130/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertIsNone(resolve_perf_command(self.mock_logger))
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_returns_none_when_no_valid_perf_exists(
+        self, mock_run
+    ):
+        """Perf resolver reports no command when every candidate is unusable."""
+        mock_run.return_value = self._completed(
+            stdout="WARNING: perf not found for kernel 6.17.13\n"
+        )
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=["perf"]
+        ):
+            self.assertIsNone(resolve_perf_command(self.mock_logger))
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_run_perf_test_candidates_accepts_617_pmu_name(self, mock_run):
         """A perf 6.17 PMU selftest name can satisfy the candidate list."""
         mock_run.side_effect = [
@@ -110,6 +190,29 @@ class TestPerfUtils(GLTTestBase):
 
         self.assertEqual(result.status, PerfTestStatus.PASS)
         self.assertEqual(result.test_name, "Parsing of all PMU events from sysfs")
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_uses_supplied_perf_command(self, mock_run):
+        """Both selftest discovery and execution use the resolved perf command."""
+        mock_run.side_effect = [
+            self._completed(stdout="  5.2: perf all PMU test\n"),
+            self._completed(stderr="  5.2: perf all PMU test           : Ok\n"),
+        ]
+
+        result = run_perf_test_candidates(
+            ["perf all PMU test"],
+            perf_cmd="/usr/lib/linux-tools/6.17/perf",
+        )
+
+        self.assertEqual(result.status, PerfTestStatus.PASS)
+        self.assertEqual(
+            mock_run.call_args_list[0].args[0],
+            ["/usr/lib/linux-tools/6.17/perf", "test", "list"],
+        )
+        self.assertEqual(
+            mock_run.call_args_list[1].args[0],
+            ["/usr/lib/linux-tools/6.17/perf", "test", "-vv", "perf all PMU test"],
+        )
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_run_perf_test_candidates_accepts_old_name_first(self, mock_run):

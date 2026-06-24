@@ -423,52 +423,6 @@ def validate_vera_pmus(logger, nvevent_from_dut, pmu_devices):
     return None
 
 
-def _get_perf_candidates():
-    """Return perf command candidates without requiring them to exist."""
-    candidates = ["perf"]
-    candidates.extend(str(path) for path in sorted(Path("/usr/lib").glob("linux-tools*/perf")))
-    candidates.extend(str(path) for path in sorted(Path("/usr/lib/linux-tools").glob("*/perf")))
-    return list(dict.fromkeys(candidates))
-
-
-def _get_perf_command(logger=None):
-    """Resolve a perf command that works for the running kernel."""
-    kernel_release = platform.uname().release
-    kernel_version = kernel_release.split("-", 1)[0]
-
-    for candidate in _get_perf_candidates():
-        try:
-            result = subprocess.run(
-                [candidate, "--version"],
-                check=False,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-        except OSError as err:
-            if logger:
-                logger.debug("perf resolver skipped candidate %s: %s", candidate, err)
-            continue
-
-        output = result.stdout or ""
-        if result.returncode != 0 or "perf not found for kernel" in output:
-            if logger:
-                logger.debug("perf resolver rejected candidate: %s --version returned %r",
-                             candidate, output.strip())
-            continue
-
-        version_match = re.search(r"perf version\s+([^\s]+)", output)
-        perf_version = version_match.group(1) if version_match else ""
-        if kernel_release in candidate or kernel_version in candidate or perf_version == kernel_version:
-            return candidate
-
-        if logger:
-            logger.debug("perf resolver skipped non-matching candidate: %s reports %r",
-                         candidate, perf_version)
-
-    return None
-
-
 def _has_decoded_data_source(output):
     """Return True if perf script output includes decoded operation and level fields."""
     return _count_decoded_data_source(output) > 0
@@ -536,11 +490,13 @@ def test_all_pmu_events(_, logger):
     if not nvdev.is_cpu_type("grace") and not nvdev.is_cpu_type("vera"):
         GLTCore.GLTTestResult.skip("This is not NVIDIA Grace or Vera CPU.")
 
-    if not glt_utils.is_cli_available("perf"):
+    perf_cmd = perf_utils.resolve_perf_command(logger)
+    if perf_cmd is None:
         GLTCore.GLTTestResult.fail("Please install 'perf' to peform the test.")
 
     result = perf_utils.run_perf_test_candidates(
-        ["perf all PMU test", "Parsing of all PMU events from sysfs"]
+        ["perf all PMU test", "Parsing of all PMU events from sysfs"],
+        perf_cmd=perf_cmd,
     )
     logger.debug(
         "perf PMU test status=%s test_name=%s reason=%s",
@@ -695,19 +651,21 @@ def test_perf_arm_spe_olympus_data_source(sd, logger):
     """
     Verify perf decodes Olympus ARM SPE data-source fields.
 
+    Vera-only: this test does not use GLTRequires.must_pass("hwtracing",
+    "test_perf_coresight") because it validates ARM SPE data_src decode via
+    perf script, not CoreSight ETM selftest availability. CoreSight selftests
+    can be absent while SPE PMU decode still works on Vera.
+
     PATCH: d5e4c710b54a tools headers arm64: Add NVIDIA Olympus part
     PATCH: d852b838eb05 perf arm-spe: Add NVIDIA Olympus to neoverse list
     """
     nvdev = NvDev()
-    is_grace = nvdev.is_cpu_type("grace")
-    is_vera = nvdev.is_cpu_type("vera")
-    logger.info("Detected platform: grace=%s, vera=%s; Vera CPU core expected: Olympus",
-                is_grace, is_vera)
-
-    if not is_vera:
+    if not nvdev.is_cpu_type("vera"):
         GLTCore.GLTTestResult.skip("This is not NVIDIA Vera CPU.")
 
-    perf_cmd = _get_perf_command(logger)
+    logger.info("Detected platform: vera=True; CPU core expected: Olympus")
+
+    perf_cmd = perf_utils.resolve_perf_command(logger)
     if perf_cmd is None:
         GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
     logger.info("Using perf command: %s", perf_cmd)
