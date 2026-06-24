@@ -159,7 +159,7 @@ def _candidate_matches_kernel(
         return True
 
     tool_dir = Path(candidate).parent.name
-    if tool_dir == kernel_release or tool_dir == kernel_version:
+    if tool_dir in (kernel_release, kernel_version):
         return True
     return tool_dir.startswith(f"{kernel_version}-")
 
