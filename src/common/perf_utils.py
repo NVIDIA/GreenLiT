@@ -23,6 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
 
+PERF_VERSION_TIMEOUT_SECONDS = 10
+
 
 class PerfTestStatus(Enum):
     """Normalized result for perf selftest execution."""
@@ -159,9 +161,14 @@ def _candidate_matches_kernel(
         return True
 
     tool_dir = Path(candidate).parent.name
-    if tool_dir in (kernel_release, kernel_version):
+    normalized_tool_dir = (
+        tool_dir[len("linux-tools-"):]
+        if tool_dir.startswith("linux-tools-")
+        else tool_dir
+    )
+    if normalized_tool_dir in (kernel_release, kernel_version):
         return True
-    return tool_dir.startswith(f"{kernel_version}-")
+    return normalized_tool_dir.startswith(f"{kernel_version}-")
 
 
 def _run_perf_test(perf_cmd: str, test_name: str) -> PerfTestResult:
@@ -229,10 +236,19 @@ def resolve_perf_command(logger=None) -> Optional[str]:
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                timeout=PERF_VERSION_TIMEOUT_SECONDS,
             )
         except OSError as err:
             if logger:
                 logger.debug("perf resolver skipped candidate %s: %s", candidate, err)
+            continue
+        except subprocess.TimeoutExpired:
+            if logger:
+                logger.debug(
+                    "perf resolver skipped candidate %s: --version timed out after %ss",
+                    candidate,
+                    PERF_VERSION_TIMEOUT_SECONDS,
+                )
             continue
 
         output = result.stdout or ""

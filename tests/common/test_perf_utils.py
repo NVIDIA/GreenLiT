@@ -153,10 +153,43 @@ class TestPerfUtils(GLTTestBase):
 
         with self.mock.patch(
             "common.perf_utils._get_perf_candidates",
-            return_value=["/usr/lib/linux-tools/6.17.130/perf"],
+            return_value=["/usr/lib/linux-tools-6.17.130/perf"],
         ), self.mock.patch(
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertIsNone(resolve_perf_command(self.mock_logger))
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_matches_linux_tools_release_directory(
+        self, mock_run
+    ):
+        """Match perf under linux-tools-<release> when perf version differs slightly."""
+        candidate = "/usr/lib/linux-tools-6.17.0-1018-nvidia-64k/perf"
+        mock_run.return_value = self._completed(stdout="perf version 6.17.13\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=[candidate],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.0-1022-nvidia-64k"),
+        ):
+            self.assertEqual(resolve_perf_command(self.mock_logger), candidate)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_skips_candidate_when_version_probe_times_out(
+        self, mock_run
+    ):
+        """A hung perf --version probe is skipped instead of blocking resolution."""
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["/usr/lib/linux-tools/6.17/perf", "--version"],
+            timeout=10,
+        )
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.17/perf"],
         ):
             self.assertIsNone(resolve_perf_command(self.mock_logger))
 
