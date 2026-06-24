@@ -797,3 +797,153 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
                 logger.warning(
                     "Failed to unmount resctrl at %s during cleanup: %s",
                     RESCTRL_MOUNT_POINT, detail)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mba_schemata(_, logger):  # pylint: disable=too-many-branches,too-many-locals
+    """
+    Verify the ARM64 MPAM MBA percentage control path writes and reads back.
+
+    JIRA: DGX-16763
+    """
+    fs_mounted = False
+    group = None
+
+    if not _resctrl_is_mounted():
+        for cli in ("mount", "umount"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available, cannot test MBA schemata.")
+
+        try:
+            subprocess.run(
+                ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE,
+                 RESCTRL_MOUNT_POINT],
+                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, shell=False,
+            )
+        except subprocess.CalledProcessError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
+            )
+        fs_mounted = True
+
+    try:
+        info_mb = RESCTRL_MOUNT_POINT + "/info/MB"
+        try:
+            with open(info_mb + "/schema_format", "r", encoding="utf-8") as f:
+                schema_format = f.read().strip()
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Could not read MBA schema_format under {info_mb}: {e}")
+        if schema_format != "percentage":
+            GLTCore.GLTTestResult.skip(
+                f"MBA not in percentage mode (schema_format={schema_format}).")
+
+        try:
+            with open(info_mb + "/min_bandwidth", "r", encoding="utf-8") as f:
+                min_bw = int(f.read().strip())
+            with open(info_mb + "/bandwidth_gran", "r", encoding="utf-8") as f:
+                gran = int(f.read().strip())
+        except (OSError, ValueError) as e:
+            GLTCore.GLTTestResult.fail(
+                f"Could not read MBA percentage info files under {info_mb}: {e}")
+        if gran <= 0:
+            GLTCore.GLTTestResult.fail(
+                f"Invalid MBA bandwidth_gran {gran} under {info_mb}; "
+                "granularity must be positive.")
+        if not 0 <= min_bw <= 100:
+            GLTCore.GLTTestResult.fail(
+                f"Invalid MBA min_bandwidth {min_bw} under {info_mb}. "
+                "Expected a percentage between 0 and 100.")
+
+        # Create a private control group
+        group = RESCTRL_MOUNT_POINT + "/glt_mba_" + str(os.getpid())
+        try:
+            os.mkdir(group)
+        except FileExistsError:
+            try:
+                os.rmdir(group)
+                os.mkdir(group)
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not create a clean resctrl group {group}: {e}"
+                )
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Could not create resctrl group {group}: {e}"
+            )
+
+        # Parse the MB domains from the new group's schemata.
+        try:
+            with open(group + "/schemata", "r", encoding="utf-8") as f:
+                mb_line = next(
+                    (ln for ln in f.read().splitlines()
+                     if ln.strip().startswith("MB:")), "")
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Could not read MB schemata from {group}: {e}"
+            )
+        domains = [entry.split("=", 1)[0].strip()
+                   for entry in mb_line.strip()[len("MB:"):].split(";")
+                   if "=" in entry]
+        if not domains:
+            GLTCore.GLTTestResult.fail(
+                "no MB domains parsed from group schemata.")
+
+        # Valid steps are min_bw + N*gran; pick first, middle, and last so
+        # coarse granularity still exercises distinct levels (e.g. 0/50/100).
+        n_steps = (100 - min_bw) // gran
+        valid = [min_bw + gran * i for i in range(n_steps + 1)]
+        pick = {0, len(valid) // 2, len(valid) - 1}
+        levels = sorted(valid[i] for i in pick)
+
+        for level in levels:
+            write_line = "MB:" + ";".join(
+                f"{dom}={level}" for dom in domains)
+            try:
+                with open(group + "/schemata", "w", encoding="utf-8") as f:
+                    f.write(write_line + "\n")
+                with open(group + "/schemata", "r", encoding="utf-8") as f:
+                    readback = next(
+                        (ln for ln in f.read().splitlines()
+                         if ln.strip().startswith("MB:")), "")
+                applied = {entry.split("=", 1)[0].strip():
+                           entry.split("=", 1)[1].strip()
+                           for entry in readback.strip()[len("MB:"):].split(";")
+                           if "=" in entry}
+                for dom in domains:
+                    if int(applied.get(dom, "-1")) != level:
+                        GLTCore.GLTTestResult.fail(
+                            f"MBA domain {dom}: wrote {level}, read back "
+                            f"{applied.get(dom)!r} (line {readback.strip()!r})"
+                        )
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Could not apply MBA level {level} to {group}: {e}"
+                )
+
+    finally:
+        if group is not None:
+            try:
+                os.rmdir(group)
+            except OSError as e:
+                logger.warning(
+                    "Failed to remove resctrl group %s during cleanup: %s",
+                    group, e)
+        if fs_mounted:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning(
+                    "Failed to unmount resctrl at %s during cleanup: %s",
+                    RESCTRL_MOUNT_POINT, detail)
