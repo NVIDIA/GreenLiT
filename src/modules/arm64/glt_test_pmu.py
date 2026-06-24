@@ -142,6 +142,7 @@ def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH):
         pmus = sorted(
             name for name in os.listdir(base_path)
             if name.startswith("arm_spe")
+            and os.path.isdir(os.path.join(base_path, name))
         )
     except OSError:
         return None
@@ -492,7 +493,7 @@ def test_all_pmu_events(_, logger):
 
     perf_cmd = perf_utils.resolve_perf_command(logger)
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to peform the test.")
+        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
 
     result = perf_utils.run_perf_test_candidates(
         ["perf all PMU test", "Parsing of all PMU events from sysfs"],

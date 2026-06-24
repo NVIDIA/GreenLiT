@@ -350,6 +350,18 @@ class TestPerfPmuCompatibility(GLTTestBase):
                 "arm_spe_1",
             )
 
+    def test_find_arm_spe_pmu_ignores_non_directory_entries(self):
+        """ARM SPE PMU discovery ignores sysfs files that share the prefix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "arm_spe_note"), "w", encoding="utf-8") as handle:
+                handle.write("not a directory\n")
+            os.mkdir(os.path.join(tmpdir, "arm_spe_2"))
+
+            self.assertEqual(
+                glt_test_pmu._find_arm_spe_pmu(base_path=tmpdir),
+                "arm_spe_2",
+            )
+
     def test_has_decoded_data_source_accepts_load_with_l2_level(self):
         """Decoded Olympus data source accepts common data-source L2 evidence."""
         output = "100000 |OP LOAD|LVL L2 hit| 42 0xffff memcpy"
