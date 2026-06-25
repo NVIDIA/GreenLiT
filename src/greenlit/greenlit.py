@@ -472,9 +472,9 @@ def read_session_summary(session):
     return result
 
 
-def resolve_run_selection(initial_args, args, supported_categories):
+def resolve_run_selection(args, supported_categories):
     """Return discovery scope, using saved session state for resume runs."""
-    if initial_args.resume is None:
+    if args.resume is None:
         return (
             None,
             get_active_plan_tags(args),
@@ -483,7 +483,7 @@ def resolve_run_selection(initial_args, args, supported_categories):
             "",
         )
 
-    resume_session = get_cached_session_path(initial_args.resume)
+    resume_session = get_cached_session_path(args.resume)
     ok, message, active_plan_tags, target_categories, test_cases = (
         read_session_summary(resume_session))
     if not ok:
@@ -500,7 +500,7 @@ def resume_from_session(scheduler, session):
     scheduler.progress_save()
 
 
-def setup_session(initial_args, resume_session):
+def setup_session(verbose, resume_session):
     """Create or reuse the resolved resume session and configure the logger.
 
     Returns:
@@ -511,7 +511,7 @@ def setup_session(initial_args, resume_session):
         session = glt_utils.create_cache_session()
 
     logger = glt_logger.get_logger(session, "glt-test-suite")
-    if initial_args.verbose:
+    if verbose:
         glt_logger.verbose(logger)
 
     return session, logger
@@ -659,11 +659,10 @@ def discover_target_test_cases(
     return [test_map[test_id] for test_id in selected_order], "", 0
 
 
-def resolve_target_test_objects(
-        initial_args, args, supported_categories, external_test_objs):
+def resolve_target_test_objects(args, supported_categories, external_test_objs):
     """Resolve CLI/resume selection into runnable test objects."""
     resume_session, active_plan_tags, target_categories, target_test_cases, error = (
-        resolve_run_selection(initial_args, args, supported_categories))
+        resolve_run_selection(args, supported_categories))
     if error:
         return resume_session, active_plan_tags, [], error, CLI_RUNTIME_ERROR
 
@@ -674,7 +673,7 @@ def resolve_target_test_objects(
         return (
             resume_session, active_plan_tags, [], error, discovery_error_code)
 
-    if not test_objs and not initial_args.list:
+    if not test_objs and not args.list:
         return (
             resume_session,
             active_plan_tags,
@@ -757,8 +756,7 @@ def main():
 
     resume_session, active_plan_tags, test_objs, error, exit_code = (
         resolve_target_test_objects(
-            args.resume, args.list, args, supported_categories,
-            external_test_objs))
+            args, supported_categories, external_test_objs))
     if error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(exit_code)

@@ -501,10 +501,10 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
     def test_setup_session_requires_resolved_resume_session_argument(self):
         """Resume session resolution belongs to main, not setup_session."""
-        session_parameter = inspect.signature(
-            greenlit.setup_session).parameters["resume_session"]
+        parameters = inspect.signature(greenlit.setup_session).parameters
 
-        self.assertIs(session_parameter.default, inspect.Parameter.empty)
+        self.assertIn("verbose", parameters)
+        self.assertIs(parameters["resume_session"].default, inspect.Parameter.empty)
 
     def test_read_session_summary_returns_saved_plan_and_categories(self):
         """Resume setup reads the saved plan before test discovery."""
@@ -637,7 +637,6 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
     def test_resolve_target_test_objects_reports_empty_normal_run(self):
         """Empty normal run selection is handled before main builds a scheduler."""
-        initial_args = argparse.Namespace(list=False)
         args = _args(["cxl"])
         active_plan_tags = {GLTCore.GLTPlanType.SANITY.value}
 
@@ -648,7 +647,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                                   return_value=([], "", 0)):
             resume_session, test_tags, test_objs, error, exit_code = (
                 greenlit.resolve_target_test_objects(
-                    initial_args, args, ["cxl"], []))
+                    args, ["cxl"], []))
 
         self.assertIsNone(resume_session)
         self.assertEqual(test_tags, active_plan_tags)
@@ -658,7 +657,6 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
     def test_resolve_target_test_objects_reports_resume_errors_as_runtime(self):
         """Resume metadata read errors are not CLI usage errors."""
-        initial_args = argparse.Namespace(list=False, resume=0)
         args = _args(["cxl"])
 
         with mock.patch.object(
@@ -671,7 +669,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                     "Unable to parse resume progress: bad json")):
             resume_session, test_tags, test_objs, error, exit_code = (
                 greenlit.resolve_target_test_objects(
-                    initial_args, args, ["cxl"], []))
+                    args, ["cxl"], []))
 
         self.assertEqual(resume_session, "/tmp/session")
         self.assertEqual(test_tags, set())
@@ -681,7 +679,6 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
     def test_resolve_target_test_objects_allows_empty_list(self):
         """Empty --list selection is not an error."""
-        initial_args = argparse.Namespace(list=True)
         args = _args(["cxl"], list_tests=True)
         active_plan_tags = {GLTCore.GLTPlanType.SANITY.value}
 
@@ -692,7 +689,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                                   return_value=([], "", 0)):
             resume_session, test_tags, test_objs, error, exit_code = (
                 greenlit.resolve_target_test_objects(
-                    initial_args, args, ["cxl"], []))
+                    args, ["cxl"], []))
 
         self.assertIsNone(resume_session)
         self.assertEqual(test_tags, active_plan_tags)
@@ -702,7 +699,6 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
     def test_resolve_target_test_objects_forwards_discovery_error(self):
         """Discovery decides the exit code for discovery-specific failures."""
-        initial_args = argparse.Namespace(list=False)
         args = _args(["cxl"])
         active_plan_tags = {GLTCore.GLTPlanType.SANITY.value}
 
@@ -718,7 +714,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                         greenlit.CLI_RUNTIME_ERROR)):
             resume_session, test_tags, test_objs, error, exit_code = (
                 greenlit.resolve_target_test_objects(
-                    initial_args, args, ["cxl"], []))
+                    args, ["cxl"], []))
 
         self.assertIsNone(resume_session)
         self.assertEqual(test_tags, active_plan_tags)
