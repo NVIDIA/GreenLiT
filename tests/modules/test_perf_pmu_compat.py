@@ -353,6 +353,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
     def test_find_arm_spe_pmu_ignores_non_directory_entries(self):
         """ARM SPE PMU discovery ignores sysfs files that share the prefix."""
         with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "arm_spe_0"), "w", encoding="utf-8") as handle:
+                handle.write("not a directory\n")
             with open(os.path.join(tmpdir, "arm_spe_note"), "w", encoding="utf-8") as handle:
                 handle.write("not a directory\n")
             os.mkdir(os.path.join(tmpdir, "arm_spe_2"))

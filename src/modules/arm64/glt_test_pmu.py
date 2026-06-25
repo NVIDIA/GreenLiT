@@ -135,7 +135,7 @@ def _decode_arm_spe(perf_cmd, perf_data_path, logger):
 def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
     """Find the first available ARM SPE PMU."""
     for pmu in ARM_SPE_PMUS:
-        if os.path.exists(os.path.join(base_path, pmu)):
+        if os.path.isdir(os.path.join(base_path, pmu)):
             return pmu
 
     try:
