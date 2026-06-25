@@ -367,7 +367,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
     def test_find_arm_spe_pmu_logs_listdir_errors(self):
         """ARM SPE PMU discovery records inaccessible sysfs paths for triage."""
         with self.mock.patch.object(
-            glt_test_pmu.os.path, "exists", return_value=False
+            glt_test_pmu.os.path, "isdir", return_value=False
         ), self.mock.patch.object(
             glt_test_pmu.os, "listdir", side_effect=OSError("denied")
         ):

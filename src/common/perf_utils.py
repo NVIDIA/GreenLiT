@@ -23,7 +23,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
 
-PERF_VERSION_TIMEOUT_SECONDS = 10
+PERF_VERSION_TIMEOUT_SECONDS = 30
 
 
 class PerfTestStatus(Enum):

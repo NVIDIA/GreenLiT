@@ -11,6 +11,7 @@ from tests.test_base import GLTTestBase
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from common.perf_utils import (
+    PERF_VERSION_TIMEOUT_SECONDS,
     PerfTestStatus,
     get_perf_kernel_version_warning,
     get_perf_version,
@@ -198,7 +199,7 @@ class TestPerfUtils(GLTTestBase):
         """A hung perf --version probe is skipped instead of blocking resolution."""
         mock_run.side_effect = subprocess.TimeoutExpired(
             cmd=["/usr/lib/linux-tools/6.17/perf", "--version"],
-            timeout=10,
+            timeout=PERF_VERSION_TIMEOUT_SECONDS,
         )
 
         with self.mock.patch(
