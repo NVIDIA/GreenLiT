@@ -17,6 +17,7 @@
 Python script to verify the ARM64 MPAM resctrl filesystem can be mounted.
 """
 
+import os
 import platform
 import subprocess
 
@@ -71,6 +72,7 @@ def test_mpam_resctrl_mount(_, logger):
     """
     mpam_config = "CONFIG_ARM64_MPAM"
     resctrl_fs_config = "CONFIG_RESCTRL_FS"
+    mounted_by_test = False
 
     # Skip gate: kernel configuration must enable MPAM and the resctrl fs.
     kconfig_path = "/boot/config-" + platform.uname().release
@@ -121,6 +123,7 @@ def test_mpam_resctrl_mount(_, logger):
         GLTCore.GLTTestResult.fail(
             f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
         )
+    mounted_by_test = True
 
     try:
         if not _resctrl_is_mounted():
@@ -129,13 +132,98 @@ def test_mpam_resctrl_mount(_, logger):
                 f"{RESCTRL_MOUNT_POINT} found in {PROC_MOUNTS}."
             )
     finally:
+        if mounted_by_test:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
+                               RESCTRL_MOUNT_POINT, detail)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify the ARM64 MPAM resctrl info directory is present and accessible.
+
+    JIRA: DGX-16760
+    """
+    info_dir = os.path.join(RESCTRL_MOUNT_POINT, "info")
+    mounted_by_test = False
+
+    if not _resctrl_is_mounted():
+        for cli in ("mount", "umount"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available; cannot validate resctrl info."
+                )
         try:
             subprocess.run(
-                ["umount", RESCTRL_MOUNT_POINT],
+                ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE,
+                 RESCTRL_MOUNT_POINT],
                 check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, shell=False,
             )
         except subprocess.CalledProcessError as e:
-            detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
-            logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
-                           RESCTRL_MOUNT_POINT, detail)
+            GLTCore.GLTTestResult.fail(
+                f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
+            )
+        mounted_by_test = True
+
+        if not _resctrl_is_mounted():
+            GLTCore.GLTTestResult.fail(
+                f"mount reported success but no resctrl entry for "
+                f"{RESCTRL_MOUNT_POINT} found in {PROC_MOUNTS}; "
+                "cannot validate resctrl info."
+            )
+
+    expected_dirs = ("L3", "L3_MON", "MB", "MB_HLIM", "MB_MON")
+    expected_files = ("last_cmd_status",)
+
+    try:
+        if not os.path.isdir(info_dir):
+            GLTCore.GLTTestResult.fail(
+                f"resctrl info directory not found at {info_dir}; "
+                "MPAM resctrl info interface unavailable."
+            )
+
+        errors = []
+        for name in expected_dirs:
+            path = os.path.join(info_dir, name)
+            if not os.path.exists(path):
+                errors.append(f"{name} (expected directory) is missing")
+            elif not os.path.isdir(path):
+                errors.append(f"{name} exists but is not a directory")
+        for name in expected_files:
+            path = os.path.join(info_dir, name)
+            if not os.path.exists(path):
+                errors.append(f"{name} (expected file) is missing")
+            elif not os.path.isfile(path):
+                errors.append(f"{name} exists but is not a file")
+
+        if errors:
+            GLTCore.GLTTestResult.fail(
+                f"resctrl info directory {info_dir} is missing expected "
+                f"entries: {'; '.join(errors)}."
+            )
+
+    finally:
+        if mounted_by_test:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
+                               RESCTRL_MOUNT_POINT, detail)
