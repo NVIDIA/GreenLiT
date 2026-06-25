@@ -72,6 +72,7 @@ def test_mpam_resctrl_mount(_, logger):
     """
     mpam_config = "CONFIG_ARM64_MPAM"
     resctrl_fs_config = "CONFIG_RESCTRL_FS"
+    mounted_by_test = False
 
     # Skip gate: kernel configuration must enable MPAM and the resctrl fs.
     kconfig_path = "/boot/config-" + platform.uname().release
@@ -122,6 +123,7 @@ def test_mpam_resctrl_mount(_, logger):
         GLTCore.GLTTestResult.fail(
             f"Failed to mount resctrl at {RESCTRL_MOUNT_POINT}: {e}"
         )
+    mounted_by_test = True
 
     try:
         if not _resctrl_is_mounted():
@@ -130,16 +132,17 @@ def test_mpam_resctrl_mount(_, logger):
                 f"{RESCTRL_MOUNT_POINT} found in {PROC_MOUNTS}."
             )
     finally:
-        try:
-            subprocess.run(
-                ["umount", RESCTRL_MOUNT_POINT],
-                check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, shell=False,
-            )
-        except subprocess.CalledProcessError as e:
-            detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
-            logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
-                           RESCTRL_MOUNT_POINT, detail)
+        if mounted_by_test:
+            try:
+                subprocess.run(
+                    ["umount", RESCTRL_MOUNT_POINT],
+                    check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, shell=False,
+                )
+            except subprocess.CalledProcessError as e:
+                detail = e.stderr.strip() or e.stdout.strip() or "umount failed"
+                logger.warning("Failed to unmount resctrl at %s during cleanup: %s",
+                               RESCTRL_MOUNT_POINT, detail)
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
