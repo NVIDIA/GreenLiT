@@ -132,7 +132,7 @@ def _decode_arm_spe(perf_cmd, perf_data_path, logger):
     )
 
 
-def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH):
+def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
     """Find the first available ARM SPE PMU."""
     for pmu in ARM_SPE_PMUS:
         if os.path.exists(os.path.join(base_path, pmu)):
@@ -144,7 +144,9 @@ def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH):
             if name.startswith("arm_spe")
             and os.path.isdir(os.path.join(base_path, name))
         )
-    except OSError:
+    except OSError as err:
+        if logger:
+            logger.debug("Unable to list ARM SPE PMUs under %s: %s", base_path, err)
         return None
 
     return pmus[0] if pmus else None
@@ -433,6 +435,8 @@ def _record_arm_spe(perf_cmd, perf_data_path, pmu, logger):
     """Record a small workload with the requested ARM SPE PMU."""
     event = f"{pmu}/ts_enable=1,load_filter=1,store_filter=1,min_latency=1/"
     logger.info("Recording ARM SPE data to %s", perf_data_path)
+    # GreenLiT targets Linux DUTs with GNU coreutils; status=none keeps dd quiet
+    # while perf owns the record output.
     return subprocess.run(
         [
             perf_cmd, "record", "-o", perf_data_path, "-e", event, "--",
@@ -671,7 +675,7 @@ def test_perf_arm_spe_olympus_data_source(sd, logger):
         GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
     logger.info("Using perf command: %s", perf_cmd)
 
-    pmu = _find_arm_spe_pmu()
+    pmu = _find_arm_spe_pmu(logger=logger)
     if pmu is None:
         GLTCore.GLTTestResult.fail("ARM SPE PMU is not available under /sys/bus/event_source/devices.")
     logger.info("Using ARM SPE PMU: %s", pmu)

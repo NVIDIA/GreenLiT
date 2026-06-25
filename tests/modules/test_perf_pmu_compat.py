@@ -362,6 +362,26 @@ class TestPerfPmuCompatibility(GLTTestBase):
                 "arm_spe_2",
             )
 
+    def test_find_arm_spe_pmu_logs_listdir_errors(self):
+        """ARM SPE PMU discovery records inaccessible sysfs paths for triage."""
+        with self.mock.patch.object(
+            glt_test_pmu.os.path, "exists", return_value=False
+        ), self.mock.patch.object(
+            glt_test_pmu.os, "listdir", side_effect=OSError("denied")
+        ):
+            self.assertIsNone(
+                glt_test_pmu._find_arm_spe_pmu(
+                    base_path="/sys/bus/event_source/devices",
+                    logger=self.mock_logger,
+                )
+            )
+
+        self.mock_logger.debug.assert_called_with(
+            "Unable to list ARM SPE PMUs under %s: %s",
+            "/sys/bus/event_source/devices",
+            self.mock.ANY,
+        )
+
     def test_has_decoded_data_source_accepts_load_with_l2_level(self):
         """Decoded Olympus data source accepts common data-source L2 evidence."""
         output = "100000 |OP LOAD|LVL L2 hit| 42 0xffff memcpy"

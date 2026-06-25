@@ -157,7 +157,8 @@ def _candidate_matches_kernel(
     perf_version: str,
 ) -> bool:
     """Return True when a perf candidate matches the running kernel."""
-    if perf_version == kernel_version:
+    perf_base_version = perf_version.split("-", 1)[0]
+    if perf_base_version == kernel_version:
         return True
 
     tool_dir = Path(candidate).parent.name

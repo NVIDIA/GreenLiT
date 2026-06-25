@@ -161,6 +161,20 @@ class TestPerfUtils(GLTTestBase):
             self.assertIsNone(resolve_perf_command(self.mock_logger))
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_accepts_package_revision_suffix(self, mock_run):
+        """Perf package revision suffixes should not block base version matching."""
+        mock_run.return_value = self._completed(stdout="perf version 6.17.13-1ubuntu1\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/bin/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(resolve_perf_command(self.mock_logger), "/usr/bin/perf")
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_matches_linux_tools_release_directory(
         self, mock_run
     ):
