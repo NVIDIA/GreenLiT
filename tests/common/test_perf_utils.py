@@ -21,7 +21,7 @@ from common.perf_utils import (
 )
 
 
-class TestPerfUtils(GLTTestBase):
+class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test perf helper behavior without requiring real perf hardware."""
 
     def _completed(self, stdout="", stderr="", returncode=0):
