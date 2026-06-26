@@ -12,6 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from common.perf_utils import (
     PerfTestStatus,
+    get_perf_kernel_version_warning,
+    get_perf_version,
     has_coresight_fallback_evidence,
     run_perf_test_candidates,
 )
@@ -27,6 +29,70 @@ class TestPerfUtils(GLTTestBase):
             stdout=stdout,
             stderr=stderr,
         )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_get_perf_version(self, mock_run):
+        """perf userspace version is queried without a shell."""
+        mock_run.return_value = self._completed(stdout="perf version 6.17.13\n")
+
+        self.assertEqual(get_perf_version(self.mock_logger),
+                         "perf version 6.17.13")
+        mock_run.assert_called_once_with(
+            ["perf", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_get_perf_version_handles_missing_perf(self, mock_run):
+        """Missing perf reports no version string."""
+        mock_run.side_effect = FileNotFoundError
+
+        self.assertEqual(get_perf_version(self.mock_logger), "")
+        self.mock_logger.debug.assert_called_once()
+
+    def test_get_perf_kernel_version_warning_accepts_matching_versions(self):
+        """Matching perf/kernel major.minor and linux-tools path is accepted."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            linux_tools = Path(temp_dir)
+            expected_dir = linux_tools / "6.17.0-1018-nvidia-64k"
+            expected_dir.mkdir()
+            (expected_dir / "perf").touch()
+
+            self.assertEqual(
+                get_perf_kernel_version_warning(
+                    "perf version 6.17.13",
+                    "6.17.0-1018-nvidia-64k",
+                    linux_tools,
+                ),
+                "",
+            )
+
+    def test_get_perf_kernel_version_warning_reports_major_minor_mismatch(self):
+        """Different perf/kernel major.minor versions are suspicious."""
+        warning = get_perf_kernel_version_warning(
+            "perf version 6.16.9",
+            "6.17.0-1018-nvidia-64k",
+            Path("/path/that/does/not/exist"),
+        )
+
+        self.assertIn("does not match running kernel major/minor", warning)
+        self.assertIn("perf version 6.16.9", warning)
+        self.assertIn("6.17.0-1018-nvidia-64k", warning)
+
+    def test_get_perf_kernel_version_warning_reports_missing_linux_tools_perf(self):
+        """Ubuntu-style linux-tools missing the running kernel perf is suspicious."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            warning = get_perf_kernel_version_warning(
+                "perf version 6.17.13",
+                "6.17.0-1018-nvidia-64k",
+                Path(temp_dir),
+            )
+
+        self.assertIn("Matching kernel perf binary is missing", warning)
+        self.assertIn("6.17.0-1018-nvidia-64k", warning)
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_run_perf_test_candidates_accepts_617_pmu_name(self, mock_run):

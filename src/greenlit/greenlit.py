@@ -23,6 +23,7 @@ import importlib.util
 import inspect
 import json
 import os
+import platform
 import re
 import signal
 import sys
@@ -31,6 +32,7 @@ from common import glt_core as GLTCore
 from common import glt_logger
 from common import glt_utils
 from common import glt_ext_launcher
+from common import perf_utils
 
 
 def _truncate_reason(text, max_len=120):
@@ -91,6 +93,14 @@ def check_required_commands(logger):
     for cmd in commands:
         if not glt_utils.is_cli_available(cmd):
             logger.warning(f"Command '{cmd}' is missing in the system.")
+        elif cmd == 'perf':
+            perf_version = perf_utils.get_perf_version(logger)
+            if perf_version:
+                logger.info("perf userspace: %s", perf_version)
+            warning = perf_utils.get_perf_kernel_version_warning(
+                perf_version, platform.release())
+            if warning:
+                logger.warning(warning)
 
 
 def check_required_files(logger):
