@@ -22,6 +22,7 @@ import platform
 import re
 import subprocess
 from pathlib import Path
+
 from packaging import version
 
 from common import glt_core as GLTCore
@@ -100,6 +101,128 @@ def _parse_nvidia_perf_units(perf_list_json):
         for item in perf_list_json
         if isinstance(item, dict)
     )
+
+
+_PMCCNTR_SMT_BUSY_FLOOR = 100_000_000
+_PMCCNTR_SMT_IDLE_RATIO_MAX = 0.10
+_PMCCNTR_SMT_PROBE_TIMEOUT_SECONDS = 10
+
+
+def _parse_cpu_list(s):
+    """Parse a Linux CPU list string into a sorted list of integer CPU IDs.
+
+    Handles comma-separated values, ranges, and mixed syntax (e.g. '0,2-3').
+    """
+    cpus = []
+    for part in s.strip().split(","):
+        part = part.strip()
+        if "-" in part:
+            lo, hi = part.split("-", 1)
+            cpus.extend(range(int(lo), int(hi) + 1))
+        elif part:
+            cpus.append(int(part))
+    return sorted(set(cpus))
+
+
+def _find_online_smt_pair():
+    """Return (busy_cpu, idle_cpu) from the first fully-online SMT sibling pair.
+
+    Returns None when no such pair exists or sysfs is unavailable.
+    """
+    try:
+        online_cpus = set(_parse_cpu_list(
+            Path("/sys/devices/system/cpu/online").read_text(encoding="utf-8")
+        ))
+    except (OSError, ValueError):
+        return None
+
+    for cpu in sorted(online_cpus):
+        siblings_path = Path(
+            f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list"
+        )
+        try:
+            siblings = _parse_cpu_list(siblings_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        online_siblings = [c for c in siblings if c in online_cpus]
+        if len(online_siblings) >= 2:
+            return online_siblings[0], online_siblings[1]
+    return None
+
+
+def _parse_perf_stat_csv(stderr, busy_cpu, idle_cpu):
+    """Parse per-CPU cycle counts from perf stat -x, -A stderr output.
+
+    Returns (busy_cycles, idle_cycles) or raises ValueError.
+    """
+    target = {busy_cpu, idle_cpu}
+    counts = {}
+
+    for line in stderr.splitlines():
+        line = line.strip()
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) < 4 or parts[0] not in {
+                str(busy_cpu), f"CPU{busy_cpu}", str(idle_cpu), f"CPU{idle_cpu}"}:
+            continue
+        if parts[3].split(":", 1)[0] != "cycles":
+            continue
+        cpu_label = parts[0]
+        count_field = parts[1]
+
+        for cpu_id in target:
+            if cpu_label in (str(cpu_id), f"CPU{cpu_id}"):
+                if count_field in ("<not counted>", "<not supported>", ""):
+                    raise ValueError(
+                        f"CPU {cpu_id} cycles counter unavailable: {count_field!r}"
+                    )
+                try:
+                    counts[cpu_id] = int(count_field)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"CPU {cpu_id} cycle count not parseable: {count_field!r}"
+                    ) from exc
+
+    for cpu_id in target:
+        if cpu_id not in counts:
+            raise ValueError(
+                f"No cycle count found for CPU {cpu_id} in perf stat output; "
+                f"stderr tail: {stderr.strip()[-300:]!r}"
+            )
+
+    return counts[busy_cpu], counts[idle_cpu]
+
+
+def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger):
+    """Run a single perf stat SMT probe and return (busy_cycles, idle_cycles).
+
+    Uses one subprocess so perf stat owns the workload lifetime exactly.
+    Raises ValueError on parse failure or missing per-CPU counts.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "perf", "stat", "-x,", "-e", "cycles", "-A",
+                "-C", f"{busy_cpu},{idle_cpu}",
+                "--", "taskset", "-c", str(busy_cpu), "timeout", "2s", "yes",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=_PMCCNTR_SMT_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(
+            "perf stat PMCCNTR SMT probe timed out after "
+            f"{_PMCCNTR_SMT_PROBE_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    except OSError as exc:
+        raise ValueError(f"perf stat PMCCNTR SMT probe failed to start: {exc}") from exc
+    logger.debug(
+        "perf stat rc=%d stderr=%r",
+        result.returncode, (result.stderr or "")[:500],
+    )
+    return _parse_perf_stat_csv(result.stderr or "", busy_cpu, idle_cpu)
 
 
 def _get_nvidia_perf_list(logger):
@@ -394,4 +517,57 @@ def test_arm_spe_pmu(sd, logger):
     if missing:
         GLTCore.GLTTestResult.fail(
             f"Missing expected strings {missing} in perf report with {perf_data_path}"
+        )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_pmccntr_smt_handling(_, logger):
+    """Verify PMCCNTR_EL0 is not used for CPU_CYCLES on SMT cores.
+
+    Tests the fix from commits c3d78c34ad00 (arm_pmuv3: Don't use PMCCNTR_EL0
+    on SMT cores), f8f89e8cf3d6, and 7ab06ea41af5.
+    """
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("This is not a Vera CPU; test is Vera-specific.")
+
+    pair = _find_online_smt_pair()
+    if pair is None:
+        GLTCore.GLTTestResult.skip(
+            "No online SMT sibling pair found; cannot probe PMCCNTR_EL0 SMT behavior."
+        )
+    busy_cpu, idle_cpu = pair
+
+    for tool in ("perf", "taskset", "timeout", "yes"):
+        if not glt_utils.is_cli_available(tool):
+            GLTCore.GLTTestResult.fail(
+                f"Required tool '{tool}' not found; install it to run this test."
+            )
+
+    try:
+        busy_cycles, idle_cycles = _probe_pmccntr_smt(busy_cpu, idle_cpu, logger)
+    except ValueError as exc:
+        GLTCore.GLTTestResult.fail(f"PMCCNTR_EL0 SMT probe failed: {exc}")
+
+    ratio = idle_cycles / busy_cycles if busy_cycles else float("inf")
+    logger.debug(
+        "PMCCNTR_EL0 SMT probe: busy_cpu=%d busy=%d idle_cpu=%d idle=%d ratio=%.4f",
+        busy_cpu, busy_cycles, idle_cpu, idle_cycles, ratio,
+    )
+
+    if busy_cycles < _PMCCNTR_SMT_BUSY_FLOOR:
+        GLTCore.GLTTestResult.fail(
+            f"Busy CPU {busy_cpu} only counted {busy_cycles} cycles "
+            f"(floor {_PMCCNTR_SMT_BUSY_FLOOR}); workload may not have run."
+        )
+
+    if ratio > _PMCCNTR_SMT_IDLE_RATIO_MAX:
+        GLTCore.GLTTestResult.fail(
+            f"Idle CPU {idle_cpu} cycle ratio {ratio:.4f} exceeds threshold "
+            f"{_PMCCNTR_SMT_IDLE_RATIO_MAX} (idle={idle_cycles}, busy={busy_cycles}). "
+            "PMCCNTR_EL0 appears to count across SMT siblings. "
+            "Backport commits c3d78c34ad00, f8f89e8cf3d6, 7ab06ea41af5."
         )
