@@ -15,6 +15,7 @@
 
 """Helpers for running perf selftests across perf versions."""
 
+import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
@@ -37,6 +38,67 @@ class PerfTestResult:
     status: PerfTestStatus
     reason: str
     test_name: Optional[str] = None
+
+
+def get_perf_version(logger=None) -> str:
+    """Return the perf userspace version string when available."""
+    try:
+        result = subprocess.run(
+            ["perf", "--version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError as err:
+        if logger:
+            logger.debug("Unable to query perf version: %s", err)
+        return ""
+
+    if result.returncode != 0:
+        if logger:
+            reason = (result.stderr or result.stdout or "").strip()
+            logger.debug("Unable to query perf version: %s",
+                         reason or f"return code {result.returncode}")
+        return ""
+
+    return (result.stdout or result.stderr).strip()
+
+
+def _parse_major_minor(version_text: str) -> Optional[tuple[int, int]]:
+    """Return the first major.minor pair from a version-like string."""
+    match = re.search(r"(\d+)\.(\d+)", version_text or "")
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def get_perf_kernel_version_warning(
+    perf_version: str,
+    kernel_release: str,
+    linux_tools_dir: Path = Path("/usr/lib/linux-tools"),
+) -> str:
+    """Return a warning when perf userspace may not match the running kernel."""
+    warnings = []
+    perf_major_minor = _parse_major_minor(perf_version)
+    kernel_major_minor = _parse_major_minor(kernel_release)
+    if perf_major_minor and kernel_major_minor and \
+            perf_major_minor != kernel_major_minor:
+        warnings.append(
+            f"perf userspace ({perf_version}) does not match running kernel "
+            f"major/minor ({kernel_release}); install the matching "
+            "perf/linux-tools package for the running kernel."
+        )
+
+    if linux_tools_dir.is_dir():
+        expected_perf = linux_tools_dir / kernel_release / "perf"
+        if not expected_perf.exists():
+            warnings.append(
+                f"Matching kernel perf binary is missing: {expected_perf}; "
+                "installed perf may not include events for the running kernel."
+            )
+
+    return " ".join(warnings)
 
 
 def _extract_perf_test_names(perf_test_list_output: str) -> set[str]:
