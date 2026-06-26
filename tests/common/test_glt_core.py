@@ -439,6 +439,18 @@ class TestGLTCore(GLTTestBase):
         self.assertFalse(can_start)
         self.assertEqual(reason, "No function in any_false returned False")
 
+    def test_requires_dependency_names(self):
+        """GLTRequires exposes all referenced dependency test IDs."""
+        requires = GLTRequires()
+        requires.all_true = ["cat1:test_1"]
+        requires.all_false = ["cat2:test_2"]
+        requires.any_true = ["cat3:test_3"]
+        requires.any_false = ["cat4:test_4"]
+
+        self.assertEqual(
+            requires.dependency_names(),
+            ["cat1:test_1", "cat2:test_2", "cat3:test_3", "cat4:test_4"])
+
     def test_test_result(self):
         """Test the GLTTestResult enum"""
         # Test enum values
@@ -624,6 +636,42 @@ class TestGLTCore(GLTTestBase):
                     self.assertFalse(
                         scheduler.progress_check("test1", "Start")
                     )
+
+    def test_scheduler_sort_rejects_missing_dependency(self):
+        """Scheduler sort reports dependencies that reference missing tests."""
+
+        @GLTRequires.must_pass("test_cat", "test_missing")
+        @GLTTestAttr(cat="test_cat", name="test_selected")
+        def test_selected():
+            return "selected"
+
+        scheduler = GLTScheduler([test_selected])
+
+        with self.assertRaises(ValueError) as ctx:
+            scheduler.sort()
+
+        self.assertIn("Dependency test_cat:test_missing", str(ctx.exception))
+        self.assertIn("test_cat:test_selected", str(ctx.exception))
+
+    def test_scheduler_sort_rejects_missing_dependent(self):
+        """Scheduler sort reports dependency graph entries for missing tests."""
+
+        @GLTTestAttr(cat="test_cat", name="test_dependency")
+        def test_dependency():
+            return "dependency"
+
+        scheduler = GLTScheduler([test_dependency])
+        scheduler.dependencies["test_cat:test_dependency"].append(
+            "test_cat:test_missing_dependent")
+
+        with self.assertRaises(ValueError) as ctx:
+            scheduler.sort()
+
+        self.assertIn(
+            "Test test_cat:test_missing_dependent depends on "
+            "test_cat:test_dependency",
+            str(ctx.exception))
+        self.assertIn("not in the scheduler", str(ctx.exception))
 
     def test_plan_nesting(self):
         """Test the GLTPlanType.get_all_nested method"""

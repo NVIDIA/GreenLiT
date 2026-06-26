@@ -18,6 +18,7 @@ The main module handles the CLI actions.
 """
 
 import argparse
+from collections import deque
 import glob
 import importlib.util
 import inspect
@@ -33,6 +34,11 @@ from common import glt_logger
 from common import glt_utils
 from common import glt_ext_launcher
 from common import perf_utils
+
+
+TEST_ID_HELP = "Test ID in category:test_name format, matching --list output."
+CLI_RUNTIME_ERROR = 1
+CLI_USAGE_ERROR = 2
 
 
 def _truncate_reason(text, max_len=120):
@@ -53,14 +59,21 @@ def _truncate_reason(text, max_len=120):
     return text.strip()[:max_len] if text.strip() else ""
 
 
-def apply_glt_configs(scheduler, logger, target_categories):
+def apply_glt_configs(scheduler, logger):
     """Read the configs and apply to test_objs"""
-    target = set(target_categories)
-    yaml_data = GLTConf.load_glt_yaml_files(logger)
-    for test_item, contents in yaml_data[0].items():
-        category = test_item.split(":", 1)[0]
-        if category not in target:
-            logger.debug(f"Skipping {test_item} from config: category not in run targets.")
+    runnable_ids = {
+        scheduler.get_test_case_name(test_obj)
+        for test_obj in scheduler.test_list
+    }
+    merged_config = {}
+    for yaml_data in GLTConf.load_glt_yaml_files(logger):
+        if not yaml_data:
+            continue
+        merged_config.update(yaml_data)
+
+    for test_item, contents in merged_config.items():
+        if test_item not in runnable_ids:
+            logger.debug(f"Skipping {test_item} from config: test not in run targets.")
             continue
         obj = scheduler.get_test_obj_by_name(test_item)
         if not obj:
@@ -170,12 +183,74 @@ def get_target_categories(args, supported_categories):
         supported_categories: List of all known category names.
 
     Returns:
-        List of target category names. If the user passed category
-        flags, that subset is returned; otherwise falls back to all
-        supported categories (default behavior).
+        List of target category names. If --test-case is provided, only
+        categories from the selected test IDs are returned. Otherwise,
+        category flags select a subset and no category flags fall back to
+        all supported categories.
     """
+    selected_tests = getattr(args, "test_cases", None) or []
+    if selected_tests:
+        categories = []
+        for test_id in selected_tests:
+            category = test_id.split(":", 1)[0]
+            if category in supported_categories and category not in categories:
+                categories.append(category)
+        return categories
+
     selected = [cat for cat in supported_categories if getattr(args, cat)]
     return selected if selected else list(supported_categories)
+
+
+def parse_test_selector(value):
+    """Validate and return a --test-case selector."""
+    if value.count(":") != 1:
+        raise argparse.ArgumentTypeError(
+            f"Invalid test case ID '{value}'. {TEST_ID_HELP}")
+    category, test_name = value.split(":", 1)
+    if not category or not test_name:
+        raise argparse.ArgumentTypeError(
+            f"Invalid test case ID '{value}'. {TEST_ID_HELP}")
+    return value
+
+
+def validate_test_case_args_conflicts(args, supported_categories=None, unknown_args=None):
+    """Return whether --test-case is used with compatible CLI options."""
+    has_test_case = getattr(args, "test_cases", None) or any(
+        arg == "--test-case" or arg.startswith("--test-case=")
+        for arg in (unknown_args or [])
+    )
+    if not has_test_case:
+        return True, ""
+    if getattr(args, "list", False):
+        return False, "--test-case cannot be combined with --list."
+    if getattr(args, "resume", None) is not None:
+        return False, "--test-case cannot be combined with --resume."
+    if supported_categories:
+        selected_categories = [
+            f"--{category}" for category in supported_categories
+            if getattr(args, category, False)
+        ]
+        if selected_categories:
+            return (
+                False,
+                "--test-case cannot be combined with category flags: "
+                + ", ".join(selected_categories),
+            )
+    return True, ""
+
+
+def _required_test_ids(test_obj):
+    """Return prerequisite test IDs directly referenced by a test object."""
+    wrapped = getattr(test_obj, "__wrapped__", None)
+    reqs = getattr(wrapped, "requires", None)
+    if reqs is None:
+        return set()
+    return set(reqs.dependency_names())
+
+
+def _test_matches_plan_tags(test_obj, active_plan_tags):
+    attr = test_obj.__wrapped__.attr
+    return bool(set(attr.plans).intersection(active_plan_tags))
 
 
 def glt_signal_handler(logger, scheduler):
@@ -213,7 +288,7 @@ def list_test_cases(scheduler):
         if attr.category not in scheduler.test_categories or \
                 not set(attr.plans).intersection(scheduler.test_tags):
             continue
-        print(f"{attr.category}:{attr.name}")
+        print(scheduler.get_test_case_name(test_obj))
 
 
 def parse_arguments(supported_categories):
@@ -230,6 +305,9 @@ def parse_arguments(supported_categories):
         "--ext-dir",
         default="/usr/share/greenlit/executing_dir",
         help="Directory containing external executable tests (default: /usr/share/greenlit/executing_dir)")
+    general_group.add_argument("--test-case", dest="test_cases", action="append",
+                               type=parse_test_selector, metavar="category:test_name",
+                               help=f"{TEST_ID_HELP} Can be used more than once.")
 
     # Test plan options
     plan_group = parser.add_argument_group("Supported plans")
@@ -340,8 +418,8 @@ def registry_test_cases(logger, scheduler):
         scheduler.progress_update(attr.name, 'Category', attr.category)
 
 
-def resolve_plan_and_categories(args, scheduler, supported_categories):
-    """Resolve test plan and categories from CLI arguments."""
+def get_active_plan_tags(args):
+    """Return active plan tags selected by CLI arguments."""
     selected_plan = None
     for plan in GLTCore.GLTPlanType:
         if getattr(args, plan.value):
@@ -350,29 +428,100 @@ def resolve_plan_and_categories(args, scheduler, supported_categories):
     if selected_plan is None:
         selected_plan = GLTCore.GLTPlanType.SANITY.value
 
-    scheduler.test_tags = GLTCore.GLTPlanType.get_all_nested(selected_plan)
-    scheduler.test_categories = get_target_categories(args, supported_categories)
+    return GLTCore.GLTPlanType.get_all_nested(selected_plan)
+
+
+def read_session_summary(session):
+    """Return saved test tags and categories from a cached session."""
+    def error(message):
+        return False, message, set(), None, None
+
+    result = error("Resume session not found.")
+    if session is None:
+        return result
+
+    progress_path = os.path.join(
+        session, "glt-test-suite", "test_progress.json")
+    result = error(f"Resume summary not found in {progress_path}")
+    try:
+        with open(progress_path, "r", encoding="UTF-8") as progress_file:
+            progress = json.load(progress_file)
+    except OSError as err:
+        result = error(f"Unable to read resume progress: {err}")
+    except json.JSONDecodeError as err:
+        result = error(f"Unable to parse resume progress: {err}")
+    else:
+        test_tags = None
+        categories = None
+        test_cases = []
+        for item in progress:
+            if not isinstance(item, dict):
+                continue
+            summary = item.get("Summary")
+            if summary is not None:
+                test_tags = summary.get("TestTags")
+                categories = summary.get("Categories")
+                continue
+
+            for test_name, test_info in item.items():
+                if isinstance(test_info, dict) and test_info.get("Category"):
+                    test_cases.append(f"{test_info['Category']}:{test_name}")
+                    break
+
+        if not test_tags or not categories:
+            result = error(
+                f"Resume summary in {progress_path} is missing "
+                "TestTags or Categories")
+        elif not test_cases:
+            result = error(
+                f"Resume progress in {progress_path} has no registered "
+                "test cases")
+        else:
+            result = (True, "", set(test_tags), list(categories), test_cases)
+
+    return result
+
+
+def resolve_run_selection(args, supported_categories):
+    """Return discovery scope, using saved session state for resume runs."""
+    if args.resume is None:
+        return (
+            None,
+            get_active_plan_tags(args),
+            get_target_categories(args, supported_categories),
+            getattr(args, "test_cases", None),
+            "",
+        )
+
+    resume_session = get_cached_session_path(args.resume)
+    ok, message, active_plan_tags, target_categories, test_cases = (
+        read_session_summary(resume_session))
+    if not ok:
+        return resume_session, set(), None, None, message
+
+    return resume_session, active_plan_tags, target_categories, test_cases, ""
 
 
 def resume_from_session(scheduler, session):
     """Resume status from previous session"""
+    # TODO(DGX-16988): Make either main() or progress_read() the single owner
+    # of rebuilding scheduler.test_list for resume.
     scheduler.progress_read(session)
     scheduler.progress_save()
 
 
-def setup_session(initial_args):
-    """Create or resume a session and configure the logger.
+def setup_session(verbose, resume_session):
+    """Create or reuse the resolved resume session and configure the logger.
 
     Returns:
         tuple: (session path, logger)
     """
-    if initial_args.resume is not None:
-        session = get_cached_session_path(initial_args.resume)
-    else:
+    session = resume_session
+    if session is None:
         session = glt_utils.create_cache_session()
 
     logger = glt_logger.get_logger(session, "glt-test-suite")
-    if initial_args.verbose:
+    if verbose:
         glt_logger.verbose(logger)
 
     return session, logger
@@ -453,27 +602,96 @@ def test_case_discover(categories):
     return test_objs
 
 
-def test_case_discover_with_prereqs(initial_categories, supported_categories):
-    """Discover tests for @initial_categories, expanding the import set to
-    cover any cross-category prerequisites referenced by their @requires
-    decorators.
-    """
-    supported = set(supported_categories)
-    loaded = set(initial_categories)
-    pending = initial_categories
-    test_objs = []
+def discover_target_test_cases(
+        target_categories, test_cases, active_plan_tags, external_test_objs=None):
+    """Return selected test objects, error message, and error exit code."""
+    external_test_objs = external_test_objs or []
+    active_plan_tags = set(active_plan_tags)
+    selected_tests = test_cases or []
+    loaded_categories = set()
+    tests_by_category = {}
+    test_map = {}
+
+    def load_category(category):
+        if category in loaded_categories:
+            return
+        if category == glt_ext_launcher.CATEGORY_NAME:
+            test_objs = external_test_objs
+        else:
+            test_objs = test_case_discover([category])
+        loaded_categories.add(category)
+        tests_by_category[category] = test_objs
+        for test_obj in test_objs:
+            test_map[GLTCore.GLTScheduler.get_test_case_name(test_obj)] = test_obj
+
+    for category in target_categories:
+        load_category(category)
+
+    if selected_tests:
+        pending = deque((test_id, None) for test_id in selected_tests)
+    else:
+        pending = deque(
+            (GLTCore.GLTScheduler.get_test_case_name(test_obj), None)
+            for category in target_categories
+            for test_obj in tests_by_category.get(category, [])
+            if _test_matches_plan_tags(test_obj, active_plan_tags))
+
+    selected_order = []
+    selected_ids = set()
     while pending:
-        new_objs = test_case_discover(pending)
-        test_objs.extend(new_objs)
-        referenced = set()
-        for obj in new_objs:
-            wrapped = getattr(obj, "__wrapped__", None)
-            reqs = getattr(wrapped, "requires", None)
-            if reqs is not None:
-                referenced |= reqs.categories()
-        pending = (referenced & supported) - loaded
-        loaded |= pending
-    return test_objs
+        test_id, required_by = pending.popleft()
+        if test_id in selected_ids:
+            continue
+        category = test_id.split(":", 1)[0]
+        load_category(category)
+        test_obj = test_map.get(test_id)
+        if test_obj is None:
+            if required_by is not None:
+                return [], (
+                    f"Required test ID {test_id} referenced by {required_by} "
+                    f"does not exist"), CLI_RUNTIME_ERROR
+            return [], f"Unknown test ID: {test_id}", CLI_USAGE_ERROR
+        if not _test_matches_plan_tags(test_obj, active_plan_tags):
+            if required_by is not None:
+                return [], (
+                    f"Required test ID {test_id} is not selected by plan "
+                    f"{sorted(active_plan_tags)}"), CLI_RUNTIME_ERROR
+            return [], (
+                f"Test ID {test_id} is not selected by plan "
+                f"{sorted(active_plan_tags)}"), CLI_USAGE_ERROR
+        selected_ids.add(test_id)
+        selected_order.append(test_id)
+        pending.extend(
+            (required_id, test_id)
+            for required_id in sorted(_required_test_ids(test_obj))
+            if required_id not in selected_ids)
+
+    return [test_map[test_id] for test_id in selected_order], "", 0
+
+
+def resolve_target_test_objects(args, supported_categories, external_test_objs):
+    """Resolve CLI/resume selection into runnable test objects."""
+    resume_session, active_plan_tags, target_categories, target_test_cases, error = (
+        resolve_run_selection(args, supported_categories))
+    if error:
+        return resume_session, active_plan_tags, [], error, CLI_RUNTIME_ERROR
+
+    test_objs, error, discovery_error_code = discover_target_test_cases(
+        target_categories, target_test_cases, active_plan_tags,
+        external_test_objs)
+    if error:
+        return (
+            resume_session, active_plan_tags, [], error, discovery_error_code)
+
+    if not test_objs and not args.list:
+        return (
+            resume_session,
+            active_plan_tags,
+            [],
+            "No test cases selected for the requested plan and categories.",
+            CLI_USAGE_ERROR)
+
+    return resume_session, active_plan_tags, test_objs, "", 0
 
 
 def test_case_init(module):
@@ -512,7 +730,12 @@ def main():
     # Minimal pre-parse: we need --list, --resume, --verbose, and --ext-dir
     # before full argument parsing because categories are discovered dynamically.
     initial_parser = create_initial_parser()
-    initial_args, _ = initial_parser.parse_known_args()
+    initial_args, unknown_args = initial_parser.parse_known_args()
+    args_valid, error = validate_test_case_args_conflicts(
+        initial_args, unknown_args=unknown_args)
+    if not args_valid:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(CLI_USAGE_ERROR)
 
     # --list --resume: list cached sessions and exit (no discovery needed)
     if initial_args.resume is not None and initial_args.list:
@@ -523,47 +746,58 @@ def main():
 
     supported_categories = test_category_discover()
 
-    ext_dir = initial_args.ext_dir
     external_test_objs = []
-    if os.path.isdir(ext_dir):
-        external_test_objs = glt_ext_launcher.discover(ext_dir, ext_dir)
+    if os.path.isdir(initial_args.ext_dir):
+        external_test_objs = glt_ext_launcher.discover(
+            initial_args.ext_dir, initial_args.ext_dir)
         if external_test_objs and glt_ext_launcher.CATEGORY_NAME not in supported_categories:
             supported_categories.append(glt_ext_launcher.CATEGORY_NAME)
 
+    # Build the full parser after category discovery so dynamic category flags
+    # exist, then validate conflicts that depend on those dynamic flags.
     args = parse_arguments(supported_categories)
+    args_valid, error = validate_test_case_args_conflicts(
+        args, supported_categories=supported_categories)
+    if not args_valid:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(CLI_USAGE_ERROR)
 
-    # --- Phase 2: Resolve which categories user selected ---
+    # --- Phase 2: Resolve categories/resume state into exact target tests ---
 
-    target_categories = get_target_categories(args, supported_categories)
+    resume_session, active_plan_tags, test_objs, error, exit_code = (
+        resolve_target_test_objects(
+            args, supported_categories, external_test_objs))
+    if error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(exit_code)
 
-    # --- Phase 3: Import only selected category modules ---
-
-    test_objs = test_case_discover_with_prereqs(
-        target_categories, supported_categories)
-
-    if glt_ext_launcher.CATEGORY_NAME in target_categories:
-        test_objs.extend(external_test_objs)
-
-    # --- Phase 4: Build scheduler, resolve plan ---
+    # --- Phase 3: Build scheduler with resolved tests, plan, and categories ---
 
     scheduler = GLTCore.GLTScheduler(test_objs)
-    scheduler.sort()
-    resolve_plan_and_categories(args, scheduler, supported_categories)
+    scheduler.test_tags = active_plan_tags
+    scheduler.test_categories = sorted({
+        test_obj.__wrapped__.attr.category for test_obj in scheduler.test_list
+    })
+    try:
+        scheduler.sort()
+    except ValueError as err:
+        print(f"Error: {err}", file=sys.stderr)
+        sys.exit(CLI_USAGE_ERROR)
 
     # --- --list: clean output, no session, no side effects ---
 
-    if initial_args.list:
+    if args.list:
         list_test_cases(scheduler)
         return
 
     # --- Phase 5: Create session and run tests ---
 
-    session, logger = setup_session(initial_args)
+    session, logger = setup_session(args.verbose, resume_session=resume_session)
 
     # Wire session into the scheduler (ext_test workdirs resolve lazily)
     scheduler.log_dir = f"{session}/glt-test-suite"
 
-    apply_glt_configs(scheduler, logger, target_categories)
+    apply_glt_configs(scheduler, logger)
 
     signal.signal(signal.SIGINT, glt_signal_handler(logger, scheduler))
     signal.signal(signal.SIGTERM, glt_signal_handler(logger, scheduler))
@@ -577,9 +811,9 @@ def main():
     check_required_files(logger)
 
     logger.info("== Session %s %s ==", session,
-                "attached" if initial_args.resume is not None else "started")
+                "attached" if args.resume is not None else "started")
 
-    if initial_args.resume is not None:
+    if args.resume is not None:
         resume_from_session(scheduler, session)
     else:
         registry_test_cases(logger, scheduler)
