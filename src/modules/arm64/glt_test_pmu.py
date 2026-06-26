@@ -522,6 +522,8 @@ def test_arm_spe_pmu(sd, logger):
 
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_pmccntr_smt_handling(_, logger):
     """Verify PMCCNTR_EL0 is not used for CPU_CYCLES on SMT cores.
 
