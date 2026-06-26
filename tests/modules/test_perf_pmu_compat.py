@@ -1,8 +1,10 @@
 """Unit tests for PMU perf compatibility."""
 # pylint: disable=wrong-import-position,protected-access,unused-argument,too-many-public-methods
 
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from tests.test_base import GLTTestBase
@@ -17,6 +19,15 @@ from src.modules.arm64 import glt_test_pmu
 class TestPerfPmuCompatibility(GLTTestBase):
     """Test PMU behavior around perf selftest compatibility."""
 
+    def _completed_process(self, args=None, returncode=0, stdout="", stderr=""):
+        """Build a subprocess result for helper tests."""
+        return subprocess.CompletedProcess(
+            args or ["cmd"],
+            returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
     def _perf_pass(self, test_name):
         return perf_utils.PerfTestResult(
             perf_utils.PerfTestStatus.PASS,
@@ -25,14 +36,13 @@ class TestPerfPmuCompatibility(GLTTestBase):
         )
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
-    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.glt_utils")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
     def test_all_pmu_events_uses_old_and_617_candidates(
-        self, mock_nvdev, mock_glt_utils, mock_perf_utils
+        self, mock_nvdev, mock_perf_utils
     ):
-        """PMU test tries the old perf name first, then the 6.17 name."""
+        """PMU test uses resolved perf for old and 6.17 selftest names."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
-        mock_glt_utils.is_cli_available.return_value = True
+        mock_perf_utils.resolve_perf_command.return_value = "/perf"
         mock_perf_utils.PerfTestStatus = perf_utils.PerfTestStatus
         mock_perf_utils.run_perf_test_candidates.return_value = self._perf_pass(
             "Parsing of all PMU events from sysfs"
@@ -40,19 +50,20 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
         glt_test_pmu.test_all_pmu_events(None, self.mock_logger)
 
+        mock_perf_utils.resolve_perf_command.assert_called_once_with(self.mock_logger)
         mock_perf_utils.run_perf_test_candidates.assert_called_once_with(
-            ["perf all PMU test", "Parsing of all PMU events from sysfs"]
+            ["perf all PMU test", "Parsing of all PMU events from sysfs"],
+            perf_cmd="/perf",
         )
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
-    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.glt_utils")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
     def test_all_pmu_events_fails_when_no_candidate_matches(
-        self, mock_nvdev, mock_glt_utils, mock_perf_utils
+        self, mock_nvdev, mock_perf_utils
     ):
         """PMU test fails clearly when neither old nor 6.17 names exist."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
-        mock_glt_utils.is_cli_available.return_value = True
+        mock_perf_utils.resolve_perf_command.return_value = "/perf"
         mock_perf_utils.PerfTestStatus = perf_utils.PerfTestStatus
         mock_perf_utils.run_perf_test_candidates.return_value = perf_utils.PerfTestResult(
             perf_utils.PerfTestStatus.NO_MATCH,
@@ -62,6 +73,20 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.assertRaises(GLTCore.GLTTestFail) as context:
             glt_test_pmu.test_all_pmu_events(None, self.mock_logger)
         self.assertIn("No matching perf test found", str(context.exception))
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_all_pmu_events_fails_when_no_perf_command_exists(
+        self, mock_nvdev, mock_perf_utils
+    ):
+        """PMU test fails before selftest discovery when no usable perf exists."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        mock_perf_utils.resolve_perf_command.return_value = None
+
+        with self.assertRaises(GLTCore.GLTTestFail):
+            glt_test_pmu.test_all_pmu_events(None, self.mock_logger)
+
+        mock_perf_utils.run_perf_test_candidates.assert_not_called()
 
     # --- _parse_cpu_list ---
 
@@ -285,6 +310,311 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("CPU 3", str(ctx.exception))
+
+    def test_decode_arm_spe_uses_data_source_fields(self):
+        """The decode helper asks perf script for data_src output."""
+        completed = self._completed_process(stdout="decoded")
+        with self.mock.patch.object(
+            glt_test_pmu.subprocess, "run", return_value=completed
+        ) as mock_run:
+            result = glt_test_pmu._decode_arm_spe(
+                "/usr/lib/linux-tools/6.17/perf",
+                "/tmp/perf.data",
+                self.mock_logger,
+            )
+
+        self.assertIs(result, completed)
+        mock_run.assert_called_once_with(
+            [
+                "/usr/lib/linux-tools/6.17/perf",
+                "script",
+                "-i",
+                "/tmp/perf.data",
+                "-F",
+                "period,data_src,weight,ip,sym",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS,
+        )
+
+    def test_find_arm_spe_pmu_returns_first_existing_pmu(self):
+        """ARM SPE PMU discovery prefers the first configured PMU name."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            os.mkdir(os.path.join(tmpdir, "arm_spe_1"))
+
+            self.assertEqual(
+                glt_test_pmu._find_arm_spe_pmu(base_path=tmpdir),
+                "arm_spe_1",
+            )
+
+    def test_find_arm_spe_pmu_ignores_non_directory_entries(self):
+        """ARM SPE PMU discovery ignores sysfs files that share the prefix."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "arm_spe_0"), "w", encoding="utf-8") as handle:
+                handle.write("not a directory\n")
+            with open(os.path.join(tmpdir, "arm_spe_note"), "w", encoding="utf-8") as handle:
+                handle.write("not a directory\n")
+            os.mkdir(os.path.join(tmpdir, "arm_spe_2"))
+
+            self.assertEqual(
+                glt_test_pmu._find_arm_spe_pmu(base_path=tmpdir),
+                "arm_spe_2",
+            )
+
+    def test_find_arm_spe_pmu_logs_listdir_errors(self):
+        """ARM SPE PMU discovery records inaccessible sysfs paths for triage."""
+        with self.mock.patch.object(
+            glt_test_pmu.os.path, "isdir", return_value=False
+        ), self.mock.patch.object(
+            glt_test_pmu.os, "listdir", side_effect=OSError("denied")
+        ):
+            self.assertIsNone(
+                glt_test_pmu._find_arm_spe_pmu(
+                    base_path="/sys/bus/event_source/devices",
+                    logger=self.mock_logger,
+                )
+            )
+
+        self.mock_logger.debug.assert_called_with(
+            "Unable to list ARM SPE PMUs under %s: %s",
+            "/sys/bus/event_source/devices",
+            self.mock.ANY,
+        )
+
+    def test_has_decoded_data_source_accepts_load_with_l2_level(self):
+        """Decoded Olympus data source accepts common data-source L2 evidence."""
+        output = "100000 |OP LOAD|LVL L2 hit| 42 0xffff memcpy"
+
+        self.assertTrue(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_has_decoded_data_source_accepts_store_with_local_ram_level(self):
+        """Decoded Olympus data source accepts real perf Local RAM evidence."""
+        output = "100000 |OP STORE|LVL Local RAM hit| 42 0xffff memcpy"
+
+        self.assertTrue(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_has_decoded_data_source_accepts_store_with_remote_ram_level(self):
+        """Decoded Olympus data source accepts real perf Remote RAM evidence."""
+        output = "100000 |OP STORE|LVL Remote RAM (1 hop) hit| 42 0xffff memcpy"
+
+        self.assertTrue(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_has_decoded_data_source_rejects_generic_spe_output(self):
+        """Generic SPE report strings do not prove Olympus data-source decode."""
+        output = "Samples: 10K of event 'l1d-miss', Event count: 42"
+
+        self.assertFalse(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_has_decoded_data_source_rejects_l1_level(self):
+        """Generic ARM SPE fallback can emit L1, so it is not Olympus evidence."""
+        output = "100000 |OP LOAD|LVL L1 hit| 42 0xffff memcpy"
+
+        self.assertFalse(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_has_decoded_data_source_rejects_l3_level(self):
+        """Generic ARM SPE fallback can emit L3, so it is not Olympus evidence."""
+        output = "100000 |OP LOAD|LVL L3 hit| 42 0xffff memcpy"
+
+        self.assertFalse(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_has_decoded_data_source_rejects_split_op_and_level_lines(self):
+        """Operation and memory level must appear in the same decoded sample."""
+        output = "100000 |OP LOAD| memcpy\n100000 |LVL L2 hit| memcpy"
+
+        self.assertFalse(glt_test_pmu._has_decoded_data_source(output))
+
+    def test_record_arm_spe_uses_explicit_pmu_filters(self):
+        """The record helper uses the verified ARM SPE event filter shape."""
+        completed = self._completed_process()
+        with self.mock.patch.object(
+            glt_test_pmu.subprocess, "run", return_value=completed
+        ) as mock_run:
+            result = glt_test_pmu._record_arm_spe(
+                "/usr/lib/linux-tools/6.17/perf",
+                "/tmp/perf.data",
+                "arm_spe_0",
+                self.mock_logger,
+            )
+
+        self.assertIs(result, completed)
+        mock_run.assert_called_once_with(
+            [
+                "/usr/lib/linux-tools/6.17/perf",
+                "record",
+                "-o",
+                "/tmp/perf.data",
+                "-e",
+                "arm_spe_0/ts_enable=1,load_filter=1,store_filter=1,min_latency=1/",
+                "--",
+                "dd",
+                "if=/dev/zero",
+                "of=/dev/null",
+                "bs=1M",
+                "count=512",
+                "status=none",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=glt_test_pmu.ARM_SPE_RECORD_TIMEOUT_SECONDS,
+        )
+
+    def test_olympus_data_source_test_skips_on_grace(self):
+        """The Olympus data-source test is Vera-only but logs platform state."""
+        fake_nvdev = self.mock.Mock()
+        fake_nvdev.is_cpu_type.side_effect = lambda name: name == "grace"
+
+        with self.mock.patch.object(
+            glt_test_pmu, "NvDev", return_value=fake_nvdev
+        ), self.assertRaises(GLTCore.GLTTestSkip):
+            glt_test_pmu.test_perf_arm_spe_olympus_data_source(
+                self.mock_sd,
+                self.mock_logger,
+            )
+
+        self.mock_logger.info.assert_not_called()
+
+    def test_olympus_data_source_test_passes_when_decode_has_data_source(self):
+        """The decorated test passes when perf script shows op and level fields."""
+        fake_nvdev = self.mock.Mock()
+        fake_nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+        self.mock_sd.log_dir = "/tmp/greenlit"
+
+        with self.mock.patch.object(
+            glt_test_pmu, "NvDev", return_value=fake_nvdev
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.mock.patch.object(
+            glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
+        ), self.mock.patch.object(
+            glt_test_pmu,
+            "_record_arm_spe",
+            return_value=self._completed_process(stdout="recorded"),
+        ) as mock_record, self.mock.patch.object(
+            glt_test_pmu,
+            "_decode_arm_spe",
+            return_value=self._completed_process(
+                stdout="1 |OP LOAD|LVL L2 hit| memcpy"
+            ),
+        ):
+            glt_test_pmu.test_perf_arm_spe_olympus_data_source(
+                self.mock_sd,
+                self.mock_logger,
+            )
+
+        mock_record.assert_called_once_with(
+            "/perf",
+            "/tmp/greenlit/test_perf_arm_spe_olympus_data_source.perf.data",
+            "arm_spe_0",
+            self.mock_logger,
+        )
+        self.mock_logger.info.assert_any_call(
+            "Decoded ARM SPE data-source summary: decoded_lines=%d",
+            1,
+        )
+
+    def test_olympus_data_source_test_fails_when_decode_lacks_data_source(self):
+        """A successful perf script command still fails without decoded fields."""
+        fake_nvdev = self.mock.Mock()
+        fake_nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+        self.mock_sd.log_dir = "/tmp/greenlit"
+
+        with self.mock.patch.object(
+            glt_test_pmu, "NvDev", return_value=fake_nvdev
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.mock.patch.object(
+            glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
+        ), self.mock.patch.object(
+            glt_test_pmu,
+            "_record_arm_spe",
+            return_value=self._completed_process(stdout="recorded"),
+        ), self.mock.patch.object(
+            glt_test_pmu,
+            "_decode_arm_spe",
+            return_value=self._completed_process(stdout="Samples: l1d-miss"),
+        ), self.assertRaises(GLTCore.GLTTestFail):
+            glt_test_pmu.test_perf_arm_spe_olympus_data_source(
+                self.mock_sd,
+                self.mock_logger,
+            )
+
+    def test_olympus_data_source_test_fails_when_decode_command_fails(self):
+        """A non-zero perf script command fails the GreenLiT test."""
+        fake_nvdev = self.mock.Mock()
+        fake_nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+        self.mock_sd.log_dir = "/tmp/greenlit"
+
+        with self.mock.patch.object(
+            glt_test_pmu, "NvDev", return_value=fake_nvdev
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.mock.patch.object(
+            glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
+        ), self.mock.patch.object(
+            glt_test_pmu,
+            "_record_arm_spe",
+            return_value=self._completed_process(stdout="recorded"),
+        ), self.mock.patch.object(
+            glt_test_pmu,
+            "_decode_arm_spe",
+            return_value=self._completed_process(returncode=1, stderr="decode failed"),
+        ), self.assertRaises(GLTCore.GLTTestFail):
+            glt_test_pmu.test_perf_arm_spe_olympus_data_source(
+                self.mock_sd,
+                self.mock_logger,
+            )
+
+    def test_olympus_data_source_test_fails_when_pmu_is_missing(self):
+        """A Vera system without an ARM SPE PMU fails before perf record."""
+        fake_nvdev = self.mock.Mock()
+        fake_nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+
+        with self.mock.patch.object(
+            glt_test_pmu, "NvDev", return_value=fake_nvdev
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.mock.patch.object(
+            glt_test_pmu, "_find_arm_spe_pmu", return_value=None
+        ), self.mock.patch.object(
+            glt_test_pmu, "_record_arm_spe"
+        ) as mock_record, self.assertRaises(GLTCore.GLTTestFail):
+            glt_test_pmu.test_perf_arm_spe_olympus_data_source(
+                self.mock_sd,
+                self.mock_logger,
+            )
+
+        mock_record.assert_not_called()
+
+    def test_olympus_data_source_test_fails_when_record_command_fails(self):
+        """A non-zero perf record command fails before decode."""
+        fake_nvdev = self.mock.Mock()
+        fake_nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+        self.mock_sd.log_dir = "/tmp/greenlit"
+
+        with self.mock.patch.object(
+            glt_test_pmu, "NvDev", return_value=fake_nvdev
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.mock.patch.object(
+            glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
+        ), self.mock.patch.object(
+            glt_test_pmu,
+            "_record_arm_spe",
+            return_value=self._completed_process(returncode=1, stderr="record failed"),
+        ), self.mock.patch.object(
+            glt_test_pmu, "_decode_arm_spe"
+        ) as mock_decode, self.assertRaises(GLTCore.GLTTestFail):
+            glt_test_pmu.test_perf_arm_spe_olympus_data_source(
+                self.mock_sd,
+                self.mock_logger,
+            )
+
+        mock_decode.assert_not_called()
 
 
 if __name__ == "__main__":
