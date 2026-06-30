@@ -31,17 +31,15 @@ RESCTRL_FS_TYPE = "resctrl"
 RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
 PROC_FILESYSTEMS = "/proc/filesystems"
 PROC_MOUNTS = "/proc/mounts"
-MPAM_PROFILE_GRACE = "grace"
-MPAM_PROFILE_VERA = "vera"
 MPAM_MON_FEATURES = "mon_features"
 MPAM_MBM_TOTAL_BYTES = "mbm_total_bytes"
 MPAM_PLATFORM_CAPABILITIES = {
-    MPAM_PROFILE_GRACE: {
+    "grace": {
         "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM"),
         "expected_files": ("last_cmd_status",),
         "expected_mb_mon_features": (),
     },
-    MPAM_PROFILE_VERA: {
+    "vera": {
         "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM", "MB_MON"),
         "expected_files": ("last_cmd_status",),
         "expected_mb_mon_features": (MPAM_MBM_TOTAL_BYTES,),
@@ -216,8 +214,8 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                 platform_profile = profile
                 break
         if not platform_profile:
-            GLTCore.GLTTestResult.fail(
-                "Unsupported MPAM platform; expected Grace or Vera CPU type."
+            GLTCore.GLTTestResult.skip(
+                "This is not an NVIDIA Grace or Vera CPU."
             )
         platform_capabilities = MPAM_PLATFORM_CAPABILITIES[platform_profile]
 
@@ -244,8 +242,7 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
 
         expected_mb_mon_features = platform_capabilities["expected_mb_mon_features"]
         if expected_mb_mon_features:
-            mb_mon = os.path.join(info_dir, "MB_MON")
-            mon_features = os.path.join(mb_mon, MPAM_MON_FEATURES)
+            mon_features = os.path.join(info_dir, "MB_MON", MPAM_MON_FEATURES)
             try:
                 with open(mon_features, "r", encoding="utf-8") as f:
                     features = f.read().split()
@@ -253,7 +250,10 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                 GLTCore.GLTTestResult.fail(
                     f"Cannot read MB_MON {MPAM_MON_FEATURES} at {mon_features}: {e}."
                 )
-            missing_features = sorted(set(expected_mb_mon_features) - set(features))
+            missing_features = tuple(
+                feature for feature in expected_mb_mon_features
+                if feature not in features
+            )
             if missing_features:
                 GLTCore.GLTTestResult.fail(
                     f"MB_MON {MPAM_MON_FEATURES} is missing expected "

@@ -64,16 +64,16 @@ class TestMpamResctrlInfo(GLTTestBase):
                       str(context.exception))
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
-    def test_unknown_cpu_type_fails(self, mock_nvdev):
-        """The test should fail instead of silently applying a default policy."""
+    def test_unknown_cpu_type_skips(self, mock_nvdev):
+        """The platform-specific schema is not applicable to other CPUs."""
         mock_nvdev.return_value.is_cpu_type.return_value = False
         patches = self._patch_mounted_info(mb_mon_present=True)
 
         with patches[0], patches[1], patches[2], patches[3]:
-            with self.assertRaises(GLTCore.GLTTestFail) as context:
+            with self.assertRaises(GLTCore.GLTTestSkip) as context:
                 mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
 
-        self.assertIn("Unsupported MPAM platform", str(context.exception))
+        self.assertIn("not an NVIDIA Grace or Vera CPU", str(context.exception))
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
     def test_vera_mb_mon_requires_mbm_total_bytes(self, mock_nvdev):
@@ -97,6 +97,7 @@ class TestMpamResctrlInfo(GLTTestBase):
         with self.mock.patch.object(mpam_resctrl.subprocess, "run") as mock_run, \
                 self.mock.patch.object(mpam_resctrl.glt_utils, "is_cli_available",
                                        return_value=True), \
+                self.mock.patch.object(mpam_resctrl, "NvDev"), \
                 self.mock.patch.object(mpam_resctrl, "_resctrl_is_mounted",
                                        side_effect=(False, False)):
             with self.assertRaises(GLTCore.GLTTestFail):
