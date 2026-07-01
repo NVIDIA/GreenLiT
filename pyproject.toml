@@ -25,7 +25,8 @@ include = [
     "data/**/*",
     "external_tests/**/*",
     "src/modules/i2c/kretprobes/*",
-    "src/modules/mm/bingo/*"
+    "src/modules/mm/bingo/*",
+    "src/modules/pci/aspm_saved_state_probe/*"
 ]
 
 [tool.poetry.dependencies]
