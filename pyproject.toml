@@ -25,6 +25,7 @@ include = [
     "data/**/*",
     "external_tests/**/*",
     "src/modules/i2c/kretprobes/*",
+    "src/modules/iommu/sva_invalidate/*",
     "src/modules/mm/bingo/*",
     "src/modules/pci/aspm_saved_state_probe/*"
 ]
