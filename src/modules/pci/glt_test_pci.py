@@ -90,6 +90,46 @@ def test_nvidia_pci_device_reset_method(sd, logger):
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
+def test_renesas_xhci_pci_config(_, __):
+    """
+    Verify the Renesas xHCI PCI host controller driver is enabled.
+
+    JIRA: DGX-11145
+    PATCH: https://git.kernel.org/torvalds/c/25f51b76f90f
+    """
+    config_name = "CONFIG_USB_XHCI_PCI_RENESAS"
+    kconfig_path = "/boot/config-" + platform.release()
+
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("grace"):
+        GLTCore.GLTTestResult.skip("This is not an NVIDIA Grace CPU.")
+
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot read kernel config at {kconfig_path}; "
+            f"cannot verify {config_name}: {e}"
+        )
+    except ValueError as e:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot parse kernel config at {kconfig_path}; "
+            f"cannot verify {config_name}: {e}"
+        )
+
+    value = kconfig.get(config_name)
+    if value not in ("y", "m"):
+        GLTCore.GLTTestResult.fail(
+            f"{config_name} must be enabled as built-in or module; "
+            f"found {value!r}. Apply kernel config support for "
+            "https://git.kernel.org/torvalds/c/25f51b76f90f."
+        )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
 def test_pci_secondary_mabort(_, logger):
     """
