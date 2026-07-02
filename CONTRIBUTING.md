@@ -8,8 +8,6 @@ When adding new features or making significant changes, please also update all d
 - Adding or updating documentation in the `docs/` directory
 - Adding comments to your code
 
-Thank you for contributing to GreenLiT!
-
 ## Commit Message Format
 
 Commits should follow the standard [Conventional Commits](https://www.conventionalcommits.org/) format.
@@ -43,8 +41,7 @@ Changelog: fix
 ```
 
 - **GitHub Issues:** If your commit resolves an open GitHub issue, please reference it at the bottom of the description using the `Fixes #123` or `Resolves #123` format. GitHub will automatically link and close the issue when merged.
-
-Append `Changelog: <type>` trailer to enable automatic release note generation.
+- **Changelog trailer:** Append `Changelog: <type>` to enable automatic release note generation.
 
 ## Developer Certificate of Origin (DCO)
 
