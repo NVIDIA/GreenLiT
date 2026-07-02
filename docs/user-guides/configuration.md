@@ -4,26 +4,29 @@ This guide explains how to configure GreenLiT for your specific environment and 
 
 ## Index
 
-- [Customizing Test Scope](#customizing-test-scope)
-  - [Configuration Files Location, Format and Ordering](#configuration-files-location-format-and-ordering)
-  - [YAML Configuration Structure](#yaml-configuration-structure)
-  - [Field Definitions](#field-definitions)
-    - [Category](#category)
-    - [Test Case Name](#test-case-name)
-## Customizing Test Scope
+- [Configuration Files: Location, Format, and Ordering](#configuration-files-location-format-and-ordering)
+- [YAML Configuration Structure](#yaml-configuration-structure)
+- [Field Definitions](#field-definitions)
+  - [Category](#category)
+  - [Test Case Name](#test-case-name)
+  - [Operation](#operation)
+  - [Condition Types](#condition-types)
+  - [Extra Conditions](#extra-conditions)
+- [Configuration Examples](#configuration-examples)
+  - [Example 1: Allow Failure for a Test on Specific Distributions](#example-1-allow-failure-for-a-test-on-specific-distributions)
+  - [Example 2: Skip a Test Based on a Script Condition](#example-2-skip-a-test-based-on-a-script-condition)
+  - [Example 3: Skip a Test Based on Distribution and Kernel Version](#example-3-skip-a-test-based-on-distribution-and-kernel-version)
+- [Creating Custom Configurations](#creating-custom-configurations)
 
-### Configuration Files Location, Format and Ordering
+## Configuration Files: Location, Format, and Ordering
 
-GreenLiT reads YAML files from the location `/usr/share/greenlit/confs.d/` to determine what test scope-related customizations need to be done for test cycles.
-A default set of customizations `00_default.yaml` will exist inside this location once you've installed GreenLiT.  You can add or modify configurations based on actual needs.
+GreenLiT reads YAML files from `/usr/share/greenlit/confs.d/` to determine which test-scope customizations apply to a test cycle. A default configuration, `00_default.yaml`, is installed at this location once GreenLiT is installed; you can add or modify files there as needed.
 
-Files are read in ascending alphabetical order by filename, for example:
-- `00-base.yaml` would be read before 
-- `01-custom.yaml`
+Files are read in lexicographic filename order. Use zero-padded numeric prefixes to control precedence; for example, `00-base.yaml` is read before `01-custom.yaml`.
 
-If a test case is defined in multiple YAML files, the later ones will **overwrite** the previous definitions.
+If the same test case is defined in multiple YAML files, the later file's definition **overwrites** the earlier one.
 
-### YAML Configuration Structure
+## YAML Configuration Structure
 
 A GreenLiT configuration file follows this structure:
 
@@ -36,9 +39,10 @@ A GreenLiT configuration file follows this structure:
         {extra_conditions:}  
 ```
 
-#### Field Definitions
+## Field Definitions
 
-##### Category
+### Category
+
 The test suite category in GreenLiT.
 
 Available categories can be found using:
@@ -54,7 +58,8 @@ Examples include:
 - `tpm` - TPM module tests
 - And others as listed in the help output
 
-##### Test Case Name
+### Test Case Name
+
 The name of the specific test case within a category.
 
 You can retrieve the list of test cases with:
@@ -65,36 +70,43 @@ sudo glt-test-suite --list
 Test case identifiers use the `category:test_case_name` format described in the
 user manual.
 
-##### Operation
+### Operation
+
 Specifies how the test case should be handled.
 
 Supported operations:
 - `allow-failure`: Executes the test case but marks failures as "allowed-failure" instead of "failure".
 - `conditional-skip`: Skips the test case if certain conditions are met.
 
-##### Condition Types
+### Condition Types
+
 Defines the type of condition used to modify test behavior.
 
 Supported types:
 - `distro`: The `NAME` field in `platform.freedesktop_os_release()` or `/etc/os-release`.
-- `script`: Executes a shell script and checks its exit code.
+- `script`: Runs the given string as a **bash** script — regardless of any shebang line it contains — and checks its exit code.
 
-##### Extra Conditions
+### Extra Conditions
+
 Optional additional conditions based on the condition type.
 
 If condition type is `distro`:
 - `release`: Compares the `VERSION_ID` field from `platform.freedesktop_os_release()` or `/etc/os-release`.
-- `kernel-uname`: Compares the first two values of the `uname` output.
+- `kernel-uname`: Compares against the kernel release (`uname -r`, i.e. `platform.release()`), using distro version comparison rules.
   - Supported formats:
     - `== 6.12` (exact match)
     - `> 6.12` (version higher than 6.12)
     - `>= 6.12` (version 6.12 or higher)
     - `< 6.12` (version lower than 6.12)
     - `<= 6.12` (version 6.12 or lower)
+  - A real `uname -r` string usually has more components than a bare release
+    number (e.g. `6.8.0-1024.27-generic`), and version comparison treats a
+    longer string as greater than a shorter prefix of itself. Compare against
+    a fully-qualified release string for a reliable match — see Example 3.
 
-### Configuration Examples
+## Configuration Examples
 
-#### Example 1: Allow Failure for a Test on Specific Distributions
+### Example 1: Allow Failure for a Test on Specific Distributions
 
 ```yaml
 arm64:test_all_pmu_events:
@@ -109,31 +121,31 @@ arm64:test_all_pmu_events:
         release: "9.5"
 ```
 
-#### Example 2: Skip a Test Based on a Script Condition
+### Example 2: Skip a Test Based on a Script Condition
 
 ```yaml
 arm64:test_all_pmu_events:
   conditional-skip:
     - condition:
-        name: "Assume if NFS presenting in kernel command line"
+        name: "Skip if NFS is present in the kernel command line"
         script: |
-          #!/usr/bin/python3
-          return 'nfs' in open('/proc/cmdline').read()
+          #!/bin/bash
+          grep -q 'nfs' /proc/cmdline
 ```
 
-#### Example 3: Skip a Test Based on Distribution and Kernel Version
+### Example 3: Skip a Test Based on Distribution and Kernel Version
 
 ```yaml
 arm64:test_all_pmu_events:
   conditional-skip:
     - condition:
-        name: "Skip because is not ready on Ubuntu 20.04 or kernel version is lower than 5.15"
+        name: "Skip on Ubuntu 22.04 with kernels older than 6.8.0-1024.27"
         distro: "Ubuntu"
-        release: "20.04"
-        kernel-uname: "<= 5.15"
+        release: "22.04"
+        kernel-uname: "< 6.8.0-1024.27"
 ```
 
-### Creating Custom Configurations
+## Creating Custom Configurations
 
 To create a custom configuration:
 
