@@ -22,6 +22,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
   - [Managing Test Case Dependencies](#managing-test-case-dependencies)
   - [Post-Test Actions with Post Hooks](#post-test-actions-with-post-hooks)
 - [Create a Test Case that Requires Reboots](#create-a-test-case-that-requires-reboots)
+  - [Create a Test Case that Requires a Simple Reboot](#create-a-test-case-that-requires-a-simple-reboot)
   - [Create a Test Case that Requires kexec Reboots](#create-a-test-case-that-requires-kexec-reboots)
   - [Conditional reboot after kexec](#conditional-reboot-after-kexec)
 - [Create an External Test Case](#create-an-external-test-case)
@@ -55,10 +56,6 @@ Before creating test cases, you should have:
   - Create an issue/ticket ID to ensure the change is used to address that issue.
   - Go through merge request process
 - Background knowledge on **Python**
-
-### Important: Test Scenarios
-
-Keep in mind that your test case needs to work in **all** of the following test scenarios:
 
 ## Do We Need a New Test Case?
 
@@ -417,9 +414,9 @@ def test_nvidia_perf_events(_, logger):
 
 ### Post-Test Actions with Post Hooks
 
-When a test needs to run something after it completes (e.g. cleanup, teardown, or restore), use **post hooks**. The framework supports four hooks currently, one per outcome: `postsuccess` (test passed), `postskip` (test skipped), `postfail` (test failed), `postafail` (allowed failure). After the test, the runner invokes the matching hook.
+When a test needs to run something after it completes (e.g. cleanup, teardown, or restore), use **post hooks**. The framework supports five hooks currently, one per outcome: `postsuccess` (test passed), `postskip` (test skipped), `postfail` (test failed), `postafail` (allowed failure), `postwarn` (test warned). After the test, the runner invokes the matching hook.
 
-**How to use:** Create a `PostHooks` instance with `GLTCore.PostHooks.create(postsuccess=..., postskip=..., postfail=..., postafail=...)` and assign it to your test's **attr**: `test_something.attr.post_hooks = ...`. Pass callables with signature `(scheduler, attr, logger)` for the outcomes you need. Any slot you omit is a no-op. Each test has its own post hooks on its own attr; only tests that set `attr.post_hooks` get post hooks run. Example:
+**How to use:** Create a `PostHooks` instance with `GLTCore.PostHooks.create(postsuccess=..., postskip=..., postfail=..., postafail=..., postwarn=...)` and assign it to your test's **attr**: `test_something.attr.post_hooks = ...`. Pass callables with signature `(scheduler, attr, logger)` for the outcomes you need. Any slot you omit is a no-op. Each test has its own post hooks on its own attr; only tests that set `attr.post_hooks` get post hooks run. Example:
 
 ```python
 def test_something(sd, logger):
@@ -432,7 +429,47 @@ You can pass the same or different callables for each outcome. For a full exampl
 
 ## Create a Test Case that Requires Reboots
 
-**TBD** - To be documented. Introduce the usage of general reboot case
+Some tests need to reboot the device under test and resume after boot to check
+post-reboot state, or need a special reboot mechanism to recover from a locked-up
+kernel. All reboot mechanisms rely on the same pattern: check `sd.progress` to tell
+whether this is the first run or a resumed run after the test triggered its own
+reboot — the same pattern used in [Example Test Case Structure](#example-test-case-structure)
+above.
+
+### Create a Test Case that Requires a Simple Reboot
+
+Use `glt_utils.reboot()` for a plain reboot with no special kernel command line
+changes. Record progress before rebooting so the resumed run knows it already
+triggered the reboot:
+
+```python
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_reboot(sd, logger):
+    """Reboot system to see if it's bootable"""
+    for tests in sd.progress:
+        if test_reboot.__name__ not in tests:
+            continue
+        if "TriggerReboot" not in tests[test_reboot.__name__]:
+            logger.debug("Rebooting...")
+            ret = glt_utils.reboot(test_reboot.__name__, sd)
+            if ret is False:
+                GLTCore.GLTTestResult.fail("Failed to trigger GLT reboot")
+        else:
+            logger.debug("Rebooted and resume successfully.")
+            glt_utils.systemd_enable(enable=False)
+```
+
+(from `src/modules/power/glt_test_power_cycle.py`.) `glt_utils.reboot()` does not
+return on success — it records progress and triggers `reboot` (or, in development
+mode without systemd, sends itself `SIGTERM` to emulate shutdown). It only returns
+`False` if it could not trigger the reboot at all.
+
+For kernel lockup / hang recovery scenarios where a clean `reboot` may not respond,
+use `glt_utils.reboot_with_reisub()` instead. It triggers a SysRq REISUB sequence
+(sync filesystems, remount read-only, reboot) rather than a normal shutdown, so it
+can recover the system even when standard shutdown paths are unresponsive.
 
 ### Create a Test Case that Requires kexec Reboots
 
@@ -467,7 +504,9 @@ was never triggered.
 
 #### Example
 
-See `test_efi_runtime_services_mask` in `src/modules/acpi/glt_test_efi.py`:
+See `test_efi_runtime_services_mask` in `src/modules/acpi/glt_test_efi.py`
+(module-level imports of `GLTCore` and `glt_utils` omitted for brevity — see
+[Example Test Case Structure](#example-test-case-structure) above):
 
 ```python
 _kexec_conditional_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
@@ -498,8 +537,9 @@ test_efi_runtime_services_mask.attr.post_hooks = GLTCore.PostHooks.create(
 )
 ```
 
-Pass `custom_cmdline` for tests that need extra kernel command line
-arguments (e.g. `custom_cmdline="pci=config_acs=101xxxx@0000:00:01.0"`).
+Pass `custom_cmdline` as a keyword argument to `handle_kexec_flow()` for tests
+that need extra kernel command line arguments, e.g.
+`handle_kexec_flow(test_name, sd, logger, custom_cmdline="pci=config_acs=101xxxx@0000:00:01.0")`.
 
 ## Create an External Test Case
 
@@ -800,10 +840,6 @@ before submitting it.
 
 Your test case should make it into the next GreenLiT release, which roughly follows a **1-month cadence**, after an MR is merged.
 
-## Miscellaneous Q&A, Issues and Risks
-
-N/A
-
 ---
 
 ## Appendix: Allowing Test Result Exceptions
@@ -837,11 +873,6 @@ arm64:test_all_pmu_events:
         name: "Coresight is not ready on Redhat 9.5"
         distro: "Red Hat"
         release: "9.5"
-    - condition:
-        name: "Assume NFS is present in kernel command line"
-        script: |
-          #!/usr/bin/python3
-          return 'nfs' in open('/proc/cmdline').read()
   conditional-skip:
     - condition:
         name: "Skip because is not ready on Ubuntu 20.04"
@@ -878,4 +909,4 @@ Copy your `.yaml` file(s) to the device under test's `/usr/share/greenlit/confs.
 - Multiple files are allowed and will all be detected and applied
 - Your next rounds of tests' test results should reflect the configurations set in these `.yaml` files
 
-For more details on configuration options, see the [Configuration Guide](../user-guides/configuration).
+For more details on configuration options, see the [Configuration Guide](../user-guides/configuration.md).
