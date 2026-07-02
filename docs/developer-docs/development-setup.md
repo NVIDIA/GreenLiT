@@ -1,49 +1,70 @@
 # Development Setup Guide
 
-GreenLiT uses Poetry for dependency management and packaging. Here's how to set up a development environment:
+This guide covers setting up a local environment to work **on** GreenLiT itself
+(running lint, running unit tests, iterating on source). If you instead want to
+**install and use** GreenLiT to run tests against a target system, see the
+[README](../../README.md#getting-started) — Option A (`install.sh`) for a
+normal install, or Option B for an offline/wheel-based install.
 
 ## Index
 
 - [Requirements](#requirements)
-- [Setting up Development Environment](#setting-up-development-environment)
-- [Managing Dependencies](#managing-dependencies)
+- [Setting up a Development Environment](#setting-up-a-development-environment)
+- [Running Local Checks](#running-local-checks)
+- [Manual Runtime Configuration](#manual-runtime-configuration)
+- [Building Release Wheels (Poetry)](#building-release-wheels-poetry)
+- [Managing Declared Dependencies (Poetry)](#managing-declared-dependencies-poetry)
 - [Coding Style](#coding-style)
 
 ## Requirements
 
 - Python 3.10 or higher
-- Root/sudo privileges for system-level installation
-- Clone greenlit repository or untar source tarball
+- Clone the greenlit repository or untar the source tarball
+- Root/sudo privileges, but only if you go on to do the optional
+  [manual runtime configuration](#manual-runtime-configuration) below
 
-## Setting up Development Environment
+## Setting up a Development Environment
+
+The recommended day-to-day workflow uses a plain `venv` named `gltenv` and
+`pip install .` — this mirrors the setup CI uses to lint and test every
+change, so running it locally closely reproduces CI.
+
+One-time setup:
 
 ```bash
-# Install Poetry system-wide
-curl -sSL https://install.python-poetry.org | sudo POETRY_HOME=/usr/local python3 -
-
-# Verify Poetry installation
-poetry --version
-
-# Install including development dependencies
-poetry install --with dev
-
-# Run linting
-poetry run pylint src/
+python3 -m venv gltenv && source gltenv/bin/activate && pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org . pylint pytest pytest-cov
 ```
 
-If you want to run your code in a Python virtual environment within the repository, please modify `poetry.toml` as follows:
+The `--trusted-host` flags disable certificate verification for those hosts,
+which is only safe on a network where the path to PyPI is otherwise trusted
+(e.g. behind a corporate TLS-inspecting proxy). Drop them if your network
+reaches PyPI directly.
 
-```toml
-[virtualenvs]
-# Enable virtual environment creation for development
-create = true
-in-project = true
-system-site-packages = false
-```
+Re-activate `gltenv` (`source gltenv/bin/activate`) in each new shell before
+running the checks below.
 
-### Manual Configuration Setup
+## Running Local Checks
 
-After installing via Poetry, the following configuration needs to be done manually:
+Run these before creating a commit or MR. Skip any check whose tool isn't
+installed. `shellcheck` and `jq` are system tools; `pylint` and `pytest` come
+from the `gltenv` venv set up above. [AGENTS.md](../../AGENTS.md) points here
+for the canonical local-check commands.
+
+| Tool | Command |
+|------|---------|
+| Python lint | `source gltenv/bin/activate && find . -not -path "./gltenv/*" -name "*.py" -print0 \| xargs -0 pylint --init-hook="import sys; sys.path.extend(['src', '.'])"` |
+| Shell lint | `find . -name "*.sh" -print0 \| xargs -0 shellcheck` |
+| JSON validation | `find . -name "*.json" -print0 \| xargs -0 jq -r . > /dev/null` |
+| Unit tests | `source gltenv/bin/activate && python -m pytest tests/ -v --cov=src --cov-report=term-missing` |
+
+## Manual Runtime Configuration
+
+`pip install .` only installs the Python package — it does not stage the
+runtime configuration, data files, or systemd units that a real GreenLiT
+install needs. `install.sh` does all of this automatically for end users (see
+the [README](../../README.md)); if you're testing runtime/service integration
+against a `pip install .`-based dev checkout without running the full
+installer, stage it manually:
 
 ```bash
 sudo mkdir -p /usr/share/greenlit/{confs.d,data,executing_dir}
@@ -59,14 +80,46 @@ sudo cp confs/greenlit.timer /usr/local/lib/systemd/system/
 sudo systemctl daemon-reload
 ```
 
-## Managing Dependencies
+## Building Release Wheels (Poetry)
+
+Poetry is used for exporting dependency metadata when packaging distributable
+wheels (e.g. the offline install bundle described in the README's
+[Option B](../../README.md#option-b-offline-installation)) — it is **not**
+part of the day-to-day dev/lint/test loop above.
+
+```bash
+# Install Poetry system-wide (download, inspect, then run — avoid piping
+# an unverified remote installer straight into sudo)
+curl -fsSL -o /tmp/install-poetry.py https://install.python-poetry.org
+less /tmp/install-poetry.py
+sudo POETRY_HOME=/usr/local python3 /tmp/install-poetry.py
+rm -f /tmp/install-poetry.py
+
+# Verify Poetry installation
+poetry --version
+
+# Build the GreenLiT wheel (via pip, matching CI flow)
+pip wheel . --wheel-dir glt-wheels/
+
+# Export and download runtime dependency wheels
+sudo poetry self add poetry-plugin-export
+poetry export -f requirements.txt --output temp-requirements.txt --without-hashes
+pip download -r temp-requirements.txt --only-binary=:all: --no-deps --dest glt-wheels/
+rm temp-requirements.txt
+```
+
+See the README for the full offline packaging and installation flow.
+
+## Managing Declared Dependencies (Poetry)
+
+GreenLiT's runtime and packaging dependencies are declared in
+`pyproject.toml`. Use Poetry to manage that file — these commands affect what
+gets packaged (and what `pip install .` pulls in), not a separate Poetry-based
+dev environment:
 
 ```bash
 # Add a runtime dependency
 poetry add pyyaml
-
-# Add a development dependency
-poetry add --group dev pylint
 
 # Update dependencies
 poetry update
@@ -75,8 +128,12 @@ poetry update
 poetry show
 ```
 
-**Note**: `poetry add` and `poetry remove` automatically generate `poetry.lock`, please remove it manually since greenlit does not lock package versions.
+**Note**: `poetry add`, `poetry remove`, and `poetry update` automatically
+generate `poetry.lock` — remove it manually, since GreenLiT intentionally does
+not lock package versions.
 
 ## Coding Style
 
-When adding or refactoring functions, keep them in alphabetical order within their local section unless lifecycle, dependency, or framework ordering is clearer. This applies to source files and related unit tests.
+When adding or refactoring functions, keep them in alphabetical order within
+their local section unless lifecycle, dependency, or framework ordering is
+clearer. This applies to source files and related unit tests.
