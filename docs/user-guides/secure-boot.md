@@ -1,6 +1,6 @@
 # Secure Boot and Module Signing
 
-Some GreenLiT test cases build and load custom kernel modules at runtime (e.g., `bingo.ko`, `kretprobe.ko`). When **UEFI Secure Boot** is enabled, the kernel will reject unsigned modules, causing these tests to skip or fail.
+Some GreenLiT test cases build and load custom kernel modules at runtime (e.g., `bingo.ko`, `kretprobe.ko`). When **UEFI Secure Boot** is enabled, the kernel rejects unsigned modules, causing these test cases to fail or be skipped.
 
 This guide explains how to set up a Machine Owner Key (MOK) so that GreenLiT can automatically sign modules before loading them.
 
@@ -22,12 +22,12 @@ If the output says `SecureBoot enabled`, you need to follow this guide.
 
 On Ubuntu/Debian:
 ```bash
-apt install mokutil openssl shim-signed linux-headers-$(uname -r)
+sudo apt install mokutil openssl shim-signed linux-headers-$(uname -r)
 ```
 
 On RHEL/CentOS:
 ```bash
-dnf install mokutil openssl kernel-devel-$(uname -r)
+sudo dnf install mokutil openssl kernel-devel-$(uname -r)
 ```
 
 ## Step 1: Generate a MOK Key Pair
@@ -59,7 +59,7 @@ Alternatively, on Ubuntu you can use the `update-secureboot-policy` tool:
 sudo update-secureboot-policy --new-key
 ```
 
-This creates:
+Either method creates:
 - `MOK.priv` - the private key (keep this secure)
 - `MOK.der` - the public certificate (enrolled into firmware)
 
@@ -85,7 +85,7 @@ Reboot the system:
 sudo reboot
 ```
 
-During boot, the **MOK Manager** (blue screen) will appear:
+During boot, the **MOK Manager** (blue screen) appears:
 1. Select **Enroll MOK**
 2. Select **Continue**
 3. Enter the password you created in Step 2
@@ -103,12 +103,12 @@ You should see the `GreenLiT Module Signing Key` in the output.
 
 ## How It Works
 
-When GreenLiT runs a test that needs to load a custom kernel module:
+When GreenLiT runs a test case that needs to load a custom kernel module:
 
 1. It checks if Secure Boot is enabled
 2. If enabled, it looks for MOK keys at `/var/lib/shim-signed/mok/` (Ubuntu default, shared with dkms)
 3. It signs the `.ko` file using the kernel's `sign-file` utility
-4. It then loads the signed module with `insmod`
+4. It loads the signed module with `insmod`
 
 If Secure Boot is disabled, no signing is performed and modules are loaded as usual.
 
@@ -118,12 +118,12 @@ If Secure Boot is disabled, no signing is performed and modules are loaded as us
 
 **On Ubuntu/Debian:**
 ```bash
-apt install linux-headers-$(uname -r)
+sudo apt install linux-headers-$(uname -r)
 ```
 
 **On RHEL/CentOS:**
 ```bash
-dnf install kernel-devel-$(uname -r)
+sudo dnf install kernel-devel-$(uname -r)
 ```
 
 **On Buildroot or custom kernel builds:**
@@ -135,7 +135,7 @@ sudo cp /path/to/linux-build/scripts/sign-file /usr/local/bin/sign-file
 sudo chmod +x /usr/local/bin/sign-file
 ```
 
-GreenLiT checks `/usr/local/bin/sign-file` first, so placing it there will be picked up automatically.
+GreenLiT checks `/usr/local/bin/sign-file` first, so any file placed there is picked up automatically.
 
 ### "MOK keys not found"
 
