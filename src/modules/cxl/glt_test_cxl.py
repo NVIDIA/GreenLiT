@@ -16,6 +16,7 @@
 """
 CXL bus tests.
 """
+# pylint: disable=too-many-lines
 
 import glob
 import mmap
@@ -173,6 +174,15 @@ _link_down_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
     "LinkDisabled",
     lambda: True,
 )
+
+# Progress marker: set once before the link-disable attempt so a post-crash
+# resume skips re-running this test (see test_cxl_link_disable_fwctl_registration).
+_FWCTL_LINK_DISABLE_ARMED = "FwctlLinkDisableArmed"
+
+
+def _restore_link_and_disable_resume(scheduler, attr, logger):
+    _postsuccess_restore_link(scheduler, attr, logger)
+    glt_utils.systemd_enable(enable=False)
 
 
 @GLTCore.GLTTestAttr()
@@ -929,3 +939,148 @@ def test_cxl_zero_size_committed_decoder(_, __):
             "patch at https://lore.kernel.org/all/"
             "cover.1779957270.git.icheng@nvidia.com/)"
         )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches,too-many-statements
+def test_cxl_link_disable_fwctl_registration(sd, logger):
+    """
+    Verifies that bringing a CXL root port's link down does not crash the
+    machine due to an fwctl/cxl driver registration-order bug.
+
+    JIRA: DGX-16339
+    PATCH: https://github.com/torvalds/linux/commit/a55f80233f384dc89ef3425b2e1dd0e6d44bcf29
+    """
+
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("Test only applies to Vera-based platforms")
+
+    kconfig_path = "/boot/config-" + platform.release()
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.skip(
+            f"Kernel config not found at {kconfig_path}"
+        )
+    if kconfig.get("CONFIG_FWCTL") != "y":
+        GLTCore.GLTTestResult.skip(
+            "CONFIG_FWCTL is not enabled in the running kernel"
+        )
+    if kconfig.get("CONFIG_CXL_FEATURES") != "y":
+        GLTCore.GLTTestResult.skip(
+            "CONFIG_CXL_FEATURES is not enabled in the running kernel"
+        )
+
+    if not glt_utils.is_cli_available("lspci"):
+        GLTCore.GLTTestResult.skip("lspci not available; install pciutils")
+    if not glt_utils.is_cli_available("setpci"):
+        GLTCore.GLTTestResult.skip("setpci not available; install pciutils")
+
+    cxl_bdf = cxl_utils.find_first_cxl_bdf()
+    if cxl_bdf is None:
+        GLTCore.GLTTestResult.skip("No CXL device found")
+    logger.info("CXL device BDF: %s", cxl_bdf)
+
+    if cxl_utils.any_cxl_region_committed():
+        GLTCore.GLTTestResult.skip(
+            "CXL regions are committed/online, "
+            "refusing to bring the link down"
+        )
+
+    rp_bdf = _find_root_port_bdf(cxl_bdf)
+    if rp_bdf is None:
+        GLTCore.GLTTestResult.skip(
+            f"Could not locate root port for CXL device {cxl_bdf}"
+        )
+    logger.info("CXL root port BDF: %s", rp_bdf)
+
+    dvsec_base = cxl_utils.find_cxl_port_dvsec_base(rp_bdf)
+    if dvsec_base is None:
+        GLTCore.GLTTestResult.skip(
+            f"CXL Port Extensions DVSEC not found on root port {rp_bdf}"
+        )
+    pco_offset = dvsec_base + 0x0C
+    pco_offset_str = f"{pco_offset:#x}"
+    logger.info(
+        "CXL Port DVSEC base on %s: %#x; Port Control Override at %s",
+        rp_bdf, dvsec_base, pco_offset_str,
+    )
+
+    test_name = test_cxl_link_disable_fwctl_registration.__name__
+    if sd.progress_check(test_name, _FWCTL_LINK_DISABLE_ARMED):
+        logger.info(
+            "Skipping re-run after resume, %s was armed in a prior boot",
+            test_name,
+        )
+        if not glt_utils.systemd_enable(enable=False):
+            GLTCore.GLTTestResult.fail(
+                "Failed to disable GreenLiT resume service after fwctl "
+                "link-disable resume"
+            )
+        sd.progress_delete_time(test_name, _FWCTL_LINK_DISABLE_ARMED)
+        GLTCore.GLTTestResult.fail(
+            "Fwctl link-disable test already armed in a prior boot. "
+            "Not re-running after resume"
+        )
+
+    if not glt_utils.systemd_enable():
+        GLTCore.GLTTestResult.fail(
+            "Failed to enable GreenLiT resume service for crash recovery"
+        )
+    sd.progress_record_time(test_name, _FWCTL_LINK_DISABLE_ARMED)
+
+    orig_pc = _setpci_read_word(rp_bdf, pco_offset_str)
+    if orig_pc is None:
+        GLTCore.GLTTestResult.fail(
+            f"Could not read PCI config at {pco_offset_str} on {rp_bdf}"
+        )
+    logger.info("Original %s.w on %s: %#06x", pco_offset_str, rp_bdf, orig_pc)
+
+    test_cxl_link_disable_fwctl_registration.attr.cleanup_state = {
+        "rp_bdf": rp_bdf,
+        "orig_pc": orig_pc,
+        "pco_offset": pco_offset,
+    }
+
+    if not _setpci_write_word(rp_bdf, pco_offset_str, orig_pc | 0x0002):
+        GLTCore.GLTTestResult.skip(
+            f"setpci write to {pco_offset_str} on {rp_bdf} failed"
+        )
+
+    time.sleep(5)
+    readback = _setpci_read_word(rp_bdf, pco_offset_str)
+    if readback is None:
+        GLTCore.GLTTestResult.fail(
+            f"Could not read back PCI config at {pco_offset_str} on {rp_bdf}"
+        )
+    if (readback & 0x0002) == 0:
+        GLTCore.GLTTestResult.skip(
+            "UnmaskLinkDisable did not stick - firmware/HW restricts it"
+        )
+
+    logger.warning(
+        "About to issue PCIe Link Disable on %s. This test will crash "
+        "the machine if the fwctl/cxl registration-order fix is missing "
+        "from the running kernel. The system may need to be manually power-cycled. "
+        "Backport commit a55f80233f38 to fix the issue.",
+        rp_bdf,
+    )
+    sd.progress_record_time(
+        test_cxl_link_disable_fwctl_registration.__name__, "LinkDisabled",
+    )
+    if not _setpci_write_byte(rp_bdf, "CAP_EXP+0x10", 0x10, mask=0x10):
+        GLTCore.GLTTestResult.skip(
+            f"setpci write of Link Disable on {rp_bdf} failed"
+        )
+
+    time.sleep(5)
+
+
+test_cxl_link_disable_fwctl_registration.attr.post_hooks = GLTCore.PostHooks.create(
+    postsuccess=_restore_link_and_disable_resume,
+    postskip=_restore_link_and_disable_resume,
+    postfail=_restore_link_and_disable_resume,
+    postafail=_restore_link_and_disable_resume,
+)
