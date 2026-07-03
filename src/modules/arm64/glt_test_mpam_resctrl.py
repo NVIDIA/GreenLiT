@@ -23,6 +23,7 @@ import subprocess
 
 from common import glt_core as GLTCore
 from common import glt_utils
+from common.nv_device import NvDev
 from scripts import check_kernel_config
 
 
@@ -30,6 +31,20 @@ RESCTRL_FS_TYPE = "resctrl"
 RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
 PROC_FILESYSTEMS = "/proc/filesystems"
 PROC_MOUNTS = "/proc/mounts"
+MPAM_MON_FEATURES = "mon_features"
+MPAM_MBM_TOTAL_BYTES = "mbm_total_bytes"
+MPAM_PLATFORM_CAPABILITIES = {
+    "grace": {
+        "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM"),
+        "expected_files": ("last_cmd_status",),
+        "expected_mb_mon_features": (),
+    },
+    "vera": {
+        "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM", "MB_MON"),
+        "expected_files": ("last_cmd_status",),
+        "expected_mb_mon_features": (MPAM_MBM_TOTAL_BYTES,),
+    },
+}
 
 
 def _resctrl_fs_supported() -> bool:
@@ -178,6 +193,7 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
             )
         mounted_by_test = True
 
+    try:
         if not _resctrl_is_mounted():
             GLTCore.GLTTestResult.fail(
                 f"mount reported success but no resctrl entry for "
@@ -185,24 +201,33 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                 "cannot validate resctrl info."
             )
 
-    expected_dirs = ("L3", "L3_MON", "MB", "MB_HLIM", "MB_MON")
-    expected_files = ("last_cmd_status",)
-
-    try:
         if not os.path.isdir(info_dir):
             GLTCore.GLTTestResult.fail(
                 f"resctrl info directory not found at {info_dir}; "
                 "MPAM resctrl info interface unavailable."
             )
 
+        platform_profile = ""
+        nvdev = NvDev()
+        for profile in MPAM_PLATFORM_CAPABILITIES:
+            if nvdev.is_cpu_type(profile):
+                platform_profile = profile
+                break
+        if not platform_profile:
+            GLTCore.GLTTestResult.skip(
+                "This is not an NVIDIA Grace or Vera CPU."
+            )
+        platform_capabilities = MPAM_PLATFORM_CAPABILITIES[platform_profile]
+
         errors = []
-        for name in expected_dirs:
+        for name in platform_capabilities["expected_dirs"]:
             path = os.path.join(info_dir, name)
             if not os.path.exists(path):
                 errors.append(f"{name} (expected directory) is missing")
             elif not os.path.isdir(path):
                 errors.append(f"{name} exists but is not a directory")
-        for name in expected_files:
+
+        for name in platform_capabilities["expected_files"]:
             path = os.path.join(info_dir, name)
             if not os.path.exists(path):
                 errors.append(f"{name} (expected file) is missing")
@@ -214,6 +239,26 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                 f"resctrl info directory {info_dir} is missing expected "
                 f"entries: {'; '.join(errors)}."
             )
+
+        expected_mb_mon_features = platform_capabilities["expected_mb_mon_features"]
+        if expected_mb_mon_features:
+            mon_features = os.path.join(info_dir, "MB_MON", MPAM_MON_FEATURES)
+            try:
+                with open(mon_features, "r", encoding="utf-8") as f:
+                    features = f.read().split()
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Cannot read MB_MON {MPAM_MON_FEATURES} at {mon_features}: {e}."
+                )
+            missing_features = tuple(
+                feature for feature in expected_mb_mon_features
+                if feature not in features
+            )
+            if missing_features:
+                GLTCore.GLTTestResult.fail(
+                    f"MB_MON {MPAM_MON_FEATURES} is missing expected "
+                    f"features: {', '.join(missing_features)}."
+                )
 
     finally:
         if mounted_by_test:
