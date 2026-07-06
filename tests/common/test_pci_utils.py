@@ -8,10 +8,14 @@ from src.common.pci_utils import (
     ASPEED_VENDOR_ID,
     EXT_CAP_ACS,
     PCI_CLASS_USB_HOST,
+    block_device_physical_leaves,
+    default_route_ifaces,
     get_bdfs_by_pci_id,
     get_bdfs_with_ext_cap,
     get_pci_children,
     get_pci_class,
+    iface_pci_bdfs,
+    mounted_block_devices,
 )
 
 LSPCI_OUTPUT_TWO_DEVICES = """\
@@ -47,6 +51,35 @@ LSPCI_OUTPUT_MULTIPLE_ACS = """\
 
 LSPCI_OUTPUT_AST1150 = """\
 0000:e0:00.0 PCI bridge [0604]: ASPEED Technology, Inc. AST1150 PCI-to-PCI Bridge [1a03:1150] (rev 04)
+"""
+
+PROC_NET_ROUTE_DEFAULT = """\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
+eth0\t0002A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
+"""
+
+PROC_NET_ROUTE_NO_DEFAULT = """\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT
+eth0\t0002A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
+"""
+
+PROC_NET_IPV6_ROUTE_DEFAULT = (
+    "00000000000000000000000000000000 00 "
+    "00000000000000000000000000000000 00 "
+    "fe800000000000000000000000000001 "
+    "00000400 00000001 00000000 00000003 bond0\n"
+    "fe800000000000000000000000000000 40 "
+    "00000000000000000000000000000000 00 "
+    "00000000000000000000000000000000 "
+    "00000100 00000001 00000000 00000001 eth1\n"
+)
+
+PROC_MOUNTS = """\
+proc /proc proc rw,nosuid 0 0
+/dev/mapper/vg-root / ext4 rw,relatime 0 0
+/dev/nvme0n1p1 /boot vfat rw,relatime 0 0
+tmpfs /run tmpfs rw,nosuid 0 0
 """
 
 
@@ -204,6 +237,210 @@ class TestPciUtils(GLTTestBase):
     def test_pci_class_usb_host_constant(self):
         """USB host controller class prefix matches the PCI spec."""
         self.assertEqual(PCI_CLASS_USB_HOST, "0x0c03")
+
+
+class TestPciUtilsNetAndBlock(GLTTestBase):
+    """Test Class for the network and block-device PCI helpers"""
+
+    @staticmethod
+    def _open_from_files(files):
+        """Return an open() side effect serving read_data keyed by path."""
+        def _opener(path, *args, **kwargs):  # pylint: disable=unused-argument
+            if path not in files:
+                raise FileNotFoundError(path)
+            mock_file = GLTTestBase.unittest.mock.mock_open(
+                read_data=files[path])
+            return mock_file.return_value
+        return _opener
+
+    def test_default_route_ifaces_ipv4(self):
+        """IPv4 default route yields its interface; other routes ignored."""
+        files = {"/proc/net/route": PROC_NET_ROUTE_DEFAULT}
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=self._open_from_files(files),
+            create=True,
+        ):
+            result = default_route_ifaces()
+        self.assertEqual(result, {"eth0"})
+
+    def test_default_route_ifaces_ipv6(self):
+        """IPv6 all-zero destination with prefix 00 yields the last field."""
+        files = {"/proc/net/ipv6_route": PROC_NET_IPV6_ROUTE_DEFAULT}
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=self._open_from_files(files),
+            create=True,
+        ):
+            result = default_route_ifaces()
+        self.assertEqual(result, {"bond0"})
+
+    def test_default_route_ifaces_no_default(self):
+        """Non-default routes do not contribute any interface."""
+        files = {"/proc/net/route": PROC_NET_ROUTE_NO_DEFAULT}
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=self._open_from_files(files),
+            create=True,
+        ):
+            result = default_route_ifaces()
+        self.assertEqual(result, set())
+
+    def test_default_route_ifaces_unreadable(self):
+        """Unreadable route tables raise so callers can fail closed."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=OSError,
+            create=True,
+        ):
+            with self.assertRaises(OSError):
+                default_route_ifaces()
+
+    def test_iface_pci_bdfs_direct(self):
+        """A directly PCI-backed interface maps to its lowercased BDF."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            return_value="/sys/devices/pci0000:00/0000:0A:00.0",
+        ):
+            result = iface_pci_bdfs("eth0")
+        self.assertEqual(result, {"0000:0a:00.0"})
+
+    def test_iface_pci_bdfs_non_pci(self):
+        """A non-PCI interface with no lowers yields an empty set."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            return_value="/sys/class/net/lo/device",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            return_value=["mtu", "operstate"],
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=OSError,
+        ):
+            result = iface_pci_bdfs("lo")
+        self.assertEqual(result, set())
+
+    def test_iface_pci_bdfs_bond(self):
+        """A bond descends lower_* and bonding/slaves to physical BDFs."""
+        realpaths = {
+            "/sys/class/net/bond0/device": "/sys/class/net/bond0/device",
+            "/sys/class/net/eth0/device":
+                "/sys/devices/pci0000:00/0000:01:00.0",
+            "/sys/class/net/eth1/device":
+                "/sys/devices/pci0000:00/0000:02:00.0",
+        }
+
+        def _listdir(path):
+            if path == "/sys/class/net/bond0":
+                return ["lower_eth0", "bonding", "mtu"]
+            return []
+
+        def _read_sysfs(path):
+            if path == "/sys/class/net/bond0/bonding/slaves":
+                return "eth0 eth1"
+            raise OSError(path)
+
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            side_effect=lambda path: realpaths.get(path, path),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            side_effect=_listdir,
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=_read_sysfs,
+        ):
+            result = iface_pci_bdfs("bond0")
+        self.assertEqual(result, {"0000:01:00.0", "0000:02:00.0"})
+
+    def test_iface_pci_bdfs_recursion_guard(self):
+        """Mutually-lower interfaces terminate and yield an empty set."""
+        def _listdir(path):
+            if path == "/sys/class/net/vetha":
+                return ["lower_vethb"]
+            if path == "/sys/class/net/vethb":
+                return ["lower_vetha"]
+            return []
+
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            side_effect=lambda path: path,
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            side_effect=_listdir,
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=OSError,
+        ):
+            result = iface_pci_bdfs("vetha")
+        self.assertEqual(result, set())
+
+    def test_mounted_block_devices(self):
+        """/dev/* mount sources resolve to kernel device base names."""
+        realpaths = {
+            "/dev/mapper/vg-root": "/dev/dm-0",
+            "/dev/nvme0n1p1": "/dev/nvme0n1p1",
+        }
+        files = {"/proc/mounts": PROC_MOUNTS}
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=self._open_from_files(files),
+            create=True,
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            side_effect=lambda path: realpaths.get(path, path),
+        ):
+            result = mounted_block_devices()
+        self.assertEqual(result, {"dm-0", "nvme0n1p1"})
+
+    def test_mounted_block_devices_unreadable(self):
+        """Unreadable /proc/mounts raises so callers can fail closed."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=OSError,
+            create=True,
+        ):
+            with self.assertRaises(OSError):
+                mounted_block_devices()
+
+    def test_block_device_physical_leaves_no_slaves(self):
+        """A device with no slaves directory is its own leaf."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            side_effect=FileNotFoundError,
+        ):
+            result = block_device_physical_leaves("nvme0n1p2")
+        self.assertEqual(result, {"nvme0n1p2"})
+
+    def test_block_device_physical_leaves_stacked(self):
+        """A stacked device resolves to its physical backing disks."""
+        def _listdir(path):
+            if path == "/sys/class/block/dm-0/slaves":
+                return ["sda", "sdb"]
+            raise FileNotFoundError(path)
+
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            side_effect=_listdir,
+        ):
+            result = block_device_physical_leaves("dm-0")
+        self.assertEqual(result, {"sda", "sdb"})
+
+    def test_block_device_physical_leaves_cycle_guard(self):
+        """Mutually-slaved devices terminate without infinite recursion."""
+        def _listdir(path):
+            if path == "/sys/class/block/dm-0/slaves":
+                return ["dm-1"]
+            if path == "/sys/class/block/dm-1/slaves":
+                return ["dm-0"]
+            raise FileNotFoundError(path)
+
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            side_effect=_listdir,
+        ):
+            result = block_device_physical_leaves("dm-0")
+        self.assertEqual(result, set())
 
 
 if __name__ == "__main__":
