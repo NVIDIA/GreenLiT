@@ -16,11 +16,13 @@
 """
 Python script to test I2C.
 """
+# The checkpoint RuntimeError-to-GLT-failure path intentionally mirrors the
+# CXL cleanup-safe path so each decorated test can run its registered hooks.
+# pylint: disable=duplicate-code
 import os
 import platform
 import subprocess
 import time
-from dataclasses import dataclass
 from pathlib import Path
 
 from common import glt_core as GLTCore
@@ -32,25 +34,10 @@ from scripts import check_kernel_config
 _I2C_ACPI_RUNTIME_PM_BUG_HEADER = "BUG: sleeping function called from invalid context"
 _I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT = 10
 _I2C_ACPI_RUNTIME_PM_IPMI_TRIGGER_ATTEMPTS = 5
-_I2C_ACPI_RUNTIME_PM_LOG_OVERLAP_LINES = 20
 _I2C_ACPI_RUNTIME_PM_QUIET_INTERVAL_SECONDS = 2
 _IPMI_TEGRA_TOPOLOGY_ERROR = "error"
 _IPMI_TEGRA_TOPOLOGY_MATCH = "match"
 _IPMI_TEGRA_TOPOLOGY_NO_MATCH = "no_match"
-
-
-@dataclass(frozen=True)
-class _KernelLogSnapshot:
-    """Kernel log text plus journal cursor and backend command status.
-
-    query_succeeded records whether the selected log command completed
-    successfully; empty successful cursor deltas are valid snapshots.
-    """
-
-    text: str
-    cursor: str | None
-    query_succeeded: bool
-    backend: str
 
 
 def _tegra_i2c_devices(prefix: str = "NVDA2017:",
@@ -84,104 +71,9 @@ def _tegra_i2c_kernel_error_messages(dev_name: str) -> list[str]:
     ]
 
 
-def _dmesg_kernel_log_snapshot() -> _KernelLogSnapshot:
-    """Return a full dmesg snapshot for legacy full-log comparisons."""
-    if glt_utils.is_cli_available("dmesg"):
-        try:
-            result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False,
-                                    timeout=_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT)
-        except (OSError, subprocess.TimeoutExpired):
-            return _KernelLogSnapshot("", None, False, "dmesg")
-        if result.returncode == 0:
-            text = result.stdout
-            if not text.strip():
-                text = ""
-            return _KernelLogSnapshot(text, None, True, "dmesg")
-
-    return _KernelLogSnapshot("", None, False, "dmesg")
-
-
-def _journal_kernel_log_snapshot(after_cursor: str | None = None) -> _KernelLogSnapshot:
-    """Return a journalctl kernel-log snapshot without dmesg fallback."""
-    if glt_utils.is_cli_available("journalctl"):
-        command = ["journalctl", "--no-pager", "-b0", "-k", "--show-cursor"]
-        if after_cursor:
-            command.insert(4, f"--after-cursor={after_cursor}")
-        try:
-            result = subprocess.run(command,
-                                    capture_output=True, text=True, check=False,
-                                    timeout=_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT)
-        except (OSError, subprocess.TimeoutExpired):
-            return _KernelLogSnapshot("", None, False, "journal")
-        if result.returncode == 0:
-            lines = result.stdout.splitlines()
-            cursor = next(
-                (line.removeprefix("-- cursor: ").removesuffix(" --")
-                 for line in reversed(lines) if line.startswith("-- cursor: ")),
-                None,
-            )
-            text = "\n".join(line for line in lines if not line.startswith("-- cursor: "))
-            if not text.strip():
-                text = ""
-            if text and not text.endswith("\n"):
-                text += "\n"
-            return _KernelLogSnapshot(text, cursor, True, "journal")
-
-    return _KernelLogSnapshot("", None, False, "journal")
-
-
-def _kernel_log_snapshot() -> _KernelLogSnapshot:
-    """Return the best full kernel log snapshot for baseline comparisons.
-
-    Non-empty journal or dmesg text is the usable full-log criterion. If
-    neither reader returns text, keep a successful empty journal result;
-    otherwise return the dmesg result, including its failure state.
-    """
-    journal_snapshot = _journal_kernel_log_snapshot()
-    if journal_snapshot.text:
-        return journal_snapshot
-
-    dmesg_snapshot = _dmesg_kernel_log_snapshot()
-    if dmesg_snapshot.text:
-        return dmesg_snapshot
-
-    if journal_snapshot.query_succeeded:
-        return journal_snapshot
-
-    return dmesg_snapshot
-
-
-def _new_tegra_i2c_kernel_errors(dev_name: str, previous_log: str, current_log: str) -> list[str]:
-    """Return Tegra I2C errors added after previous_log was captured."""
-    if not previous_log:
-        current_log = ""
-    elif current_log.startswith(previous_log):
-        current_log = current_log[len(previous_log):]
-    else:
-        current_log = ""
-
-    return [
-        message
-        for message in _tegra_i2c_kernel_error_messages(dev_name)
-        if message in current_log
-    ]
-
-
-def _kernel_log_delta(baseline_log: str, current_log: str) -> str:
-    """Return the comparable suffix of a contiguous full-log snapshot."""
-    baseline_tail = "\n".join(
-        baseline_log.splitlines()[-_I2C_ACPI_RUNTIME_PM_LOG_OVERLAP_LINES:]
-    )
-    new_log = current_log[len(baseline_log):]
-    if baseline_tail:
-        new_log = f"{baseline_tail}\n{new_log}"
-    return new_log
-
-
 def _dev_unbind_bind(dev_name: str) -> tuple[bool, str]:
     """Unbind then rebind dev_name on the tegra-i2c platform driver.
-    Returns (True, "") on success, or (False, reason) on any OSError so
-    the caller can map it to a SKIP verdict.
+    Returns (True, "") on success, or (False, reason) on any OSError.
     """
     drv = Path("/sys/bus/platform/drivers/tegra-i2c")
     unbind = drv / "unbind"
@@ -435,10 +327,21 @@ def test_tegra_i2c_acpi_runtime_pm_irq_safe(_, logger):  # pylint: disable=too-m
     except (FileNotFoundError, PermissionError, OSError):
         kernel_config = None
 
-    baseline_snapshot = _kernel_log_snapshot()
-    baseline_log = baseline_snapshot.text
-    journal_backend = baseline_snapshot.backend == "journal"
-    journal_cursor_available = bool(journal_backend and baseline_snapshot.cursor)
+    try:
+        checkpoint = glt_utils.capture_kernel_log_checkpoint()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            "Failed to capture kernel log checkpoint before IPMI trigger: "
+            f"{error}"
+        )
+
+    try:
+        baseline_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            "Cannot read kernel log; cannot check for sleeping-while-atomic "
+            f"during Tegra I2C ACPI runtime resume: {error}"
+        )
     if not baseline_log:
         GLTCore.GLTTestResult.fail(
             "Cannot read kernel log; cannot check for sleeping-while-atomic "
@@ -465,36 +368,13 @@ def test_tegra_i2c_acpi_runtime_pm_irq_safe(_, logger):  # pylint: disable=too-m
         "acpi_subsys_runtime_resume). "
         "Backport kernel commit 14d069d92951 to fix it.")
 
-    if journal_cursor_available:
-        post_snapshot = _journal_kernel_log_snapshot(
-            baseline_snapshot.cursor
+    try:
+        new_log = glt_utils.get_kernel_log(checkpoint)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            "Cannot read post-trigger kernel log; cannot check for "
+            f"sleeping-while-atomic during Tegra I2C ACPI runtime resume: {error}"
         )
-        if not post_snapshot.query_succeeded:
-            GLTCore.GLTTestResult.fail(
-                "Cannot read post-trigger kernel log; cannot check for "
-                "sleeping-while-atomic during Tegra I2C ACPI runtime resume.")
-        new_log = post_snapshot.text
-    else:
-        if journal_backend:
-            post_snapshot = _journal_kernel_log_snapshot(None)
-        else:
-            post_snapshot = _dmesg_kernel_log_snapshot()
-        log = post_snapshot.text
-        if not post_snapshot.query_succeeded:
-            GLTCore.GLTTestResult.fail(
-                "Cannot read post-trigger kernel log; cannot check for "
-                "sleeping-while-atomic during Tegra I2C ACPI runtime resume.")
-        if not log:
-            GLTCore.GLTTestResult.fail(
-                "Post-trigger kernel log snapshot is empty; cannot reliably "
-                "diff new entries for sleeping-while-atomic BUG.")
-        if not log.startswith(baseline_log):
-            if _has_tegra_i2c_acpi_irq_safe_bug(log):
-                GLTCore.GLTTestResult.fail(bug_reason)
-            GLTCore.GLTTestResult.fail(
-                "Kernel log cursor is non-contiguous; cannot reliably diff new "
-                "entries for sleeping-while-atomic BUG.")
-        new_log = _kernel_log_delta(baseline_log, log)
 
     if _has_tegra_i2c_acpi_irq_safe_bug(new_log):
         GLTCore.GLTTestResult.fail(bug_reason)
@@ -572,7 +452,7 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
 
     test_tegra_i2c_dma_pio_fallback.attr.picked_device = dev_name
 
-    # Enable dev_dbg() output for the i2c_tegra module so the new
+    # Enable dev_dbg() output for the i2c_tegra module so the fix-specific
     # "DMA not available, falling back to PIO" line reaches the kernel log.
     try:
         with open("/sys/kernel/debug/dynamic_debug/control", "w", encoding="ascii") as fh:
@@ -583,15 +463,29 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
 
     test_tegra_i2c_dma_pio_fallback.attr.dyndbg_enabled = True
 
+    try:
+        checkpoint = glt_utils.capture_kernel_log_checkpoint()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to capture kernel log checkpoint before I2C rebind: {error}"
+        )
+
     ok, reason = _dev_unbind_bind(dev_name)
     if not ok:
         GLTCore.GLTTestResult.skip(f"unbind/bind cycle on {dev_name} failed: {reason}")
 
     message = "DMA not available, falling back to PIO"
-    if not glt_utils.check_kernel_log(message):
+    try:
+        found = glt_utils.check_kernel_log(message, checkpoint=checkpoint)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve kernel log after rebind: {error}"
+        )
+    if not found:
         GLTCore.GLTTestResult.fail(
             f"missing '{message}' in kernel log for {dev_name} after rebind, "
-            "consider backporting kernel commit b53232fd220a")
+            "consider backporting kernel commit b53232fd220a"
+        )
 
 
 @GLTCore.GLTTestAttr()
@@ -627,13 +521,17 @@ def test_tegra410_i2c_device(_, logger):
 
     logger.info("Detected Tegra410 I2C platform devices: %s", ", ".join(devices))
 
-    kernel_log = _kernel_log_snapshot().text
-    if not kernel_log:
-        GLTCore.GLTTestResult.skip(
-            "Kernel log is unavailable; cannot validate Tegra410 I2C probe/transfer errors.")
     kernel_errors = []
 
     for dev_name in devices:
+        try:
+            checkpoint = glt_utils.capture_kernel_log_checkpoint()
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to capture kernel log checkpoint before rebinding "
+                f"{dev_name}: {error}"
+            )
+
         ok, reason = _dev_unbind_bind(dev_name)
         if not ok:
             GLTCore.GLTTestResult.fail(
@@ -646,15 +544,18 @@ def test_tegra410_i2c_device(_, logger):
                 f"{dev_name} is not bound to tegra-i2c after rebind. "
                 "Include kernel commit 59717f260183 to add Tegra410 support.")
 
-        current_log = _kernel_log_snapshot().text
-        if not current_log:
-            GLTCore.GLTTestResult.skip(
-                f"Kernel log unavailable after rebinding {dev_name}; cannot validate new errors.")
-        if not current_log.startswith(kernel_log):
-            GLTCore.GLTTestResult.skip(
-                "Kernel log cursor is non-contiguous; cannot reliably diff new Tegra410 I2C errors.")
-        kernel_errors.extend(_new_tegra_i2c_kernel_errors(dev_name, kernel_log, current_log))
-        kernel_log = current_log
+        try:
+            kernel_log = glt_utils.get_kernel_log(checkpoint)
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to retrieve kernel log after rebinding {dev_name}: {error}"
+            )
+
+        kernel_errors.extend(
+            message
+            for message in _tegra_i2c_kernel_error_messages(dev_name)
+            if message in kernel_log
+        )
 
     if kernel_errors:
         GLTCore.GLTTestResult.fail(

@@ -48,7 +48,14 @@ def test_gic_errata(_, logger):
     target_msg = "GIC: enabling workaround for GICv3: NVIDIA erratum T241-FABRIC-4"
 
     # Use the check_kernel_log helper function to look for the message
-    if glt_utils.check_kernel_log(target_msg):
+    try:
+        workaround_found = glt_utils.check_kernel_log(target_msg)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve GIC errata kernel log: {error}"
+        )
+
+    if workaround_found:
         logger.info(f"Found required GIC workaround message: {target_msg}")
     else:
         patch_url = "https://git.kernel.org/torvalds/linux/c/35727af2b15d"

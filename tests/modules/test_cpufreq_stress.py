@@ -295,9 +295,13 @@ class TestCpuFreqStress(GLTTestBase):
             ns.read = stack.enter_context(
                 mock.patch(
                     "src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value"))
-            ns.log_count = stack.enter_context(
+            ns.log_check = stack.enter_context(
                 mock.patch(
-                    "src.modules.cpu.glt_test_cpufreq_stress._count_kernel_log_occurrences"))
+                    "src.modules.cpu.glt_test_cpufreq_stress.glt_utils.check_kernel_log"))
+            ns.checkpoint = stack.enter_context(
+                mock.patch(
+                    "src.modules.cpu.glt_test_cpufreq_stress.glt_utils."
+                    "capture_kernel_log_checkpoint"))
             if include_is_online:
                 ns.is_online = stack.enter_context(
                     mock.patch(
@@ -320,7 +324,8 @@ class TestCpuFreqStress(GLTTestBase):
         ns.read.return_value = "0-2"
         ns.select_cpu.return_value = (1, "")
         ns.validate_policy.return_value = (True, "")
-        ns.log_count.return_value = ("journalctl", 0)
+        ns.log_check.return_value = False
+        ns.checkpoint.return_value = object()
         if hasattr(ns, "is_online"):
             ns.is_online.return_value = is_online
 
@@ -364,22 +369,20 @@ class TestCpuFreqStress(GLTTestBase):
                 mock.call(online_path, "1"),
                 mock.call(online_path, "1"),
             ])
-            m.log_count.assert_has_calls([
-                mock.call(cpufreq_stress.CPUFREQ_ONLINE_GET_FAILED_MSG),
-                mock.call(
-                    cpufreq_stress.CPUFREQ_ONLINE_GET_FAILED_MSG,
-                    preferred_source="journalctl",
-                ),
-            ])
+            m.checkpoint.assert_called_once_with()
+            m.log_check.assert_called_once_with(
+                cpufreq_stress.CPUFREQ_ONLINE_GET_FAILED_MSG,
+                checkpoint=m.checkpoint.return_value,
+            )
             self.mock_logger.info.assert_any_call(
                 "PASS: CPU%d cppc_cpufreq policy recreated after hotplug", 1
             )
 
     def test_hotplug_policy_test_ignores_stale_kernel_log_signature(self):
-        """A boot log signature that existed before hotplug must not fail this cycle."""
+        """A boot log signature that existed before the checkpoint must not fail."""
         with self._hotplug_policy_mocks() as m:
             self._configure_default_hotplug_mocks(m)
-            m.log_count.side_effect = [("journalctl", 1), ("journalctl", 1)]
+            m.log_check.return_value = False
             teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
             with teardown_patch, online_patch, self.mock.patch.object(
@@ -389,17 +392,16 @@ class TestCpuFreqStress(GLTTestBase):
                     None, self.mock_logger
                 )
 
-            self.mock_logger.warning.assert_any_call(
-                "Current boot log already contained %d occurrence(s) of %s before CPU hotplug.",
-                1,
+            m.log_check.assert_called_once_with(
                 cpufreq_stress.CPUFREQ_ONLINE_GET_FAILED_MSG,
+                checkpoint=m.checkpoint.return_value,
             )
 
     def test_hotplug_policy_test_fails_on_new_kernel_log_signature(self):
         """A new online-get failure emitted by this hotplug cycle must fail."""
         with self._hotplug_policy_mocks() as m:
             self._configure_default_hotplug_mocks(m)
-            m.log_count.side_effect = [("journalctl", 0), ("journalctl", 1)]
+            m.log_check.return_value = True
             teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
             with teardown_patch, online_patch, self.mock.patch.object(
@@ -562,26 +564,3 @@ class TestCpuFreqStress(GLTTestBase):
 
             self.assertIn("Cannot hotplug CPU1", str(ctx.exception))
             self.assertIn("offline failed", str(ctx.exception))
-
-    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.subprocess.run")
-    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.shutil.which")
-    def test_count_kernel_log_occurrences_does_not_fallback_from_preferred_source(
-        self, mock_which, mock_run
-    ):
-        """Before/after kernel-log counts must use the same source."""
-        mock_which.return_value = "/usr/bin/journalctl"
-        mock_run.return_value = self.mock.Mock(returncode=1, stdout="")
-
-        with self.assertRaises(OSError):
-            cpufreq_stress._count_kernel_log_occurrences(
-                cpufreq_stress.CPUFREQ_ONLINE_GET_FAILED_MSG,
-                preferred_source="journalctl",
-            )
-
-        mock_run.assert_called_once_with(
-            ["/usr/bin/journalctl", "-b0", "-k"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=cpufreq_stress.KERNEL_LOG_COMMAND_TIMEOUT_SECS,
-        )

@@ -40,7 +40,14 @@ def test_iommu_id_mapping(_, __):
 
     id_mapping_error_msg = "ID mapping index overflows valid mappings"
 
-    if glt_utils.check_kernel_log(id_mapping_error_msg):
+    try:
+        id_mapping_error_found = glt_utils.check_kernel_log(id_mapping_error_msg)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve IOMMU ID mapping kernel log: {error}"
+        )
+
+    if id_mapping_error_found:
         GLTCore.GLTTestResult.fail(f'Find iommu error message {id_mapping_error_msg}. ' +
                                    'Include kernel commit 05da178ce0aa to fix it.')
 
@@ -68,7 +75,14 @@ def test_cmdqv_alignment(_, __):
     if not glob.glob("/sys/devices/platform/NVDA200C:*"):
         GLTCore.GLTTestResult.skip("No NVDA200C CMDQV devices found in sysfs")
 
-    if glt_utils.check_kernel_log("arm_smmu_init_one_queue"):
+    try:
+        cmdqv_warning_found = glt_utils.check_kernel_log("arm_smmu_init_one_queue")
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve CMDQV kernel log: {error}"
+        )
+
+    if cmdqv_warning_found:
         GLTCore.GLTTestResult.fail(
             "WARNING at arm_smmu_init_one_queue detected in kernel log."
             " The Tegra241 CMDQV max_n_shift alignment fix is missing."

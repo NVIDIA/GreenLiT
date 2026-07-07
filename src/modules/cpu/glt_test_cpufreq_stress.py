@@ -22,7 +22,6 @@ import os
 import platform
 import re
 import signal
-import shutil
 import subprocess
 import time
 
@@ -69,7 +68,6 @@ CPU_HOTPLUG_ONLINE_TIMEOUT_SECS = 15
 CPU_HOTPLUG_ONLINE_POLL_SECS = 1
 CPU_HOTPLUG_POLICY_TIMEOUT_SECS = 15
 CPU_HOTPLUG_POLICY_POLL_SECS = 1
-KERNEL_LOG_COMMAND_TIMEOUT_SECS = 30
 
 CPUFREQ_ONLINE_GET_FAILED_MSG = "cpufreq: cpufreq_online: ->get() failed"
 
@@ -169,46 +167,6 @@ def _validate_cppc_policy_for_cpu(
         return False, f"Cannot validate {policy_dir} for CPU{cpu_num}: {e}"
 
     return True, ""
-
-
-def _read_current_boot_kernel_log(preferred_source=None):
-    """Return (source, text) for the current boot kernel log."""
-    # TODO DGX-17127: replace this local snapshot helper with the shared
-    # scoped kernel-log helper after that utility lands in GreenLiT.
-    sources = [preferred_source] if preferred_source else ["journalctl", "dmesg"]
-
-    for source in sources:
-        if source == "journalctl":
-            journalctl_path = shutil.which("journalctl")
-            if journalctl_path:
-                try:
-                    result = subprocess.run(
-                        [journalctl_path, "-b0", "-k"],
-                        capture_output=True, text=True, check=False,
-                        timeout=KERNEL_LOG_COMMAND_TIMEOUT_SECS)
-                except subprocess.TimeoutExpired:
-                    continue
-                if result.returncode == 0:
-                    return source, result.stdout
-        if source == "dmesg":
-            dmesg_path = shutil.which("dmesg")
-            if dmesg_path:
-                try:
-                    result = subprocess.run(
-                        [dmesg_path], capture_output=True, text=True, check=False,
-                        timeout=KERNEL_LOG_COMMAND_TIMEOUT_SECS)
-                except subprocess.TimeoutExpired:
-                    continue
-                if result.returncode == 0:
-                    return source, result.stdout
-
-    raise OSError("Cannot read current boot kernel log via journalctl or dmesg.")
-
-
-def _count_kernel_log_occurrences(msg, preferred_source=None):
-    """Return (source, count) for current-boot kernel log occurrences of msg."""
-    source, output = _read_current_boot_kernel_log(preferred_source)
-    return source, output.count(msg)
 
 
 def _wait_for_cppc_policy_for_cpu(
@@ -695,7 +653,14 @@ def test_cppc_cpufreq_online_get_did_not_fail(_, logger):
     if not ok:
         GLTCore.GLTTestResult.fail(reason)
 
-    if glt_utils.check_kernel_log(CPUFREQ_ONLINE_GET_FAILED_MSG):
+    try:
+        online_get_failed = glt_utils.check_kernel_log(
+            CPUFREQ_ONLINE_GET_FAILED_MSG
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    if online_get_failed:
         GLTCore.GLTTestResult.fail(
             f"Found cppc_cpufreq online failure in current boot log: "
             f"{CPUFREQ_ONLINE_GET_FAILED_MSG}. Apply patch "
@@ -750,11 +715,11 @@ def test_cppc_cpufreq_policy_after_cpu_hotplug(_, logger):
 
     online_path = os.path.join(CPU_SYSFS_ROOT, f"cpu{cpu_num}", "online")
     try:
-        log_source, online_get_failures_before = _count_kernel_log_occurrences(
-            CPUFREQ_ONLINE_GET_FAILED_MSG
+        checkpoint = glt_utils.capture_kernel_log_checkpoint()
+    except RuntimeError as e:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot capture kernel log checkpoint before hotplug: {e}"
         )
-    except OSError as e:
-        GLTCore.GLTTestResult.fail(f"Cannot inspect kernel log before hotplug: {e}")
 
     logger.info("Cycling CPU%d offline/online for cppc_cpufreq policy validation", cpu_num)
     restore_reason = ""
@@ -779,22 +744,17 @@ def test_cppc_cpufreq_policy_after_cpu_hotplug(_, logger):
             GLTCore.GLTTestResult.fail(reason)
 
         try:
-            _, online_get_failures_after = _count_kernel_log_occurrences(
-                CPUFREQ_ONLINE_GET_FAILED_MSG, preferred_source=log_source
+            online_get_failed = glt_utils.check_kernel_log(
+                CPUFREQ_ONLINE_GET_FAILED_MSG,
+                checkpoint=checkpoint,
             )
-        except OSError as e:
+        except RuntimeError as e:
             GLTCore.GLTTestResult.fail(f"Cannot inspect kernel log after hotplug: {e}")
-        if online_get_failures_after > online_get_failures_before:
+        if online_get_failed:
             GLTCore.GLTTestResult.fail(
                 f"Found cppc_cpufreq online failure after CPU hotplug: "
                 f"{CPUFREQ_ONLINE_GET_FAILED_MSG}. Apply patch "
                 "c47195631960 (cppc_cpufreq: Use desired perf if feedback ctrs are 0 or unchanged)."
-            )
-        if online_get_failures_before:
-            logger.warning(
-                "Current boot log already contained %d occurrence(s) of %s before CPU hotplug.",
-                online_get_failures_before,
-                CPUFREQ_ONLINE_GET_FAILED_MSG,
             )
     except (IOError, OSError) as e:
         failure_reason = f"Cannot hotplug CPU{cpu_num}: {e}"

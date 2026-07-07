@@ -38,7 +38,14 @@ def test_kaslr_offset(_, __):
     if platform.machine() != "aarch64":
         GLTCore.GLTTestResult.skip("Not ARM64, skip the test")
 
-    if not glt_utils.check_kernel_log("KASLR enabled"):
+    try:
+        kaslr_enabled = glt_utils.check_kernel_log("KASLR enabled")
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve KASLR kernel log: {error}"
+        )
+
+    if not kaslr_enabled:
         GLTCore.GLTTestResult.skip("KASLR is not enabled, skip the test")
 
     # On ARM64 the kernel code, (i.e. _text) starts from 0xffff800080000000 [0]

@@ -18,6 +18,7 @@ Python script to test module allocation.
 """
 import os
 import platform
+import re
 import subprocess
 from packaging import version
 from common import glt_core as GLTCore
@@ -48,29 +49,29 @@ def test_module_allocation(_, logger) -> bool:
         GLTCore.GLTTestResult.skip("Test requires Ubuntu with kernel version 6.5 or later.")
 
     if platform.machine() == "aarch64":
-        # shell=True required for pipe and awk; command is hardcoded with no user input
-        output = subprocess.run(
-                r"""journalctl -b -k | awk \
-                    'match($0, ": ([[:digit:]]+).* non-PLT", cap) {print cap[1]}'""",
-                capture_output=True, shell=True, text=True, check=True)
+        try:
+            kernel_log = glt_utils.get_kernel_log()
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
 
-        if not output.stdout:
+        # Match arm64 module_init_limits() printk bodies (message-only / -o cat).
+        non_plt_match = re.search(
+            r"(\d+) pages in range for non-PLT usage", kernel_log
+        )
+        if not non_plt_match:
             GLTCore.GLTTestResult.fail("Non-PLT pages for module not found. " +
                                        "Include kernel commit 3e35d303ab7d to fix it.")
 
-        non_plt_page_count = int(output.stdout)
+        non_plt_page_count = int(non_plt_match.group(1))
 
-        # shell=True required for pipe and awk; command is hardcoded with no user input
-        output = subprocess.run(
-                r"""journalctl -b -k | awk \
-                    'match($0, ": ([[:digit:]]+).* for PLT", cap) {print cap[1]}'""",
-                capture_output=True, shell=True, text=True, check=True)
-
-        if not output.stdout:
+        plt_match = re.search(
+            r"(\d+) pages in range for PLT usage", kernel_log
+        )
+        if not plt_match:
             GLTCore.GLTTestResult.fail("PLT pages for module not found. " +
                                        "Include kernel commit 3e35d303ab7d to fix it.")
 
-        plt_page_count = int(output.stdout)
+        plt_page_count = int(plt_match.group(1))
 
         # Non-PLT (i.e. in direct jump range) pages are
         # allocated when KASLR is disabled.

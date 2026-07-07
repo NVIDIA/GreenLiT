@@ -20,6 +20,7 @@ Python script to test framebuffer.
 import re
 import subprocess
 from common import glt_core as GLTCore
+from common import glt_utils
 
 
 @GLTCore.GLTTestAttr()
@@ -36,16 +37,21 @@ def test_fb_efi_addresses(_, __):
         GLTCore.GLTTestResult.fail(f"Command excuting failed: {e}")
 
     bus = list(cmd_output.stdout.splitlines())
-    if bus is None:
+    if not bus:
         GLTCore.GLTTestResult.skip("No AST VGA device found.")
 
-    cmd_output = subprocess.run("journalctl -k | grep 'framebuffer at'",
-                                shell=True, executable="/bin/bash", check=False, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if cmd_output.returncode != 0:
+    try:
+        kernel_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    events = [
+        line for line in kernel_log.splitlines() if "framebuffer at" in line
+    ]
+    if not events:
         GLTCore.GLTTestResult.skip("Not found framebuffer address.")
 
-    events = set(cmd_output.stdout.splitlines())
+    address = None
     for s in events:
         match = re.search(r"0x([0-9a-fA-F]+),", s.strip())
         if match:

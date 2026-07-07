@@ -20,7 +20,6 @@ Python script to test ACPI messages.
 import os
 import platform
 import re
-import subprocess
 
 from common import glt_core as GLTCore
 from common import glt_utils
@@ -41,7 +40,12 @@ def test_acpi_hmat_msg(_, __):
     """
     acpi_hmat_info_msg = "acpi/hmat:"
 
-    if glt_utils.check_kernel_log(acpi_hmat_info_msg):
+    try:
+        hmat_message_found = glt_utils.check_kernel_log(acpi_hmat_info_msg)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    if hmat_message_found:
         GLTCore.GLTTestResult.fail(f"Found '{acpi_hmat_info_msg}' in kernel message. " +
                                    "Include kernel commit c8e88de1b44e to fix it.")
 
@@ -78,33 +82,18 @@ def test_no_legacy_tegra_sku_log_on_acpi(_, logger):
             "Platform drivers path not found; test not applicable."
         )
 
-    cmds = [
-        ["journalctl", "-k"],
-        ["dmesg"],
-    ]
-    result = None
-    last_error = None
+    try:
+        kernel_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        logger.error(f"Failed to collect kernel logs: {error}")
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
 
-    for cmd in cmds:
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, check=True
-            )
-            break
-        except (FileNotFoundError, subprocess.CalledProcessError) as e:
-            last_error = e
-            logger.warning(f"{' '.join(cmd)} failed ({type(e).__name__}): {e}")
-
-    if result is None:
-        logger.error(f"Failed to collect kernel logs: {last_error}")
-        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {last_error}")
-
-    if re.search(r"tegra-fuse.*error.*-EINVAL.*Unsupported SoC", result.stdout):
+    if re.search(r"tegra-fuse.*error.*-EINVAL.*Unsupported SoC", kernel_log):
         GLTCore.GLTTestResult.skip(
             "tegra-fuse driver loaded but failed to initialize (Unsupported SoC); test not applicable."
         )
 
-    if glt_utils.check_kernel_log("Tegra Revision:"):
+    if "Tegra Revision:" in kernel_log:
         GLTCore.GLTTestResult.fail(
             "Legacy Tegra SKU info found in kernel log (Tegra Revision:). Backport commit c87f820 to fix it."
         )
@@ -165,7 +154,14 @@ def test_tegra_fuse_probe(_, __):
             " Consider backporting commit 8402074 to fix it."
         )
 
-    if glt_utils.check_kernel_log("tegra-fuse NVDA200F:00: error -EINVAL: Unsupported SoC"):
+    try:
+        probe_error_found = glt_utils.check_kernel_log(
+            "tegra-fuse NVDA200F:00: error -EINVAL: Unsupported SoC"
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    if probe_error_found:
         GLTCore.GLTTestResult.fail(
             "tegra-fuse probe error found in kernel log."
             " Consider backporting commit 8402074 to fix it."

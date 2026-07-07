@@ -152,7 +152,12 @@ def test_lfa_availability(_, logger):
 
     # Check dmesg for LFA detection message
     logger.info("Checking kernel log for LFA driver messages...")
-    if glt_utils.check_kernel_log(LFA_DMESG_PATTERN):
+    try:
+        lfa_message_found = glt_utils.check_kernel_log(LFA_DMESG_PATTERN)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    if lfa_message_found:
         logger.info("Found LFA dmesg pattern: %s", LFA_DMESG_PATTERN)
         dmesg_ok = True
     else:

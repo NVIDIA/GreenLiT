@@ -17,10 +17,12 @@
 The utilities for GreenLit
 """
 
-# pylint: disable=consider-using-with
+# pylint: disable=consider-using-with,too-many-lines
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
 import glob
+import json
 import os
 import platform
 import re
@@ -28,6 +30,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+from typing import TypeAlias
 
 from common.kernel_cmdline import KernelCmdlineManager
 from common.nv_device import NvDev
@@ -40,6 +43,30 @@ from common.nv_device import NvDev
 MOK_KEY_DIR = "/var/lib/shim-signed/mok"
 MOK_PRIVATE_KEY = os.path.join(MOK_KEY_DIR, "MOK.priv")
 MOK_CERTIFICATE = os.path.join(MOK_KEY_DIR, "MOK.der")
+
+_BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+
+
+@dataclass(frozen=True)
+class _DmesgKernelLogCheckpoint:
+    """Opaque checkpoint for the current dmesg buffer."""
+
+    boot_id: str
+    baseline: str
+
+
+@dataclass(frozen=True)
+class _JournalKernelLogCheckpoint:
+    """Opaque checkpoint for a current-boot journal record."""
+
+    boot_id: str
+    cursor: str
+
+
+_KernelLogCheckpoint: TypeAlias = (
+    _DmesgKernelLogCheckpoint | _JournalKernelLogCheckpoint
+)
+KernelLogCheckpoint: TypeAlias = _KernelLogCheckpoint
 
 
 def is_secure_boot_enabled():
@@ -221,6 +248,156 @@ def arm_for_reset(testcase, sd):
     return False
 
 
+def _parse_journal_cursor(output: str) -> str:
+    """Return an exact journal cursor from one JSON record."""
+    try:
+        record = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            "Journal checkpoint record is not valid JSON "
+            f"({error.msg} at position {error.pos})"
+        ) from None
+    except TypeError:
+        raise RuntimeError(
+            "Journal checkpoint record is not text that can be parsed as JSON"
+        ) from None
+
+    if not isinstance(record, dict):
+        raise RuntimeError(
+            "Journal checkpoint record JSON must be an object, "
+            f"got {type(record).__name__}"
+        )
+
+    cursor = record.get("__CURSOR")
+    if not isinstance(cursor, str) or not cursor:
+        raise RuntimeError(
+            "Journal checkpoint record JSON object is missing a non-empty __CURSOR"
+        )
+    return cursor
+
+
+def _validate_journal_cursor(cursor: str) -> None:
+    """Require a journal seek to resolve to the exact saved cursor."""
+    validation = _run_command(
+        [
+            "journalctl",
+            "--no-pager",
+            "-b0",
+            "-k",
+            f"--cursor={cursor}",
+            "-n1",
+            "-o",
+            "json",
+        ],
+        "Failed to validate the journal checkpoint",
+    )
+
+    # systemd permits multiple cursor strings for one entry. This CLI
+    # round-trip may conservatively reject a still-valid checkpoint; that
+    # safe false rejection is preferred to returning a possibly stale window.
+    if _parse_journal_cursor(validation.stdout) != cursor:
+        raise RuntimeError("The journal checkpoint cursor was lost")
+
+
+def _read_boot_id() -> str:
+    """Return the current kernel boot ID."""
+    try:
+        boot_id = read_sysfs_value(_BOOT_ID_PATH)
+    except (OSError, UnicodeError):
+        raise RuntimeError("Failed to read the current boot ID") from None
+
+    if not boot_id:
+        raise RuntimeError("Current boot ID is empty")
+    return boot_id
+
+
+def _run_command(
+    command: list[str], failure_message: str, timeout: float = 30.0
+) -> subprocess.CompletedProcess:
+    """Run a command without a shell; map failures to RuntimeError."""
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(failure_message) from None
+    except subprocess.CalledProcessError:
+        raise RuntimeError(failure_message) from None
+    except UnicodeDecodeError:
+        raise RuntimeError(failure_message) from None
+    except OSError:
+        raise RuntimeError(f"Failed to run {command[0]}") from None
+
+
+def _read_dmesg() -> str:
+    """Return deterministic dmesg output with timestamps and no color."""
+    result = _run_command(
+        ["dmesg", "--color=never"],
+        "Failed to retrieve the kernel log with dmesg",
+    )
+    return result.stdout
+
+
+def _dmesg_log_after_checkpoint(baseline: str, current: str) -> str:
+    """Return dmesg text after a checkpoint, allowing ring-buffer wrap."""
+    if current.startswith(baseline):
+        return current[len(baseline):]
+
+    baseline_lines = baseline.splitlines(keepends=True)
+    current_lines = current.splitlines(keepends=True)
+    max_overlap = min(len(baseline_lines), len(current_lines))
+    for overlap in range(max_overlap, 0, -1):
+        if baseline_lines[-overlap:] == current_lines[:overlap]:
+            return "".join(current_lines[overlap:])
+
+    raise RuntimeError("The dmesg checkpoint is no longer continuous")
+
+
+def capture_kernel_log_checkpoint() -> KernelLogCheckpoint:
+    """Capture an opaque checkpoint for subsequent kernel-log retrieval.
+
+    The checkpoint records the current boot and remains bound to the selected
+    journal or dmesg backend. RuntimeError is raised when no backend can
+    produce a valid checkpoint.
+    """
+    boot_id = _read_boot_id()
+
+    if is_cli_available("journalctl"):
+        try:
+            result = _run_command(
+                [
+                    "journalctl",
+                    "--no-pager",
+                    "-b0",
+                    "-k",
+                    "-n1",
+                    "-o",
+                    "json",
+                ],
+                "Failed to capture a journal checkpoint",
+            )
+            cursor = _parse_journal_cursor(result.stdout)
+        except RuntimeError:
+            cursor = None
+        if cursor is not None:
+            return _JournalKernelLogCheckpoint(
+                boot_id=boot_id,
+                cursor=cursor,
+            )
+
+    baseline = _read_dmesg()
+    if not baseline:
+        raise RuntimeError("Cannot capture an empty dmesg checkpoint")
+    return _DmesgKernelLogCheckpoint(
+        boot_id=boot_id,
+        baseline=baseline,
+    )
+
+
 @contextmanager
 def chdir_managed(path):
     """
@@ -241,27 +418,106 @@ def chdir_managed(path):
             del os.environ['PWD']
 
 
-def check_kernel_log(msg) -> bool:
-    """
-    DGX-10357
-    Check kernel log
-    Return True if msg is in kernel log
-    """
-    if is_cli_available("journalctl"):
-        # Use shell=False to prevent command injection (CWE-78)
-        result = subprocess.run(["journalctl", "-b0", "-k"],
-                                capture_output=True, text=True, check=False)
-        if result.returncode == 0 and msg in result.stdout:
-            return True
+def check_kernel_log(
+    msg: str, checkpoint: KernelLogCheckpoint | None = None
+) -> bool:
+    """Return whether a literal message occurs in the selected kernel log.
 
-    # FIXME: DGX-10224 pylint: disable=fixme
-    elif is_cli_available("dmesg"):
-        # Use shell=False to prevent command injection (CWE-78)
-        result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False)
-        if result.returncode == 0 and msg in result.stdout:
-            return True
+    With no checkpoint, search the available current-boot log. With a
+    checkpoint, search only records appended after that checkpoint. Retrieval
+    and checkpoint continuity failures propagate as RuntimeError.
+    """
+    return msg in get_kernel_log(checkpoint)
 
-    return False
+
+# pylint: disable=too-many-branches
+def get_kernel_log(
+    checkpoint: KernelLogCheckpoint | None = None,
+) -> str:
+    """Return current-boot kernel-log text or text after a checkpoint.
+
+    A checkpoint remains bound to the backend that created it. RuntimeError is
+    raised when retrieval fails, the checkpoint belongs to another boot, or
+    checkpoint continuity cannot be proven. A successful query with no new
+    records returns ``""``.
+    """
+    if checkpoint is None:
+        if is_cli_available("journalctl"):
+            try:
+                result = _run_command(
+                    [
+                        "journalctl",
+                        "--no-pager",
+                        "-b0",
+                        "-k",
+                        "-o",
+                        "cat",
+                    ],
+                    "Failed to retrieve the kernel log with journalctl",
+                )
+            except RuntimeError:
+                result = None
+            # journalctl can exit 0 with no kernel records while dmesg still
+            # has the current-boot log; treat empty output as unusable.
+            if result is not None and result.stdout:
+                return result.stdout
+
+        return _read_dmesg()
+
+    if not isinstance(
+        checkpoint,
+        (_DmesgKernelLogCheckpoint, _JournalKernelLogCheckpoint),
+    ):
+        raise RuntimeError(
+            "Kernel-log checkpoint has unexpected type "
+            f"{type(checkpoint).__name__}"
+        )
+
+    if not isinstance(checkpoint.boot_id, str):
+        raise RuntimeError(
+            "Kernel-log checkpoint boot_id must be a string, "
+            f"got {type(checkpoint.boot_id).__name__}"
+        )
+    if not checkpoint.boot_id:
+        raise RuntimeError("Kernel-log checkpoint boot_id is empty")
+
+    if isinstance(checkpoint, _DmesgKernelLogCheckpoint):
+        if not isinstance(checkpoint.baseline, str):
+            raise RuntimeError(
+                "Dmesg checkpoint baseline must be a string, "
+                f"got {type(checkpoint.baseline).__name__}"
+            )
+        if not checkpoint.baseline:
+            raise RuntimeError("Dmesg checkpoint baseline is empty")
+    elif not isinstance(checkpoint.cursor, str):
+        raise RuntimeError(
+            "Journal checkpoint cursor must be a string, "
+            f"got {type(checkpoint.cursor).__name__}"
+        )
+    elif not checkpoint.cursor:
+        raise RuntimeError("Journal checkpoint cursor is empty")
+
+    if _read_boot_id() != checkpoint.boot_id:
+        raise RuntimeError("Kernel-log checkpoint belongs to another boot")
+
+    if isinstance(checkpoint, _DmesgKernelLogCheckpoint):
+        return _dmesg_log_after_checkpoint(checkpoint.baseline, _read_dmesg())
+
+    _validate_journal_cursor(checkpoint.cursor)
+
+    result = _run_command(
+        [
+            "journalctl",
+            "--no-pager",
+            "-b0",
+            "-k",
+            f"--after-cursor={checkpoint.cursor}",
+            "-o",
+            "cat",
+        ],
+        "Failed to retrieve the journal after checkpoint",
+    )
+    return result.stdout
 
 
 def collect_logs(directory) -> tuple[bool, str]:

@@ -97,6 +97,13 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
     stress_process_2 = None
 
     try:
+        checkpoint = glt_utils.capture_kernel_log_checkpoint()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to capture kernel log checkpoint for QSPI stress: {error}"
+        )
+
+    try:
         # stress-ng hrtimers on CPU 0, 3 minutes
         stress_process_1 = subprocess.Popen(  # pylint: disable=consider-using-with
             ["stress-ng", "--hrtimers", "0", "--taskset", "0", "--timeout", "3m"],
@@ -119,10 +126,9 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
 
         while elapsed_time < max_runtime:
             # Check kernel log for the error message
-            if glt_utils.check_kernel_log(error_msg):
+            if glt_utils.check_kernel_log(error_msg, checkpoint=checkpoint):
                 logger.error(f"Error detected in dmesg: {error_msg}")
                 logger.info("Terminating stress processes")
-                _stop_stress_processes(stress_process_1, stress_process_2)
                 GLTCore.GLTTestResult.fail(
                     f"FAIL: Found tegra-qspi interrupt timeout error in dmesg: '{error_msg}'. "
                     "Under load the driver can time out waiting for the completion interrupt "
@@ -135,14 +141,28 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
             elapsed_time += poll_interval
 
         logger.warning(f"Maximum runtime ({max_runtime}s) reached, terminating stress processes")
-        _stop_stress_processes(stress_process_1, stress_process_2)
 
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve kernel log during QSPI stress: {error}"
+        )
     except (OSError, ValueError) as e:
-        _stop_stress_processes(stress_process_1, stress_process_2)
         GLTCore.GLTTestResult.fail(f"FAIL: Error during test execution: {e}")
+    finally:
+        _stop_stress_processes(stress_process_1, stress_process_2)
 
     # Final check of kernel log after both processes complete
-    if glt_utils.check_kernel_log(error_msg):
+    try:
+        final_error_found = glt_utils.check_kernel_log(
+            error_msg,
+            checkpoint=checkpoint,
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve final kernel log after QSPI stress: {error}"
+        )
+
+    if final_error_found:
         GLTCore.GLTTestResult.fail(
             f"FAIL: Found tegra-qspi interrupt timeout error in dmesg: '{error_msg}'. "
             "Under load the driver can time out waiting for the completion interrupt "
@@ -200,7 +220,14 @@ def test_tegra_qspi_xfer_kasan_oob(_, __):
         GLTCore.GLTTestResult.skip("CONFIG_KASAN is not enabled.")
 
     splat = "KASAN: slab-out-of-bounds in handle_cpu_based_xfer"
-    if glt_utils.check_kernel_log(splat):
+    try:
+        kasan_splat_found = glt_utils.check_kernel_log(splat)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve kernel log for Tegra QSPI KASAN check: {error}"
+        )
+
+    if kasan_splat_found:
         GLTCore.GLTTestResult.fail(
             f"Found KASAN slab-out-of-bounds splat '{splat}' in kernel log. "
             "Consider backporting commit 195aba9."
