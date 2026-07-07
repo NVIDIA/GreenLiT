@@ -30,7 +30,6 @@ def is_ast_device_present(vdc):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_ast_gpu_driver(sd, _):
