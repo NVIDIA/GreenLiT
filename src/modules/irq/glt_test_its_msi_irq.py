@@ -24,6 +24,7 @@ from common import glt_core as GLTCore
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_its_msi_irq(_, __):
     """
     Perform the ITS-MSI IRQ test.

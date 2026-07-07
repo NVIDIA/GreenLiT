@@ -74,6 +74,7 @@ def _parse_zoneinfo(logger):
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_zone_movable_min_watermark(_, logger):
     """
     Test if ZONE_MOVABLE min watermark is properly capped.

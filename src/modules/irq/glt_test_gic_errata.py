@@ -24,6 +24,7 @@ from common.nv_device import NvDev
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_gic_errata(_, logger):
     """
     Perform the GIC errata check.
