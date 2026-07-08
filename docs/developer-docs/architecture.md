@@ -2,15 +2,13 @@
 
 This document provides an overview of the GreenLiT architecture, explaining how the different components work together.
 
-**Under Construction**
-
-This document is currently being revised. Please check back later for the complete architecture guide. In the meantime, here's a high-level overview of the directory structure:
+Here's a high-level overview of the directory structure:
 
 ```
 greenlit/
 ├── confs/                  # Test configuration files
 ├── data/                   # Test data files
-├── docs/                   # Wiki Documentation
+├── docs/                   # Documentation
 ├── external_tests/         # Packaged standalone executable tests
 ├── install.sh              # Installation script
 ├── poetry.toml             # Poetry configuration file
@@ -19,32 +17,32 @@ greenlit/
 │   ├── common/             # Common utilities
 │   │   └── virt/           # Libvirt/QEMU helper APIs for tests
 │   ├── greenlit/           # Main package
-│   └── modules/            # Test modules
-│       ├── acpi/           # ACPI and EFI tests
-│       ├── arm64/          # ARM64 architecture tests
-│       ├── cpu/            # CPU-related tests
-│       ├── cxl/            # CXL device tests
-│       ├── gpio/           # GPIO tests
-│       ├── gpu/            # GPU and framebuffer tests
-│       ├── hwtracing/      # Hardware tracing (perf, coresight)
-│       ├── i2c/            # I2C bus tests
-│       ├── iommu/          # IOMMU tests
-│       ├── ipmi/           # IPMI interface tests
-│       ├── irq/            # Interrupt tests
-│       ├── irqchip/        # IRQ chip tests
-│       ├── kconfig/        # Kernel configuration validation
-│       ├── mm/             # Memory management tests
-│       ├── mtd/            # MTD tests
-│       ├── pci/            # PCI subsystem tests
-│       ├── power/          # Power management tests
-│       ├── rtc/            # Real-time clock tests
-│       ├── system/         # System state and configuration tests
-│       ├── tpm/            # TPM tests
-│       └── virt/           # Virtualization tests
+│   ├── modules/            # Test modules
+│   │   ├── acpi/           # ACPI and EFI tests
+│   │   ├── arm64/          # ARM64 architecture tests
+│   │   ├── cpu/            # CPU-related tests
+│   │   ├── cxl/            # CXL device tests
+│   │   ├── gpio/           # GPIO tests
+│   │   ├── gpu/            # GPU and framebuffer tests
+│   │   ├── hwtracing/      # Hardware tracing (perf, coresight)
+│   │   ├── i2c/            # I2C bus tests
+│   │   ├── iommu/          # IOMMU tests
+│   │   ├── ipmi/           # IPMI interface tests
+│   │   ├── irq/            # Interrupt tests
+│   │   ├── irqchip/        # IRQ chip tests
+│   │   ├── mm/             # Memory management tests
+│   │   ├── mtd/            # MTD tests
+│   │   ├── pci/            # PCI subsystem tests
+│   │   ├── power/          # Power management tests
+│   │   ├── rtc/            # Real-time clock tests
+│   │   ├── system/         # System state and configuration tests
+│   │   ├── tpm/            # TPM tests
+│   │   └── virt/           # Virtualization tests
+│   └── scripts/            # Standalone checker scripts (poetry entry points, e.g. check_kernel_config.py)
 ├── tests                   # Unit tests files
 │   ├── common/             # Unit tests for common helpers
 │   └── modules/            # Unit tests for module test logic
-├── COPYRIGHT               # Copyright information
+├── LICENSE                 # Apache License 2.0
 ├── README.md               # Project README
 └── VERSION                 # Project version
 ```
@@ -75,12 +73,12 @@ Use this table when modifying the repository. For how to run the suite on a syst
 | Per-test skip or config YAML | `confs/glt-confs.d/` (installed to `/usr/share/greenlit/confs.d/`) | [configuration.md](../user-guides/configuration.md) |
 | Hardware manifest | `confs/hardware-manifest.json` | — |
 | Reference data (patches, kernel config lists, etc.) | `data/` (installed to `/usr/share/greenlit/data/`) | — |
-| Standalone checker entry points | `src/scripts/` | `pyproject.toml` `[tool.poetry.scripts]` |
+| Standalone checker entry points (e.g. `check_kernel_config.py`, `check_kernel_patches.py`) | `src/scripts/` | `pyproject.toml` `[tool.poetry.scripts]` |
 | Framework unit test | `tests/` (typically `tests/common/` for helpers or `tests/modules/` for module test logic) | [development-setup.md](development-setup.md), [AGENTS.md](../../AGENTS.md) |
 
 Unit tests under `tests/modules/` validate module test logic with mocks. They do not define
 new GreenLiT runtime test categories; runtime categories remain under `src/modules/`.
 
 ## Read also
-* docs/user-guides/user-manual.md -> Runtime, CLI, automation on hardware
-* docs/developer-docs/writing-test-cases.md -> Adding/editing tests
+* [user-manual.md](../user-guides/user-manual.md) — Runtime, CLI, automation on hardware
+* [writing-test-cases.md](writing-test-cases.md) — Adding/editing tests

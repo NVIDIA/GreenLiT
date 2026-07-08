@@ -15,25 +15,8 @@ Guidance for AI coding agents working in this repository.
 
 ## Local Checks
 
-Always run before creating a commit or MR. Skip any check whose tool is not installed.
-
-- `shellcheck` and `jq` are system tools.
-- `pylint` and `pytest` require the `gltenv` venv below.
-
-One-time venv setup:
-
-```bash
-python3 -m venv gltenv && source gltenv/bin/activate && pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org . pylint pytest pytest-cov
-```
-
-Checks:
-
-| Tool | Command |
-|------|---------|
-| Python lint | `source gltenv/bin/activate && find . -not -path "./gltenv/*" -name "*.py" -print0 \| xargs -0 pylint --init-hook="import sys; sys.path.extend(['src', '.'])"` |
-| Shell lint | `find . -name "*.sh" -print0 \| xargs -0 shellcheck` |
-| JSON validation | `find . -name "*.json" -print0 \| xargs -0 jq -r . > /dev/null` |
-| Unit tests | `source gltenv/bin/activate && python -m pytest tests/ -v --cov=src --cov-report=term-missing` |
+Before creating a commit or MR, follow [Running Local Checks](docs/developer-docs/development-setup.md#running-local-checks).
+Skip checks whose tools are unavailable.
 
 ## Boundaries
 
@@ -45,7 +28,6 @@ Checks:
 - If the test validates a kernel, firmware, or userspace patch, inspect the related patch or source repository when available. If it is not available, ask for the relevant link, commit, or repository before guessing test behavior.
 - If a test may contain non-public or sensitive details, stop and ask whether it belongs in the public GreenLiT repository.
 - **Must** follow the [Recommended workflow](docs/user-guides/user-manual.md#recommended-workflow) in order when running GreenLiT on a target system, unless the user requests otherwise.
-- Do **not** continue that workflow on macOS — stop after OS detection and tell the user Linux is required.
 - Do **not** guess or assume platform, paths, or test plan; ask the user when uncertain.
 - Do **not** search for kernel source trees; ask the user for the kernel source path.
 - Do **not** run `glt-test-suite` until the user explicitly asks you to execute the test suite.

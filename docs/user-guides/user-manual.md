@@ -255,19 +255,36 @@ GreenLiT offers several ways to skip specific tests:
 
 #### Using Configuration Files
 
-You can configure specific tests to be skipped by adding them to the configuration file at `/usr/share/greenlit/confs.d/`:
+You can configure specific tests to be skipped (or have their failures marked
+as allowed) by adding a YAML file to `/usr/share/greenlit/confs.d/`. Each entry
+is keyed by the `category:test_case_name` identifier and an operation
+(`conditional-skip` or `allow-failure`), with one or more conditions:
 
 ```yaml
-# Example: /usr/share/greenlit/confs.d/custom_skips.yaml
-tests:
-  glt_test_tpm_access:  # Test name to configure
-    conditional-skip: "true"  # Always skip this test
-    skip-reason: "TPM hardware not available on this system"
+# Example: /usr/share/greenlit/confs.d/99-custom.yaml
+tpm:test_nvidia_tpm:
+  conditional-skip:
+    - condition:
+        name: "TPM hardware not available on this system"
+        script: |
+          #!/bin/bash
+          ! test -e /dev/tpm0
 
-  glt_test_pmu:  # Another test to configure
-    conditional-skip: "uname -r | grep -q '5.15'"  # Skip only on kernel 5.15
-    skip-reason: "Not compatible with kernel 5.15"
+arm64:test_all_pmu_events:
+  conditional-skip:
+    - condition:
+        name: "Skip on Ubuntu 22.04 with kernels older than 6.8.0-1024.27"
+        distro: "Ubuntu"
+        release: "22.04"
+        kernel-uname: "< 6.8.0-1024.27"
 ```
+
+A `script` condition always runs as a **bash** script regardless of any
+shebang line, and is considered met when it exits `0` — write it in bash, not
+another language.
+
+See the [Configuration Guide](configuration.md) for the full list of
+operations, condition types, and extra conditions.
 
 ## Test Categories
 
@@ -300,6 +317,7 @@ Summary:
     FAILED            : Number of tests that failed
     Allowed FAILURE   : Tests that failed but are marked as "allowed to fail"
     SKIPPED           : Tests that were skipped due to configuration or prerequisites
+    WARNED            : Tests that completed without failing but flagged an advisory condition worth reviewing
 ```
 
 ### Details Section
@@ -308,11 +326,12 @@ The details section shows the status of each test:
 
 ```bash
 Details:
-    [N/A]     : Test was not applicable for the selected test plan
-    [PASSED]  : Test completed successfully
-    [FAILED]  : Test failed
-    [SKIPPED] : Test was skipped, with reason provided below the test
-    [ALLOWED] : Test failed but is marked as an allowed failure
+    [N/A]              : Test was not applicable for the selected test plan
+    [PASSED]           : Test completed successfully
+    [FAILED]           : Test failed
+    [SKIPPED]          : Test was skipped, with reason provided below the test
+    [Allowed FAILURE]  : Test failed but is marked as an allowed failure
+    [WARNED]           : Test completed without failing but flagged an advisory condition worth reviewing
 ```
 
 ### Test Sessions
@@ -327,7 +346,7 @@ Test sessions and logs are stored in the `/var/cache/greenlit/` directory with a
 
 On a **Linux** target system, a typical end-to-end run follows this order. Use one or more `<reference-files>` per platform (Grace: `grace.txt`; Vera: `grace.txt` and `vera.txt`); see the kernel checker sections above.
 
-1. **Check the host** — GreenLiT requires Linux (install, kernel checks, and tests are not supported on macOS).
+1. **Check the host** — GreenLiT requires Linux for install, kernel checks, and full test execution.
 
    ```bash
    uname -s
@@ -426,6 +445,7 @@ Follow these steps to add your custom tests to GreenLiT:
     FAILED            : 3
     Allowed FAILURE   : 0
     SKIPPED           : 1
+    WARNED            : 0
 
   Details:
     [N/A] mm:test_module_allocation
@@ -468,8 +488,7 @@ Follow these steps to add your custom tests to GreenLiT:
 
   ===========================================================
   2025-09-26 14:49:47 - greenlit(main) - INFO: == Session /var/cache/greenlit/2025-09-26-14:49:36 completed ==
-    ```
-  
+  ```
 
 - Additional Notes:
   - You can organize executables in subdirectories for better organization
