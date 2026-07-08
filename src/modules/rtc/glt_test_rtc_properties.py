@@ -24,6 +24,7 @@ from common import glt_core as GLTCore
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_rtc_alarm_property(_, __):
     """
     Perform the RTC alarm property test.

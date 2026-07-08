@@ -31,6 +31,7 @@ from scripts import check_kernel_config
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_acpi_hmat_msg(_, __):
     """
     Test if ACPI HMAT info messages can be found in dmesg.

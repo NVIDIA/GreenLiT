@@ -186,7 +186,6 @@ def _restore_link_and_disable_resume(scheduler, attr, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
@@ -559,7 +558,6 @@ _cxl_bus_reset_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches,too-many-statements,too-many-locals
@@ -765,7 +763,6 @@ _cxl_reset_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches,too-many-statements

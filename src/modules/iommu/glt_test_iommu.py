@@ -45,6 +45,7 @@ def test_iommu_id_mapping(_, __):
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_cmdqv_alignment(_, __):
     """Test Tegra241 CMDQV queue alignment fix.
 

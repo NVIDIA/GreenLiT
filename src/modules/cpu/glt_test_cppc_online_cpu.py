@@ -332,7 +332,6 @@ def _validate_cppc_observability(online_cpus, policy_dirs=None, read_file=_read_
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-return-statements,too-many-branches

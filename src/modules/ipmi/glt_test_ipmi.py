@@ -27,6 +27,7 @@ from common.nv_device import NvDev
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_bmc_manufacturer_name(_, __):
     """Check BMC manufacturer name"""
 
