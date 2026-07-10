@@ -31,6 +31,7 @@ import sys
 from common import glt_conf as GLTConf
 from common import glt_core as GLTCore
 from common import glt_logger
+from common import glt_session
 from common import glt_utils
 from common import glt_ext_launcher
 from common import perf_utils
@@ -262,9 +263,10 @@ def glt_signal_handler(logger, scheduler):
         logger.info(f"Signal {signum} received.")
 
         scheduler.progress_save()
-        # Print out the status
-        data = scheduler.progress_read()
-        logger.info(json.dumps(data, indent=4))
+        progress_error = scheduler.progress_read()
+        if progress_error:
+            logger.error(progress_error)
+        logger.info(json.dumps(scheduler.progress, indent=4))
         os._exit(0)
 
     return signal_handler
@@ -399,7 +401,7 @@ def perform_tests(logger, scheduler):
 # pylint: enable=too-many-branches
 
 
-def registry_test_cases(logger, scheduler):
+def registry_test_cases(logger, scheduler, verbose=False):
     """Register all test cases."""
     if not scheduler.test_categories or not scheduler.test_tags:
         logger.error("categories: %s test tags: %s", scheduler.test_categories, scheduler.test_tags)
@@ -408,6 +410,8 @@ def registry_test_cases(logger, scheduler):
     scheduler.progress_update('Summary', 'TestTags', list(scheduler.test_tags))
 
     scheduler.progress_update('Summary', 'Categories', scheduler.test_categories)
+
+    scheduler.progress_update('Summary', 'Verbose', bool(verbose))
 
     for test_obj in scheduler.test_list:
         attr = test_obj.__wrapped__.attr
@@ -431,100 +435,87 @@ def get_active_plan_tags(args):
     return GLTCore.GLTPlanType.get_all_nested(selected_plan)
 
 
-def read_session_summary(session):
-    """Return saved test tags and categories from a cached session."""
+def read_session_summary(session_dir):
+    """Return saved metadata from a cached session directory."""
     def error(message):
-        return False, message, set(), None, None
+        return False, message, None
 
     result = error("Resume session not found.")
-    if session is None:
+    if session_dir is None:
         return result
 
-    progress_path = os.path.join(
-        session, "glt-test-suite", "test_progress.json")
+    progress_path = glt_session.get_session_progress_path(session_dir)
     result = error(f"Resume summary not found in {progress_path}")
     try:
-        with open(progress_path, "r", encoding="UTF-8") as progress_file:
-            progress = json.load(progress_file)
+        session_progress = glt_session.read_progress_file(progress_path)
     except OSError as err:
         result = error(f"Unable to read resume progress: {err}")
     except json.JSONDecodeError as err:
         result = error(f"Unable to parse resume progress: {err}")
     else:
-        test_tags = None
-        categories = None
-        test_cases = []
-        for item in progress:
-            if not isinstance(item, dict):
-                continue
-            summary = item.get("Summary")
-            if summary is not None:
-                test_tags = summary.get("TestTags")
-                categories = summary.get("Categories")
-                continue
-
-            for test_name, test_info in item.items():
-                if isinstance(test_info, dict) and test_info.get("Category"):
-                    test_cases.append(f"{test_info['Category']}:{test_name}")
-                    break
-
-        if not test_tags or not categories:
-            result = error(
-                f"Resume summary in {progress_path} is missing "
-                "TestTags or Categories")
-        elif not test_cases:
-            result = error(
-                f"Resume progress in {progress_path} has no registered "
-                "test cases")
+        summary_error = session_progress.summary_error()
+        if summary_error:
+            result = error(summary_error)
         else:
-            result = (True, "", set(test_tags), list(categories), test_cases)
+            result = (True, "", session_progress.summary)
 
     return result
 
 
 def resolve_run_selection(args, supported_categories):
-    """Return discovery scope, using saved session state for resume runs."""
+    """Return the resolved session directory and run selection summary."""
+    requested_verbose = bool(getattr(args, "verbose", False))
     if args.resume is None:
-        return (
-            None,
-            get_active_plan_tags(args),
-            get_target_categories(args, supported_categories),
-            getattr(args, "test_cases", None),
-            "",
-        )
+        summary = glt_session.GLTSessionSummary(
+            test_tags=get_active_plan_tags(args),
+            categories=get_target_categories(args, supported_categories),
+            test_cases=getattr(args, "test_cases", None) or [],
+            verbose=requested_verbose)
+        return None, summary, ""
 
-    resume_session = get_cached_session_path(args.resume)
-    ok, message, active_plan_tags, target_categories, test_cases = (
-        read_session_summary(resume_session))
+    resume_session_dir = get_cached_session_path(args.resume)
+    ok, message, summary = read_session_summary(resume_session_dir)
     if not ok:
-        return resume_session, set(), None, None, message
+        return resume_session_dir, glt_session.GLTSessionSummary(
+            test_tags=set(),
+            categories=[],
+            test_cases=[],
+            verbose=requested_verbose), message
 
-    return resume_session, active_plan_tags, target_categories, test_cases, ""
+    summary = glt_session.GLTSessionSummary(
+        test_tags=summary.test_tags,
+        categories=summary.categories,
+        test_cases=summary.test_cases,
+        verbose=requested_verbose or summary.verbose)
+    return resume_session_dir, summary, ""
 
 
-def resume_from_session(scheduler, session):
-    """Resume status from previous session"""
+def resume_from_session(scheduler, session_dir):
+    """Resume status from previous session directory."""
     # TODO(DGX-16988): Make either main() or progress_read() the single owner
     # of rebuilding scheduler.test_list for resume.
-    scheduler.progress_read(session)
+    progress_error = scheduler.progress_read(session_dir)
+    if progress_error:
+        return progress_error
     scheduler.progress_save()
+    return ""
 
 
-def setup_session(verbose, resume_session):
+def setup_session(verbose, resume_session_dir):
     """Create or reuse the resolved resume session and configure the logger.
 
     Returns:
         tuple: (session path, logger)
     """
-    session = resume_session
-    if session is None:
-        session = glt_utils.create_cache_session()
+    session_dir = resume_session_dir
+    if session_dir is None:
+        session_dir = glt_utils.create_cache_session()
 
-    logger = glt_logger.get_logger(session, "glt-test-suite")
+    logger = glt_logger.get_logger(session_dir, "glt-test-suite")
     if verbose:
         glt_logger.verbose(logger)
 
-    return session, logger
+    return session_dir, logger
 
 
 def show_report(logger, scheduler):
@@ -671,27 +662,31 @@ def discover_target_test_cases(
 
 def resolve_target_test_objects(args, supported_categories, external_test_objs):
     """Resolve CLI/resume selection into runnable test objects."""
-    resume_session, active_plan_tags, target_categories, target_test_cases, error = (
-        resolve_run_selection(args, supported_categories))
+    resume_session_dir, summary, error = resolve_run_selection(
+        args, supported_categories)
     if error:
-        return resume_session, active_plan_tags, [], error, CLI_RUNTIME_ERROR
+        return (
+            resume_session_dir, summary.test_tags, [], summary.verbose,
+            error, CLI_RUNTIME_ERROR)
 
     test_objs, error, discovery_error_code = discover_target_test_cases(
-        target_categories, target_test_cases, active_plan_tags,
+        summary.categories, summary.test_cases, summary.test_tags,
         external_test_objs)
     if error:
         return (
-            resume_session, active_plan_tags, [], error, discovery_error_code)
+            resume_session_dir, summary.test_tags, [], summary.verbose,
+            error, discovery_error_code)
 
     if not test_objs and not args.list:
         return (
-            resume_session,
-            active_plan_tags,
+            resume_session_dir,
+            summary.test_tags,
             [],
+            summary.verbose,
             "No test cases selected for the requested plan and categories.",
             CLI_USAGE_ERROR)
 
-    return resume_session, active_plan_tags, test_objs, "", 0
+    return resume_session_dir, summary.test_tags, test_objs, summary.verbose, "", 0
 
 
 def test_case_init(module):
@@ -764,7 +759,7 @@ def main():
 
     # --- Phase 2: Resolve categories/resume state into exact target tests ---
 
-    resume_session, active_plan_tags, test_objs, error, exit_code = (
+    resume_session_dir, active_plan_tags, test_objs, verbose, error, exit_code = (
         resolve_target_test_objects(
             args, supported_categories, external_test_objs))
     if error:
@@ -792,10 +787,10 @@ def main():
 
     # --- Phase 5: Create session and run tests ---
 
-    session, logger = setup_session(args.verbose, resume_session=resume_session)
+    session_dir, logger = setup_session(verbose, resume_session_dir=resume_session_dir)
 
     # Wire session into the scheduler (ext_test workdirs resolve lazily)
-    scheduler.log_dir = f"{session}/glt-test-suite"
+    scheduler.log_dir = f"{session_dir}/glt-test-suite"
 
     apply_glt_configs(scheduler, logger)
 
@@ -810,16 +805,19 @@ def main():
     check_required_commands(logger)
     check_required_files(logger)
 
-    logger.info("== Session %s %s ==", session,
+    logger.info("== Session %s %s ==", session_dir,
                 "attached" if args.resume is not None else "started")
 
     if args.resume is not None:
-        resume_from_session(scheduler, session)
+        resume_error = resume_from_session(scheduler, session_dir)
+        if resume_error:
+            print(f"Error: {resume_error}", file=sys.stderr)
+            sys.exit(CLI_RUNTIME_ERROR)
     else:
-        registry_test_cases(logger, scheduler)
+        registry_test_cases(logger, scheduler, verbose=args.verbose)
     perform_tests(logger, scheduler)
 
-    logger.info("== Session %s completed ==", session)
+    logger.info("== Session %s completed ==", session_dir)
 
 
 if __name__ == "__main__":

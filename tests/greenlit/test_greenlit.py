@@ -24,6 +24,14 @@ def _args(categories, test_cases=None, list_tests=False, resume=None):
     return argparse.Namespace(**values)
 
 
+def _summary(test_tags=None, categories=None, test_cases=None, verbose=False):
+    return greenlit.glt_session.GLTSessionSummary(
+        test_tags=test_tags or set(),
+        categories=categories or [],
+        test_cases=test_cases or [],
+        verbose=verbose)
+
+
 class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test pure helper functions used by glt-test-suite."""
 
@@ -499,20 +507,21 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 class TestGreenlitResumeHelpers(GLTTestBase):
     """Test resume-specific helper behavior."""
 
-    def test_setup_session_requires_resolved_resume_session_argument(self):
-        """Resume session resolution belongs to main, not setup_session."""
+    def test_setup_session_requires_resolved_resume_session_dir_argument(self):
+        """Resume session directory resolution belongs to main, not setup_session."""
         parameters = inspect.signature(greenlit.setup_session).parameters
 
         self.assertIn("verbose", parameters)
-        self.assertIs(parameters["resume_session"].default, inspect.Parameter.empty)
+        self.assertIs(
+            parameters["resume_session_dir"].default, inspect.Parameter.empty)
 
     def test_read_session_summary_returns_saved_plan_and_categories(self):
         """Resume setup reads the saved plan before test discovery."""
-        with tempfile.TemporaryDirectory() as session:
-            log_dir = os.path.join(session, "glt-test-suite")
-            os.makedirs(log_dir)
-            with open(os.path.join(log_dir, "test_progress.json"),
-                      "w", encoding="UTF-8") as progress_file:
+        with tempfile.TemporaryDirectory() as session_dir:
+            progress_path = (
+                greenlit.glt_session.get_session_progress_path(session_dir))
+            os.makedirs(os.path.dirname(progress_path))
+            with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 json.dump([{
                     "Summary": {
                         "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
@@ -524,22 +533,22 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                     }
                 }], progress_file)
 
-            ok, message, test_tags, categories, test_cases = (
-                greenlit.read_session_summary(session))
+            ok, message, summary = greenlit.read_session_summary(session_dir)
 
         self.assertTrue(ok)
         self.assertEqual(message, "")
-        self.assertEqual(test_tags, {GLTCore.GLTPlanType.STANDARD.value})
-        self.assertEqual(categories, ["cxl"])
-        self.assertEqual(test_cases, ["cxl:test_standard"])
+        self.assertEqual(summary.test_tags, {GLTCore.GLTPlanType.STANDARD.value})
+        self.assertEqual(summary.categories, ["cxl"])
+        self.assertEqual(summary.test_cases, ["cxl:test_standard"])
+        self.assertFalse(summary.verbose)
 
     def test_read_session_summary_requires_registered_test_cases(self):
         """Resume metadata must include registered per-test categories."""
-        with tempfile.TemporaryDirectory() as session:
-            log_dir = os.path.join(session, "glt-test-suite")
-            os.makedirs(log_dir)
-            with open(os.path.join(log_dir, "test_progress.json"),
-                      "w", encoding="UTF-8") as progress_file:
+        with tempfile.TemporaryDirectory() as session_dir:
+            progress_path = (
+                greenlit.glt_session.get_session_progress_path(session_dir))
+            os.makedirs(os.path.dirname(progress_path))
+            with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 json.dump([{
                     "Summary": {
                         "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
@@ -547,22 +556,19 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                     }
                 }], progress_file)
 
-            ok, message, test_tags, categories, test_cases = (
-                greenlit.read_session_summary(session))
+            ok, message, summary = greenlit.read_session_summary(session_dir)
 
         self.assertFalse(ok)
         self.assertIn("registered test cases", message)
-        self.assertEqual(test_tags, set())
-        self.assertIsNone(categories)
-        self.assertIsNone(test_cases)
+        self.assertIsNone(summary)
 
     def test_read_session_summary_ignores_unregistered_progress_entries(self):
         """Only entries with Category are used to rebuild exact test IDs."""
-        with tempfile.TemporaryDirectory() as session:
-            log_dir = os.path.join(session, "glt-test-suite")
-            os.makedirs(log_dir)
-            with open(os.path.join(log_dir, "test_progress.json"),
-                      "w", encoding="UTF-8") as progress_file:
+        with tempfile.TemporaryDirectory() as session_dir:
+            progress_path = (
+                greenlit.glt_session.get_session_progress_path(session_dir))
+            os.makedirs(os.path.dirname(progress_path))
+            with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 json.dump([{
                     "Summary": {
                         "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
@@ -576,32 +582,40 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                     }
                 }], progress_file)
 
-            ok, message, test_tags, categories, test_cases = (
-                greenlit.read_session_summary(session))
+            ok, message, summary = greenlit.read_session_summary(session_dir)
 
         self.assertTrue(ok)
         self.assertEqual(message, "")
-        self.assertEqual(test_tags, {GLTCore.GLTPlanType.STANDARD.value})
-        self.assertEqual(categories, ["cxl"])
-        self.assertEqual(test_cases, ["cxl:test_standard"])
+        self.assertEqual(summary.test_tags, {GLTCore.GLTPlanType.STANDARD.value})
+        self.assertEqual(summary.categories, ["cxl"])
+        self.assertEqual(summary.test_cases, ["cxl:test_standard"])
+        self.assertFalse(summary.verbose)
 
     def test_read_session_summary_reports_invalid_json(self):
         """Malformed progress JSON is returned as an error message."""
-        with tempfile.TemporaryDirectory() as session:
-            log_dir = os.path.join(session, "glt-test-suite")
-            os.makedirs(log_dir)
-            with open(os.path.join(log_dir, "test_progress.json"),
-                      "w", encoding="UTF-8") as progress_file:
+        with tempfile.TemporaryDirectory() as session_dir:
+            progress_path = (
+                greenlit.glt_session.get_session_progress_path(session_dir))
+            os.makedirs(os.path.dirname(progress_path))
+            with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 progress_file.write("{bad json")
 
-            ok, message, test_tags, categories, test_cases = (
-                greenlit.read_session_summary(session))
+            ok, message, summary = greenlit.read_session_summary(session_dir)
 
         self.assertFalse(ok)
         self.assertIn("Unable to parse resume progress", message)
-        self.assertEqual(test_tags, set())
-        self.assertIsNone(categories)
-        self.assertIsNone(test_cases)
+        self.assertIsNone(summary)
+
+    def test_resume_from_session_rejects_progress_read_error(self):
+        """Resume does not save progress after summary validation fails."""
+        scheduler = mock.MagicMock()
+        scheduler.progress_read.return_value = "bad summary"
+
+        error = greenlit.resume_from_session(scheduler, "/tmp/session")
+
+        self.assertEqual(error, "bad summary")
+        scheduler.progress_read.assert_called_once_with("/tmp/session")
+        scheduler.progress_save.assert_not_called()
 
     def test_main_rejects_empty_test_selection(self):
         """CLI reports an empty runnable selection instead of exiting silently."""
@@ -642,16 +656,18 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
         with mock.patch.object(
                 greenlit, "resolve_run_selection",
-                return_value=(None, active_plan_tags, ["cxl"], None, "")), \
+                return_value=(None, _summary(
+                    active_plan_tags, ["cxl"]), "")), \
                 mock.patch.object(greenlit, "discover_target_test_cases",
                                   return_value=([], "", 0)):
-            resume_session, test_tags, test_objs, error, exit_code = (
+            resume_session_dir, test_tags, test_objs, verbose, error, exit_code = (
                 greenlit.resolve_target_test_objects(
                     args, ["cxl"], []))
 
-        self.assertIsNone(resume_session)
+        self.assertIsNone(resume_session_dir)
         self.assertEqual(test_tags, active_plan_tags)
         self.assertEqual(test_objs, [])
+        self.assertFalse(verbose)
         self.assertIn("No test cases selected", error)
         self.assertEqual(exit_code, greenlit.CLI_USAGE_ERROR)
 
@@ -663,17 +679,16 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                 greenlit, "resolve_run_selection",
                 return_value=(
                     "/tmp/session",
-                    set(),
-                    None,
-                    None,
+                    _summary(),
                     "Unable to parse resume progress: bad json")):
-            resume_session, test_tags, test_objs, error, exit_code = (
+            resume_session_dir, test_tags, test_objs, verbose, error, exit_code = (
                 greenlit.resolve_target_test_objects(
                     args, ["cxl"], []))
 
-        self.assertEqual(resume_session, "/tmp/session")
+        self.assertEqual(resume_session_dir, "/tmp/session")
         self.assertEqual(test_tags, set())
         self.assertEqual(test_objs, [])
+        self.assertFalse(verbose)
         self.assertIn("Unable to parse resume progress", error)
         self.assertEqual(exit_code, greenlit.CLI_RUNTIME_ERROR)
 
@@ -684,16 +699,18 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
         with mock.patch.object(
                 greenlit, "resolve_run_selection",
-                return_value=(None, active_plan_tags, ["cxl"], None, "")), \
+                return_value=(None, _summary(
+                    active_plan_tags, ["cxl"]), "")), \
                 mock.patch.object(greenlit, "discover_target_test_cases",
                                   return_value=([], "", 0)):
-            resume_session, test_tags, test_objs, error, exit_code = (
+            resume_session_dir, test_tags, test_objs, verbose, error, exit_code = (
                 greenlit.resolve_target_test_objects(
                     args, ["cxl"], []))
 
-        self.assertIsNone(resume_session)
+        self.assertIsNone(resume_session_dir)
         self.assertEqual(test_tags, active_plan_tags)
         self.assertEqual(test_objs, [])
+        self.assertFalse(verbose)
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
 
@@ -704,7 +721,8 @@ class TestGreenlitResumeHelpers(GLTTestBase):
 
         with mock.patch.object(
                 greenlit, "resolve_run_selection",
-                return_value=(None, active_plan_tags, ["cxl"], None, "")), \
+                return_value=(None, _summary(
+                    active_plan_tags, ["cxl"]), "")), \
                 mock.patch.object(
                     greenlit, "discover_target_test_cases",
                     return_value=(
@@ -712,13 +730,14 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                         "Required test ID cxl:test_prereq referenced by "
                         "cxl:test_selected does not exist",
                         greenlit.CLI_RUNTIME_ERROR)):
-            resume_session, test_tags, test_objs, error, exit_code = (
+            resume_session_dir, test_tags, test_objs, verbose, error, exit_code = (
                 greenlit.resolve_target_test_objects(
                     args, ["cxl"], []))
 
-        self.assertIsNone(resume_session)
+        self.assertIsNone(resume_session_dir)
         self.assertEqual(test_tags, active_plan_tags)
         self.assertEqual(test_objs, [])
+        self.assertFalse(verbose)
         self.assertIn("Required test ID cxl:test_prereq", error)
         self.assertEqual(exit_code, greenlit.CLI_RUNTIME_ERROR)
 
@@ -797,11 +816,11 @@ class TestGreenlitResumeHelpers(GLTTestBase):
         def test_standard():
             return "standard"
 
-        with tempfile.TemporaryDirectory() as session:
-            log_dir = os.path.join(session, "glt-test-suite")
-            os.makedirs(log_dir)
-            with open(os.path.join(log_dir, "test_progress.json"),
-                      "w", encoding="UTF-8") as progress_file:
+        with tempfile.TemporaryDirectory() as session_dir:
+            progress_path = (
+                greenlit.glt_session.get_session_progress_path(session_dir))
+            os.makedirs(os.path.dirname(progress_path))
+            with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 json.dump([{
                     "Summary": {
                         "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
@@ -817,7 +836,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                 list=False,
                 resume=-1,
                 verbose=False,
-                ext_dir=os.path.join(session, "missing_ext_dir"))
+                ext_dir=os.path.join(session_dir, "missing_ext_dir"))
             args = _args(["cxl"], resume=-1)
             for plan in GLTCore.GLTPlanType:
                 setattr(args, plan.value, False)
@@ -833,12 +852,12 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                     mock.patch.object(greenlit, "parse_arguments",
                                       return_value=args), \
                     mock.patch.object(greenlit, "get_cached_session_path",
-                                      return_value=session), \
+                                      return_value=session_dir), \
                     mock.patch.object(greenlit, "discover_target_test_cases",
                                       return_value=([test_standard], "",
                                                     0)) as discover, \
                     mock.patch.object(greenlit, "setup_session",
-                                      return_value=(session, self.mock_logger)), \
+                                      return_value=(session_dir, self.mock_logger)), \
                     mock.patch.object(greenlit, "apply_glt_configs"), \
                     mock.patch.object(greenlit.signal, "signal"), \
                     mock.patch.object(greenlit.glt_utils, "log_system_info"), \
@@ -846,7 +865,8 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                                       return_value=True), \
                     mock.patch.object(greenlit, "check_required_commands"), \
                     mock.patch.object(greenlit, "check_required_files"), \
-                    mock.patch.object(greenlit, "resume_from_session"), \
+                    mock.patch.object(greenlit, "resume_from_session",
+                                      return_value=""), \
                     mock.patch.object(greenlit, "perform_tests"):
                 greenlit.main()
 
@@ -869,11 +889,11 @@ class TestGreenlitResumeHelpers(GLTTestBase):
         def test_prereq():
             return "prereq"
 
-        with tempfile.TemporaryDirectory() as session:
-            log_dir = os.path.join(session, "glt-test-suite")
-            os.makedirs(log_dir)
-            with open(os.path.join(log_dir, "test_progress.json"),
-                      "w", encoding="UTF-8") as progress_file:
+        with tempfile.TemporaryDirectory() as session_dir:
+            progress_path = (
+                greenlit.glt_session.get_session_progress_path(session_dir))
+            os.makedirs(os.path.dirname(progress_path))
+            with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 json.dump([{
                     "Summary": {
                         "TestTags": [GLTCore.GLTPlanType.SANITY.value],
@@ -893,7 +913,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                 list=False,
                 resume=-1,
                 verbose=False,
-                ext_dir=os.path.join(session, "missing_ext_dir"))
+                ext_dir=os.path.join(session_dir, "missing_ext_dir"))
             args = _args(["arm64", "hwtracing"], resume=-1)
             for plan in GLTCore.GLTPlanType:
                 setattr(args, plan.value, False)
@@ -909,12 +929,12 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                     mock.patch.object(greenlit, "parse_arguments",
                                       return_value=args), \
                     mock.patch.object(greenlit, "get_cached_session_path",
-                                      return_value=session), \
+                                      return_value=session_dir), \
                     mock.patch.object(greenlit, "discover_target_test_cases",
                                       return_value=([test_main, test_prereq],
                                                     "", 0)) as discover, \
                     mock.patch.object(greenlit, "setup_session",
-                                      return_value=(session, self.mock_logger)), \
+                                      return_value=(session_dir, self.mock_logger)), \
                     mock.patch.object(greenlit, "apply_glt_configs"), \
                     mock.patch.object(greenlit.signal, "signal"), \
                     mock.patch.object(greenlit.glt_utils, "log_system_info"), \
@@ -922,7 +942,8 @@ class TestGreenlitResumeHelpers(GLTTestBase):
                                       return_value=True), \
                     mock.patch.object(greenlit, "check_required_commands"), \
                     mock.patch.object(greenlit, "check_required_files"), \
-                    mock.patch.object(greenlit, "resume_from_session"), \
+                    mock.patch.object(greenlit, "resume_from_session",
+                                      return_value=""), \
                     mock.patch.object(greenlit, "perform_tests"):
                 greenlit.main()
 

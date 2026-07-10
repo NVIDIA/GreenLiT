@@ -26,6 +26,7 @@ import json
 import os
 from typing import Callable
 from common import glt_logger
+from common import glt_session
 from common import glt_utils
 
 
@@ -611,27 +612,31 @@ class GLTScheduler:
         if save:
             self.progress_save()
 
-    def progress_read(self, path=None):
+    def progress_read(self, session_dir=None):  # pylint: disable=too-many-branches
         """Load the test progress from file."""
-        resume_test_list = []
-        if path is None:
-            with open(
-                f"{self.log_dir}/test_progress.json", "r", encoding="UTF-8"
-            ) as f:
-                self.progress = json.load(f)
+        if session_dir is None:
+            progress_path = os.path.join(
+                self.log_dir, glt_session.SESSION_PROGRESS_FILE)
         else:
-            with open(
-                f"{path}/glt-test-suite/test_progress.json",
-                "r",
-                encoding="UTF-8",
-            ) as f:
-                self.progress = json.load(f)
+            progress_path = glt_session.get_session_progress_path(session_dir)
+        try:
+            session_progress = glt_session.read_progress_file(progress_path)
+        except OSError as err:
+            return f"Unable to read resume progress: {err}"
+        except json.JSONDecodeError as err:
+            return f"Unable to parse resume progress: {err}"
 
-        # Apply the previous results
-        for item in self.progress:
-            if item.get("Summary"):
-                self.test_tags = set(item.get("Summary").get("TestTags"))
-                self.test_categories = item.get("Summary").get("Categories")
+        summary_error = session_progress.summary_error()
+        if summary_error:
+            return summary_error
+
+        # Validate all entries before mutating scheduler or test state.
+        resume_test_list = []
+        resume_results = []
+        for item in session_progress.progress:
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("Summary"), dict):
                 continue
 
             for case, status in item.items():
@@ -639,16 +644,29 @@ class GLTScheduler:
                     continue
                 obj_name = f"{status['Category']}:{case}"
                 test_obj = self.get_test_obj_by_name(obj_name)
+                if test_obj is None:
+                    return (
+                        "Resume progress references unknown test case "
+                        f"{obj_name}")
                 attr = test_obj.__wrapped__.attr
                 if "Result" in status:
-                    attr.result = (
+                    resume_results.append((attr, (
                         GLTTestResult(status["Result"]),
                         status["ResultReason"],
-                    )
+                    )))
                 resume_test_list.append(test_obj)
 
-        # Update the test list to only include previous session's tests.
-        self.test_list = resume_test_list
+        self.progress = session_progress.progress
+        self.test_tags = session_progress.summary.test_tags
+        self.test_categories = session_progress.summary.categories
+        for attr, result in resume_results:
+            attr.result = result
+
+        # Update the test list only after finding resumable test entries.
+        if resume_test_list:
+            self.test_list = resume_test_list
+
+        return ""
 
     def progress_record_time(self, item, status, save=True):
         """
