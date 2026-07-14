@@ -166,37 +166,30 @@ def _select_hotplug_cpu(
     return None, last_reason
 
 
-def _read_positive_policy_int(policy_dir, filename, read_file):
-    path = os.path.join(policy_dir, filename)
-    value = read_file(path).strip()
-    parsed = int(value)
-    if parsed <= 0:
-        raise ValueError(f"{path} is not positive: {parsed}")
-    return parsed
-
-
 def _validate_cppc_policy_for_cpu(
-        cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir,
-        read_file=glt_utils.read_sysfs_value):
+        cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir):
     """Validate a CPU has a recreated cppc_cpufreq policy with positive frequencies."""
     policy_dir = _get_cpufreq_policy_dir(cpu_num, cpu_root, path_exists)
     if not path_exists(policy_dir):
         return False, f"cpufreq policy directory missing for CPU{cpu_num}: {policy_dir}"
 
     try:
-        driver = read_file(os.path.join(policy_dir, "scaling_driver")).strip()
-        if driver != "cppc_cpufreq":
-            return False, f"{policy_dir} uses {driver}, expected cppc_cpufreq"
-
-        affected_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "affected_cpus")))
-        related_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "related_cpus")))
+        affected_cpus = _parse_cpu_mask(
+            glt_utils.read_sysfs_value(os.path.join(policy_dir, "affected_cpus"))
+        )
+        related_cpus = _parse_cpu_mask(
+            glt_utils.read_sysfs_value(os.path.join(policy_dir, "related_cpus"))
+        )
         if affected_cpus != {cpu_num}:
             return False, f"{policy_dir}/affected_cpus is not CPU{cpu_num}: {sorted(affected_cpus)}"
         if related_cpus != {cpu_num}:
             return False, f"{policy_dir}/related_cpus is not CPU{cpu_num}: {sorted(related_cpus)}"
 
-        _read_positive_policy_int(policy_dir, "scaling_cur_freq", read_file)
-        _read_positive_policy_int(policy_dir, "cpuinfo_max_freq", read_file)
+        for filename in ("scaling_cur_freq", "cpuinfo_max_freq"):
+            path = os.path.join(policy_dir, filename)
+            value = int(glt_utils.read_sysfs_value(path))
+            if value <= 0:
+                return False, f"{path} is not positive: {value}"
     except (IOError, OSError, ValueError, KeyError) as e:
         return False, f"Cannot validate {policy_dir} for CPU{cpu_num}: {e}"
 
@@ -205,6 +198,8 @@ def _validate_cppc_policy_for_cpu(
 
 def _read_current_boot_kernel_log(preferred_source=None):
     """Return (source, text) for the current boot kernel log."""
+    # TODO DGX-17127: replace this local snapshot helper with the shared
+    # scoped kernel-log helper after that utility lands in GreenLiT.
     sources = [preferred_source] if preferred_source else ["journalctl", "dmesg"]
 
     for source in sources:

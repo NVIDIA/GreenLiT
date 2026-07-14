@@ -173,36 +173,34 @@ class TestCpuFreqStress(GLTTestBase):
         self.assertEqual(cpu, 2)
         self.assertEqual(reason, "")
 
-    def test_validate_cppc_policy_for_cpu_accepts_recreated_policy(self):
-        """A recreated policy must use cppc_cpufreq and expose positive frequencies."""
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    def test_validate_cppc_policy_for_cpu_accepts_recreated_policy(self, mock_read):
+        """A recreated policy must expose target CPU masks and positive frequencies."""
         values = {
-            "/sys/devices/system/cpu/cpufreq/policy1/scaling_driver": "cppc_cpufreq",
             "/sys/devices/system/cpu/cpufreq/policy1/affected_cpus": "1",
             "/sys/devices/system/cpu/cpufreq/policy1/related_cpus": "1",
             "/sys/devices/system/cpu/cpufreq/policy1/scaling_cur_freq": "3240000",
             "/sys/devices/system/cpu/cpufreq/policy1/cpuinfo_max_freq": "3348000",
         }
+        mock_read.side_effect = values.__getitem__
 
         ok, reason = cpufreq_stress._validate_cppc_policy_for_cpu(
             1,
             path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
-            read_file=values.__getitem__,
         )
 
         self.assertTrue(ok)
         self.assertEqual(reason, "")
 
-    def test_validate_cppc_policy_for_cpu_rejects_wrong_driver(self):
-        """A hotplugged CPU policy must come back under cppc_cpufreq."""
+    def test_is_single_cpu_cppc_policy_rejects_wrong_driver(self):
+        """The hotplug candidate must use cppc_cpufreq before selection."""
         values = {
             "/sys/devices/system/cpu/cpufreq/policy1/scaling_driver": "acpi-cpufreq",
             "/sys/devices/system/cpu/cpufreq/policy1/affected_cpus": "1",
             "/sys/devices/system/cpu/cpufreq/policy1/related_cpus": "1",
-            "/sys/devices/system/cpu/cpufreq/policy1/scaling_cur_freq": "3240000",
-            "/sys/devices/system/cpu/cpufreq/policy1/cpuinfo_max_freq": "3348000",
         }
 
-        ok, reason = cpufreq_stress._validate_cppc_policy_for_cpu(
+        ok, reason = cpufreq_stress._is_single_cpu_cppc_policy(
             1,
             path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
             read_file=values.__getitem__,
@@ -429,11 +427,12 @@ class TestCpuFreqStress(GLTTestBase):
             "/sys/devices/system/cpu/cpufreq/policy1/cpuinfo_max_freq": "3348000",
         }
 
-        ok, reason = cpufreq_stress._validate_cppc_policy_for_cpu(
-            1,
-            path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
-            read_file=values.__getitem__,
-        )
+        with self.mock.patch.object(
+                cpufreq_stress.glt_utils, "read_sysfs_value", side_effect=values.__getitem__):
+            ok, reason = cpufreq_stress._validate_cppc_policy_for_cpu(
+                1,
+                path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
+            )
 
         self.assertFalse(ok)
         self.assertIn("affected_cpus is not CPU1", reason)
