@@ -526,12 +526,12 @@ class TestCpuFreqStress(GLTTestBase):
         self.assertIn("offline failed", str(ctx.exception))
 
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.subprocess.run")
-    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.is_cli_available")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.shutil.which")
     def test_count_kernel_log_occurrences_does_not_fallback_from_preferred_source(
-        self, mock_is_cli, mock_run
+        self, mock_which, mock_run
     ):
         """Before/after kernel-log counts must use the same source."""
-        mock_is_cli.return_value = True
+        mock_which.return_value = "/usr/bin/journalctl"
         mock_run.return_value = self.mock.Mock(returncode=1, stdout="")
 
         with self.assertRaises(OSError):
@@ -541,7 +541,7 @@ class TestCpuFreqStress(GLTTestBase):
             )
 
         mock_run.assert_called_once_with(
-            ["journalctl", "-b0", "-k"],
+            ["/usr/bin/journalctl", "-b0", "-k"],
             capture_output=True,
             text=True,
             check=False,

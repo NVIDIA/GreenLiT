@@ -22,6 +22,7 @@ import os
 import platform
 import re
 import signal
+import shutil
 import subprocess
 import time
 
@@ -206,15 +207,19 @@ def _read_current_boot_kernel_log(preferred_source=None):
     sources = [preferred_source] if preferred_source else ["journalctl", "dmesg"]
 
     for source in sources:
-        if source == "journalctl" and glt_utils.is_cli_available("journalctl"):
-            result = subprocess.run(["journalctl", "-b0", "-k"],
-                                    capture_output=True, text=True, check=False)
-            if result.returncode == 0:
-                return source, result.stdout
-        if source == "dmesg" and glt_utils.is_cli_available("dmesg"):
-            result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False)
-            if result.returncode == 0:
-                return source, result.stdout
+        if source == "journalctl":
+            journalctl_path = shutil.which("journalctl")
+            if journalctl_path:
+                result = subprocess.run([journalctl_path, "-b0", "-k"],
+                                        capture_output=True, text=True, check=False)
+                if result.returncode == 0:
+                    return source, result.stdout
+        if source == "dmesg":
+            dmesg_path = shutil.which("dmesg")
+            if dmesg_path:
+                result = subprocess.run([dmesg_path], capture_output=True, text=True, check=False)
+                if result.returncode == 0:
+                    return source, result.stdout
 
     raise OSError("Cannot read current boot kernel log via journalctl or dmesg.")
 
