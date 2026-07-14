@@ -1,7 +1,25 @@
 version: 1
 references:
-  - id: linux-mainline
+  linux-mainline:
     remote: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
-    branch: master
-    required: true
-    purpose: Upstream Linux implementation and ABI
+    ref: master
+    purpose: Canonical upstream Linux implementation and commit history.
+lenses:
+  convention:
+    model: composer-2.5
+    instructions: |
+      Check whether the merge request follows GreenLiT project conventions and
+      the idioms of each changed language. Ground every finding in the reviewed
+      project source and anchor it to a changed line. Do not report generic code
+      review advice, speculative improvements, or issues outside this lens.
+  discriminator:
+    model: grok-4.5
+    applies_to: [src/modules/**]
+    instructions: |
+      Determine whether the proposed live-kernel test discriminates presence of
+      the complete claimed kernel fix. Derive the unfixed and fixed boundary
+      from upstream Linux history, classify every causal implementation commit,
+      and prove whether this exact test exercises each contribution. Require a
+      non-vacuity condition. Report insufficient evidence instead of inventing
+      a boundary, and anchor every actionable finding to a changed GreenLiT line.
+    references: [linux-mainline]
