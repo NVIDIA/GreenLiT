@@ -16,6 +16,7 @@
 """
 Python script to test CPU frequency under stress.
 """
+# pylint: disable=too-many-lines
 import glob
 import os
 import platform
@@ -60,6 +61,11 @@ HIGH_PERF_CPU_FREQ_MHZ = 1000
 # Applies to platforms using the cppc_cpufreq driver.
 SCALING_FREQ_MIN_PERCENT = 70
 CPPC_PERF_LIMITED_CLEAR_MASK = "0x3"
+CPU_SYSFS_ROOT = "/sys/devices/system/cpu"
+CPU_HOTPLUG_OFFLINE_SETTLE_SECS = 2
+CPU_HOTPLUG_ONLINE_SETTLE_SECS = 3
+CPU_HOTPLUG_POLICY_TIMEOUT_SECS = 15
+CPU_HOTPLUG_POLICY_POLL_SECS = 1
 
 CPUFREQ_ONLINE_GET_FAILED_MSG = "cpufreq: cpufreq_online: ->get() failed"
 
@@ -77,9 +83,173 @@ def _cpu_cpufreq_glob(filename):
     return glob.glob(f"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/{filename}")
 
 
-def _is_cpu_online(cpu_num, logger=None):
-    """Return whether the CPU is online, treating absent cpu0 online files as online."""
-    online_path = f"/sys/devices/system/cpu/cpu{cpu_num}/online"
+def _parse_cpu_mask(mask_text):
+    """Parse a Linux CPU mask such as '0-3,8' into a set of CPU numbers."""
+    cpus = set()
+    mask_text = mask_text.strip()
+    if not mask_text:
+        return cpus
+
+    for part in mask_text.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" not in part:
+            cpus.add(int(part))
+            continue
+
+        start_text, end_text = part.split("-", 1)
+        start = int(start_text)
+        end = int(end_text)
+        if end < start:
+            raise ValueError(f"Invalid CPU range: {part}")
+        cpus.update(range(start, end + 1))
+    return cpus
+
+
+def _get_cpufreq_policy_dir(cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir):
+    """Return the cpufreq policy directory for a CPU."""
+    policy_dir = os.path.join(cpu_root, "cpufreq", f"policy{cpu_num}")
+    if path_exists(policy_dir):
+        return policy_dir
+
+    cpu_dir = os.path.join(cpu_root, f"cpu{cpu_num}", "cpufreq")
+    if path_exists(cpu_dir):
+        return cpu_dir
+
+    return policy_dir
+
+
+def _is_single_cpu_cppc_policy(
+        cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir,
+        read_file=glt_utils.read_sysfs_value):
+    """Return whether CPU hotplug can prove policy teardown/recreation."""
+    policy_dir = _get_cpufreq_policy_dir(cpu_num, cpu_root, path_exists)
+    if not path_exists(policy_dir):
+        return False, f"cpufreq policy directory missing for CPU{cpu_num}: {policy_dir}"
+    try:
+        driver = read_file(os.path.join(policy_dir, "scaling_driver")).strip()
+        affected_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "affected_cpus")))
+        related_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "related_cpus")))
+    except (IOError, OSError, ValueError, KeyError) as e:
+        return False, f"Cannot inspect {policy_dir}: {e}"
+
+    if driver != "cppc_cpufreq":
+        return False, f"{policy_dir} uses {driver}, expected cppc_cpufreq"
+    if affected_cpus != {cpu_num} or related_cpus != {cpu_num}:
+        return False, (
+            f"{policy_dir} is shared (affected={sorted(affected_cpus)}, "
+            f"related={sorted(related_cpus)}); cannot prove policy recreation."
+        )
+    return True, ""
+
+
+def _select_hotplug_cpu(
+        online_cpus, cpu_root=CPU_SYSFS_ROOT, is_writable=os.access,
+        path_exists=os.path.isdir, read_file=glt_utils.read_sysfs_value):
+    """Return a safe non-CPU0 online CPU with a writable hotplug control."""
+    last_reason = "No non-CPU0 online CPU has a writable hotplug control."
+    for cpu_num in sorted(online_cpus):
+        if cpu_num == 0:
+            continue
+        online_path = os.path.join(cpu_root, f"cpu{cpu_num}", "online")
+        if not is_writable(online_path, os.W_OK):
+            continue
+        ok, reason = _is_single_cpu_cppc_policy(
+            cpu_num, cpu_root=cpu_root, path_exists=path_exists, read_file=read_file
+        )
+        if ok:
+            return cpu_num, ""
+        last_reason = reason
+    return None, last_reason
+
+
+def _read_positive_policy_int(policy_dir, filename, read_file):
+    path = os.path.join(policy_dir, filename)
+    value = read_file(path).strip()
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError(f"{path} is not positive: {parsed}")
+    return parsed
+
+
+def _validate_cppc_policy_for_cpu(
+        cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir,
+        read_file=glt_utils.read_sysfs_value):
+    """Validate a CPU has a recreated cppc_cpufreq policy with positive frequencies."""
+    policy_dir = _get_cpufreq_policy_dir(cpu_num, cpu_root, path_exists)
+    if not path_exists(policy_dir):
+        return False, f"cpufreq policy directory missing for CPU{cpu_num}: {policy_dir}"
+
+    try:
+        driver = read_file(os.path.join(policy_dir, "scaling_driver")).strip()
+        if driver != "cppc_cpufreq":
+            return False, f"{policy_dir} uses {driver}, expected cppc_cpufreq"
+
+        affected_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "affected_cpus")))
+        related_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "related_cpus")))
+        if affected_cpus != {cpu_num}:
+            return False, f"{policy_dir}/affected_cpus is not CPU{cpu_num}: {sorted(affected_cpus)}"
+        if related_cpus != {cpu_num}:
+            return False, f"{policy_dir}/related_cpus is not CPU{cpu_num}: {sorted(related_cpus)}"
+
+        _read_positive_policy_int(policy_dir, "scaling_cur_freq", read_file)
+        _read_positive_policy_int(policy_dir, "cpuinfo_max_freq", read_file)
+    except (IOError, OSError, ValueError, KeyError) as e:
+        return False, f"Cannot validate {policy_dir} for CPU{cpu_num}: {e}"
+
+    return True, ""
+
+
+def _read_current_boot_kernel_log(preferred_source=None):
+    """Return (source, text) for the current boot kernel log."""
+    sources = [preferred_source] if preferred_source else ["journalctl", "dmesg"]
+
+    for source in sources:
+        if source == "journalctl" and glt_utils.is_cli_available("journalctl"):
+            result = subprocess.run(["journalctl", "-b0", "-k"],
+                                    capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return source, result.stdout
+        if source == "dmesg" and glt_utils.is_cli_available("dmesg"):
+            result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False)
+            if result.returncode == 0:
+                return source, result.stdout
+
+    raise OSError("Cannot read current boot kernel log via journalctl or dmesg.")
+
+
+def _count_kernel_log_occurrences(msg, preferred_source=None):
+    """Return (source, count) for current-boot kernel log occurrences of msg."""
+    source, output = _read_current_boot_kernel_log(preferred_source)
+    return source, output.count(msg)
+
+
+def _wait_for_cppc_policy_for_cpu(
+        cpu_num, timeout_secs=CPU_HOTPLUG_POLICY_TIMEOUT_SECS,
+        poll_secs=CPU_HOTPLUG_POLICY_POLL_SECS):
+    """Wait until a CPU has a valid recreated cppc_cpufreq policy."""
+    deadline = time.monotonic() + timeout_secs
+    last_reason = ""
+    while True:
+        ok, reason = _validate_cppc_policy_for_cpu(cpu_num)
+        if ok:
+            return True, ""
+        last_reason = reason
+        if time.monotonic() >= deadline:
+            return False, last_reason
+        time.sleep(poll_secs)
+
+
+def _is_cppc_not_applicable(reason):
+    """Return whether a cppc prerequisite failure means this test should skip."""
+    return reason.startswith("cpufreq sysfs not available") or \
+        reason.startswith("cppc_cpufreq not active")
+
+
+def _is_cpu_online(cpu_num, logger=None, unreadable_is_online=True):
+    """Return whether a CPU is online, treating absent cpu0 online files as online."""
+    online_path = os.path.join(CPU_SYSFS_ROOT, f"cpu{cpu_num}", "online")
     if not os.path.exists(online_path):
         return True
     try:
@@ -88,7 +258,7 @@ def _is_cpu_online(cpu_num, logger=None):
     except (IOError, OSError):
         if logger:
             logger.warning("Cannot read online state for cpu%d", cpu_num)
-        return True
+        return unreadable_is_online
 
 
 def _read_sysfs_int_value(path):
@@ -526,6 +696,106 @@ def test_cppc_cpufreq_online_get_did_not_fail(_, logger):
         )
 
     logger.info("PASS: cppc_cpufreq online get check completed successfully")
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
+def test_cppc_cpufreq_policy_after_cpu_hotplug(_, logger):
+    """
+    Verify cppc_cpufreq policy is recreated after CPU hotplug.
+
+    JIRA: DGX-17150
+    PATCH: https://git.kernel.org/torvalds/c/c47195631960
+    """
+    if platform.machine() not in ("aarch64", "arm64"):
+        GLTCore.GLTTestResult.skip("cppc_cpufreq hotplug policy check is ARM64-only.")
+
+    ok, reason = _validate_cppc_prerequisites()
+    if not ok:
+        if _is_cppc_not_applicable(reason):
+            GLTCore.GLTTestResult.skip(reason)
+        GLTCore.GLTTestResult.fail(reason)
+
+    try:
+        online_cpus = _parse_cpu_mask(
+            glt_utils.read_sysfs_value(os.path.join(CPU_SYSFS_ROOT, "online"))
+        )
+    except (IOError, OSError, ValueError) as e:
+        GLTCore.GLTTestResult.fail(f"Cannot read online CPU topology: {e}")
+
+    cpu_num, reason = _select_hotplug_cpu(online_cpus)
+    if cpu_num is None:
+        GLTCore.GLTTestResult.skip(reason)
+
+    ok, reason = _validate_cppc_policy_for_cpu(cpu_num)
+    if not ok:
+        GLTCore.GLTTestResult.fail(reason)
+
+    online_path = os.path.join(CPU_SYSFS_ROOT, f"cpu{cpu_num}", "online")
+    try:
+        log_source, online_get_failures_before = _count_kernel_log_occurrences(
+            CPUFREQ_ONLINE_GET_FAILED_MSG
+        )
+    except OSError as e:
+        GLTCore.GLTTestResult.fail(f"Cannot inspect kernel log before hotplug: {e}")
+
+    logger.info("Cycling CPU%d offline/online for cppc_cpufreq policy validation", cpu_num)
+    restore_reason = ""
+    failure_reason = ""
+    try:
+        glt_utils.write_sysfs_value(online_path, "0")
+        time.sleep(CPU_HOTPLUG_OFFLINE_SETTLE_SECS)
+        if _is_cpu_online(cpu_num, logger=logger):
+            GLTCore.GLTTestResult.fail(f"CPU{cpu_num} remained online after hotplug offline.")
+
+        glt_utils.write_sysfs_value(online_path, "1")
+        time.sleep(CPU_HOTPLUG_ONLINE_SETTLE_SECS)
+        if not _is_cpu_online(cpu_num, logger=logger, unreadable_is_online=False):
+            GLTCore.GLTTestResult.fail(f"CPU{cpu_num} did not come back online after hotplug.")
+
+        ok, reason = _wait_for_cppc_policy_for_cpu(cpu_num)
+        if not ok:
+            GLTCore.GLTTestResult.fail(reason)
+
+        try:
+            _, online_get_failures_after = _count_kernel_log_occurrences(
+                CPUFREQ_ONLINE_GET_FAILED_MSG, preferred_source=log_source
+            )
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(f"Cannot inspect kernel log after hotplug: {e}")
+        if online_get_failures_after > online_get_failures_before:
+            GLTCore.GLTTestResult.fail(
+                f"Found cppc_cpufreq online failure after CPU hotplug: "
+                f"{CPUFREQ_ONLINE_GET_FAILED_MSG}. Apply patch "
+                "c47195631960 (cppc_cpufreq: Use desired perf if feedback ctrs are 0 or unchanged)."
+            )
+        if online_get_failures_before:
+            logger.warning(
+                "Current boot log already contained %d occurrence(s) of %s before CPU hotplug.",
+                online_get_failures_before,
+                CPUFREQ_ONLINE_GET_FAILED_MSG,
+            )
+    except (IOError, OSError) as e:
+        failure_reason = f"Cannot hotplug CPU{cpu_num}: {e}"
+    except GLTCore.GLTTestFail as e:
+        failure_reason = str(e)
+    finally:
+        try:
+            glt_utils.write_sysfs_value(online_path, "1")
+        except (IOError, OSError) as e:
+            restore_reason = f"Failed to restore CPU{cpu_num} online: {e}"
+            logger.warning(restore_reason)
+
+    if failure_reason and restore_reason:
+        GLTCore.GLTTestResult.fail(f"{failure_reason}; additionally, {restore_reason}")
+    if failure_reason:
+        GLTCore.GLTTestResult.fail(failure_reason)
+    if restore_reason:
+        GLTCore.GLTTestResult.fail(restore_reason)
+
+    logger.info("PASS: CPU%d cppc_cpufreq policy recreated after hotplug", cpu_num)
 
 
 @GLTCore.GLTTestAttr()
