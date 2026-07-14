@@ -67,6 +67,7 @@ CPU_HOTPLUG_OFFLINE_SETTLE_SECS = 2
 CPU_HOTPLUG_ONLINE_SETTLE_SECS = 3
 CPU_HOTPLUG_POLICY_TIMEOUT_SECS = 15
 CPU_HOTPLUG_POLICY_POLL_SECS = 1
+KERNEL_LOG_COMMAND_TIMEOUT_SECS = 30
 
 CPUFREQ_ONLINE_GET_FAILED_MSG = "cpufreq: cpufreq_online: ->get() failed"
 
@@ -210,14 +211,24 @@ def _read_current_boot_kernel_log(preferred_source=None):
         if source == "journalctl":
             journalctl_path = shutil.which("journalctl")
             if journalctl_path:
-                result = subprocess.run([journalctl_path, "-b0", "-k"],
-                                        capture_output=True, text=True, check=False)
+                try:
+                    result = subprocess.run(
+                        [journalctl_path, "-b0", "-k"],
+                        capture_output=True, text=True, check=False,
+                        timeout=KERNEL_LOG_COMMAND_TIMEOUT_SECS)
+                except subprocess.TimeoutExpired:
+                    continue
                 if result.returncode == 0:
                     return source, result.stdout
         if source == "dmesg":
             dmesg_path = shutil.which("dmesg")
             if dmesg_path:
-                result = subprocess.run([dmesg_path], capture_output=True, text=True, check=False)
+                try:
+                    result = subprocess.run(
+                        [dmesg_path], capture_output=True, text=True, check=False,
+                        timeout=KERNEL_LOG_COMMAND_TIMEOUT_SECS)
+                except subprocess.TimeoutExpired:
+                    continue
                 if result.returncode == 0:
                     return source, result.stdout
 

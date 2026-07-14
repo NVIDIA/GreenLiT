@@ -390,6 +390,35 @@ class TestCpuFreqStress(GLTTestBase):
 
         self.assertIn("remained online", str(ctx.exception))
 
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.sleep")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.platform.machine")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.write_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._count_kernel_log_occurrences")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._is_cpu_online")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._select_hotplug_cpu")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_policy_for_cpu")
+    def test_hotplug_policy_test_fails_when_cpu_does_not_come_back_online(
+        self, mock_validate_policy, mock_select_cpu, mock_prereq, mock_is_online,
+        mock_log_count, mock_read, _mock_write, mock_machine, _mock_sleep
+    ):
+        """The test must prove the CPU returned online before checking policy state."""
+        mock_machine.return_value = "aarch64"
+        mock_prereq.return_value = (True, None)
+        mock_read.return_value = "0-2"
+        mock_select_cpu.return_value = (1, "")
+        mock_validate_policy.return_value = (True, "")
+        mock_is_online.side_effect = [False, False]
+        mock_log_count.return_value = ("journalctl", 0)
+
+        with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+            cpufreq_stress.test_cppc_cpufreq_policy_after_cpu_hotplug(
+                None, self.mock_logger
+            )
+
+        self.assertIn("did not come back online", str(ctx.exception))
+
     def test_validate_cppc_policy_for_cpu_rejects_shared_policy(self):
         """Post-hotplug validation must still prove a single-CPU policy."""
         values = {
@@ -545,4 +574,5 @@ class TestCpuFreqStress(GLTTestBase):
             capture_output=True,
             text=True,
             check=False,
+            timeout=cpufreq_stress.KERNEL_LOG_COMMAND_TIMEOUT_SECS,
         )
