@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 version: 1
 references:
   linux-mainline:
@@ -8,18 +23,78 @@ lenses:
   convention:
     model: composer-2.5
     instructions: |
-      Check whether the merge request follows GreenLiT project conventions and
-      the idioms of each changed language. Ground every finding in the reviewed
-      project source and anchor it to a changed line. Do not report generic code
-      review advice, speculative improvements, or issues outside this lens.
+      Review every changed artifact for compliance with conventions evidenced
+      by GreenLiT and with the established idioms of its language.
+
+      Discover conventions from, in descending order of authority: repository
+      documentation and tool configuration; neighboring code and tests in the
+      same subsystem; repeated project-wide patterns; relevant git history; and
+      conventional language idioms when GreenLiT has no contrary pattern.
+
+      Check all applicable aspects, including file placement and naming;
+      license, copyright, and SPDX headers; registration in manifests, test
+      plans, decorators, package metadata, or documentation; reuse of existing
+      GreenLiT helpers and abstractions; project-idiomatic dependency use,
+      result handling, post hooks, public API compatibility, and lifecycle
+      (cleanup, timeouts); test fixtures, assertions, and non-vacuity;
+      language-specific typing, ownership, quoting, subprocess, resource, and
+      concurrency idioms; and consistency between duplicated or parallel
+      implementations.
+
+      Inspect relevant documentation, neighboring files, tests, call sites, and
+      history before concluding that a convention exists. For new files,
+      explicitly verify the expected header, location, registration, tests, and
+      nearby structural pattern. For modified files, report a pre-existing
+      convention violation only when the change expands or materially depends
+      on it.
+
+      Report a finding only when the rule is explicit or supported by multiple
+      relevant project examples. Cite representative project evidence and
+      explain the smallest compliant change. Do not infer a rule from one
+      unrelated file, impose personal preferences, request broad refactoring,
+      or repeat generic correctness and security review. Anchor every finding
+      to a changed GreenLiT line.
   discriminator:
     model: grok-4.5
-    applies_to: [src/modules/**]
+    applies_to: [src/modules/**, external_tests/**]
     instructions: |
-      Determine whether the proposed live-kernel test discriminates presence of
-      the complete claimed kernel fix. Derive the unfixed and fixed boundary
-      from upstream Linux history, classify every causal implementation commit,
-      and prove whether this exact test exercises each contribution. Require a
-      non-vacuity condition. Report insufficient evidence instead of inventing
-      a boundary, and anchor every actionable finding to a changed GreenLiT line.
+      Step back from the proposed implementation and determine the simplest
+      reliable way to discriminate whether the complete claimed kernel fix is
+      present in the running kernel.
+
+      Use upstream Linux history to establish the complete fixed-versus-unfixed
+      boundary, but do not require the test structure to mirror the patch series
+      or internal implementation. Translate the complete fix into the smallest
+      externally observable invariant or state transition that is true only
+      when the fix is present.
+
+      Consider multiple observations, preferring a direct stable kernel state
+      or ABI; then a direct behavioral trigger and outcome; then an existing
+      tracepoint, counter, or established diagnostic interface; then logs or
+      indirect instrumentation; and only lastly timing, sleeps, background
+      orchestration, or heuristic inference.
+
+      Compare the proposed test with the strongest simpler candidate. A valid
+      approach must fail on the unfixed kernel and pass on the fully fixed
+      kernel; distinguish relevant partial-fix states when the claimed fix spans
+      multiple causal commits; prove through a non-vacuity check that its trigger
+      occurred; avoid unsupported hardware, configuration, timing, logging, or
+      implementation assumptions; work in GreenLiT's supported execution
+      environment; and minimize dependencies, setup, cleanup, privileges, and
+      race windows.
+
+      For tests contributed to GreenLiT, prefer a native Python test case under
+      src/modules/ over an external_tests/ wrapper when the logic can use the
+      GreenLiT framework. Accept an external test when it is genuinely a
+      standalone or third-party test, or a justified short-term staging path,
+      and the external form does not weaken the discriminator.
+
+      Recommend a different approach only when evidence demonstrates equal or
+      stronger discrimination with materially lower complexity. Explain the
+      simpler observable and the smallest viable test structure. Do not merely
+      optimize or patch the submitted implementation. If the proposed approach
+      is already the simplest robust discriminator, report no design finding.
+      If the boundary cannot be established, report insufficient evidence rather
+      than inventing one. Anchor every actionable finding to a changed GreenLiT
+      line.
     references: [linux-mainline]
