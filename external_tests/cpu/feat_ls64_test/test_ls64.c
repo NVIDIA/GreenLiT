@@ -8,6 +8,7 @@
  * Usage:
  *   ./test_ls64 normal_memory  - Test LD64B/ST64B on normal memory
  *   ./test_ls64 alignment      - Test alignment requirements
+ *   ./test_ls64 kvm            - Test the KVM LS64 userspace exit
  *
  * Exit codes:
  *   0 - Test completed successfully (no signal)
@@ -17,12 +18,17 @@
  */
 
 #define _GNU_SOURCE
+#include <fcntl.h>
+#include <linux/kvm.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <signal.h>
 #include <sys/auxv.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 /* HWCAP3 definitions */
@@ -33,6 +39,19 @@
 #ifndef HWCAP3_LS64
 #define HWCAP3_LS64 (1UL << 3)
 #endif
+
+#ifndef KVM_EXIT_ARM_LDST64B
+#define KVM_EXIT_ARM_LDST64B 42
+#endif
+
+#define GUEST_CODE_GPA 0x100000ULL
+#define GUEST_MMIO_GPA 0x200000ULL
+#define LD64B_X0_X8 0xf83fd100U
+#define KVM_LS64_PATCHES "f174a9ffcd48 and 151b92c92a45"
+
+#define ARM64_CORE_REG(name) \
+	(KVM_REG_ARM64 | KVM_REG_SIZE_U64 | KVM_REG_ARM_CORE | \
+	 KVM_REG_ARM_CORE_REG(name))
 
 /* Test data structure - must be 64-byte aligned for LD64B/ST64B */
 struct ls64_data {
@@ -59,6 +78,16 @@ static void sigill_handler(int sig __attribute__((unused)),
 			   void *context __attribute__((unused)))
 {
 	exit(3);
+}
+
+static void sigalrm_handler(int sig __attribute__((unused)))
+{
+	static const char message[] = "KVM_RUN timed out\n";
+	ssize_t ignored;
+
+	ignored = write(STDERR_FILENO, message, sizeof(message) - 1);
+	(void)ignored;
+	_exit(1);
 }
 
 /*
@@ -146,6 +175,160 @@ static void do_st64b(void *dest, const struct ls64_data *src)
 		     : "memory");
 }
 
+static int set_kvm_reg(int vcpu_fd, uint64_t id, uint64_t value)
+{
+	struct kvm_one_reg reg = {
+		.id = id,
+		.addr = (uint64_t)&value,
+	};
+
+	return ioctl(vcpu_fd, KVM_SET_ONE_REG, &reg);
+}
+
+/*
+ * Run one LD64B in an EL1 guest against an IPA outside all memslots.
+ * A kernel with the KVM LS64 support must return KVM_EXIT_ARM_LDST64B.
+ */
+static int test_ls64_kvm_exit(void)
+{
+	struct kvm_userspace_memory_region region = {
+		.slot = 0,
+		.guest_phys_addr = GUEST_CODE_GPA,
+	};
+	struct kvm_vcpu_init init = {0};
+	struct kvm_run *run;
+	long page_size;
+	int kvm_fd;
+	int vm_fd;
+	int vcpu_fd;
+	int run_size;
+	int run_result;
+	void *guest_mem;
+	int result = EXIT_FAILURE;
+
+	page_size = sysconf(_SC_PAGESIZE);
+	if (page_size <= 0) {
+		perror("sysconf(_SC_PAGESIZE)");
+		return EXIT_FAILURE;
+	}
+
+	kvm_fd = open("/dev/kvm", O_RDWR | O_CLOEXEC);
+	if (kvm_fd < 0) {
+		perror("open(/dev/kvm)");
+		return EXIT_FAILURE;
+	}
+
+	if (ioctl(kvm_fd, KVM_GET_API_VERSION, 0) != KVM_API_VERSION) {
+		fprintf(stderr, "Unexpected KVM API version\n");
+		goto close_kvm;
+	}
+
+	vm_fd = ioctl(kvm_fd, KVM_CREATE_VM, 0);
+	if (vm_fd < 0) {
+		perror("KVM_CREATE_VM");
+		goto close_kvm;
+	}
+
+	guest_mem = mmap(NULL, page_size, PROT_READ | PROT_WRITE,
+			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (guest_mem == MAP_FAILED) {
+		perror("mmap(guest memory)");
+		goto close_vm;
+	}
+
+	*(uint32_t *)guest_mem = LD64B_X0_X8;
+	__builtin___clear_cache(guest_mem, (char *)guest_mem + sizeof(uint32_t));
+	region.memory_size = page_size;
+	region.userspace_addr = (uint64_t)guest_mem;
+	if (ioctl(vm_fd, KVM_SET_USER_MEMORY_REGION, &region) < 0) {
+		perror("KVM_SET_USER_MEMORY_REGION");
+		goto unmap_guest;
+	}
+
+	vcpu_fd = ioctl(vm_fd, KVM_CREATE_VCPU, 0);
+	if (vcpu_fd < 0) {
+		perror("KVM_CREATE_VCPU");
+		goto unmap_guest;
+	}
+
+	if (ioctl(vm_fd, KVM_ARM_PREFERRED_TARGET, &init) < 0) {
+		perror("KVM_ARM_PREFERRED_TARGET");
+		goto close_vcpu;
+	}
+	if (ioctl(vcpu_fd, KVM_ARM_VCPU_INIT, &init) < 0) {
+		perror("KVM_ARM_VCPU_INIT");
+		goto close_vcpu;
+	}
+
+	run_size = ioctl(kvm_fd, KVM_GET_VCPU_MMAP_SIZE, 0);
+	if (run_size < 0) {
+		perror("KVM_GET_VCPU_MMAP_SIZE");
+		goto close_vcpu;
+	}
+	if (run_size < (int)sizeof(*run)) {
+		fprintf(stderr, "Invalid KVM vCPU mmap size: %d\n", run_size);
+		goto close_vcpu;
+	}
+	run = mmap(NULL, run_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+		   vcpu_fd, 0);
+	if (run == MAP_FAILED) {
+		perror("mmap(kvm_run)");
+		goto close_vcpu;
+	}
+
+	if (set_kvm_reg(vcpu_fd, ARM64_CORE_REG(regs.pc), GUEST_CODE_GPA) < 0) {
+		perror("KVM_SET_ONE_REG(pc)");
+		goto unmap_run;
+	}
+	if (set_kvm_reg(vcpu_fd, ARM64_CORE_REG(regs.regs[8]),
+			GUEST_MMIO_GPA) < 0) {
+		perror("KVM_SET_ONE_REG(x8)");
+		goto unmap_run;
+	}
+
+	if (signal(SIGALRM, sigalrm_handler) == SIG_ERR) {
+		perror("signal(SIGALRM)");
+		goto unmap_run;
+	}
+	alarm(5);
+	run_result = ioctl(vcpu_fd, KVM_RUN, 0);
+	alarm(0);
+	if (run_result < 0) {
+		perror("KVM_RUN");
+		goto unmap_run;
+	}
+
+	printf("KVM exit reason: %u\n", run->exit_reason);
+	if (run->exit_reason != KVM_EXIT_ARM_LDST64B) {
+		fprintf(stderr,
+			"Expected KVM_EXIT_ARM_LDST64B (%d); check kernel patches "
+			KVM_LS64_PATCHES "\n",
+			KVM_EXIT_ARM_LDST64B);
+		goto unmap_run;
+	}
+
+	printf("KVM LS64 fault IPA: 0x%llx\n",
+	       (unsigned long long)run->arm_nisv.fault_ipa);
+	if (run->arm_nisv.fault_ipa != GUEST_MMIO_GPA) {
+		fprintf(stderr, "Unexpected LS64 fault IPA\n");
+		goto unmap_run;
+	}
+
+	result = EXIT_SUCCESS;
+
+unmap_run:
+	munmap(run, run_size);
+close_vcpu:
+	close(vcpu_fd);
+unmap_guest:
+	munmap(guest_mem, page_size);
+close_vm:
+	close(vm_fd);
+close_kvm:
+	close(kvm_fd);
+	return result;
+}
+
 /*
  * Test LD64B/ST64B on normal memory
  * This should trigger SIGBUS unless FEAT_LS64_WB is supported
@@ -214,7 +397,7 @@ static void check_hwcap3_ls64(void)
 int main(int argc, char **argv)
 {
 	if (argc < 2) {
-		fprintf(stderr, "Usage: %s <normal_memory|alignment>\n", argv[0]);
+		fprintf(stderr, "Usage: %s <normal_memory|alignment|kvm>\n", argv[0]);
 		exit(1);
 	}
 
@@ -229,9 +412,11 @@ int main(int argc, char **argv)
 		test_ls64_on_normal_memory();
 	} else if (!strcmp(argv[1], "alignment")) {
 		test_ls64_alignment();
+	} else if (!strcmp(argv[1], "kvm")) {
+		return test_ls64_kvm_exit();
 	} else {
 		fprintf(stderr, "Unknown test: %s\n", argv[1]);
-		fprintf(stderr, "Usage: %s <normal_memory|alignment>\n", argv[0]);
+		fprintf(stderr, "Usage: %s <normal_memory|alignment|kvm>\n", argv[0]);
 		exit(1);
 	}
 

@@ -50,6 +50,20 @@ build_test() {
     log_info "Build successful"
 }
 
+run_kvm_test() {
+    local test_binary="$1"
+    local kvm_output=""
+    local kvm_rc=0
+
+    log_info "Running KVM LS64 guest test..."
+    kvm_output=$("$test_binary" kvm 2>&1) || kvm_rc=$?
+    echo "$kvm_output"
+    if [ "$kvm_rc" -ne 0 ]; then
+        log_fail "KVM LS64 guest test failed (exit code: $kvm_rc); check kernel patches f174a9ffcd48 and 151b92c92a45"
+    fi
+    log_info "KVM LS64 guest test observed KVM_EXIT_ARM_LDST64B"
+}
+
 main() {
     log_info "ARM64 FEAT_LS64 Test"
     check_arm64_platform
@@ -94,13 +108,19 @@ main() {
     elif [ $normal_memory_test_rc -eq 2 ]; then
         # SIGBUS on normal memory - expected behavior
         if [ -n "$hwcap3_ls64_set" ]; then
-            log_pass "LS64 feature support is functional (HWCAP3_LS64 set, SIGBUS on normal memory as expected)"
+            run_kvm_test "${tmpdir}/test_ls64"
+            log_pass "LS64 userspace and KVM support are functional"
         else
-            log_pass "LS64 instructions work but HWCAP3_LS64 not set (kernel detection issue)"
+            log_fail "LS64 instructions work but HWCAP3_LS64 is not set (kernel detection issue)"
         fi
     elif [ $normal_memory_test_rc -eq 0 ]; then
         # No signal - unexpected, might have FEAT_LS64_WB
-        log_pass "LS64 instructions executed without signal (FEAT_LS64_WB may be supported)"
+        if [ -n "$hwcap3_ls64_set" ]; then
+            run_kvm_test "${tmpdir}/test_ls64"
+            log_pass "LS64 userspace and KVM support are functional (FEAT_LS64_WB may be supported)"
+        else
+            log_fail "LS64 instructions executed without signal but HWCAP3_LS64 is not set"
+        fi
     elif [ $normal_memory_test_rc -eq 1 ]; then
         # Generic error
         log_fail "Test program error (exit code: 1)"
