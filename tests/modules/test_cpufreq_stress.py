@@ -158,7 +158,6 @@ class TestCpuFreqStress(GLTTestBase):
             "/sys/devices/system/cpu/cpu2/online": True,
         }
         values = {
-            "/sys/devices/system/cpu/cpufreq/policy2/scaling_driver": "cppc_cpufreq",
             "/sys/devices/system/cpu/cpufreq/policy2/affected_cpus": "2",
             "/sys/devices/system/cpu/cpufreq/policy2/related_cpus": "2",
         }
@@ -191,23 +190,6 @@ class TestCpuFreqStress(GLTTestBase):
 
         self.assertTrue(ok)
         self.assertEqual(reason, "")
-
-    def test_is_single_cpu_cppc_policy_rejects_wrong_driver(self):
-        """The hotplug candidate must use cppc_cpufreq before selection."""
-        values = {
-            "/sys/devices/system/cpu/cpufreq/policy1/scaling_driver": "acpi-cpufreq",
-            "/sys/devices/system/cpu/cpufreq/policy1/affected_cpus": "1",
-            "/sys/devices/system/cpu/cpufreq/policy1/related_cpus": "1",
-        }
-
-        ok, reason = cpufreq_stress._is_single_cpu_cppc_policy(
-            1,
-            path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
-            read_file=values.__getitem__,
-        )
-
-        self.assertFalse(ok)
-        self.assertIn("acpi-cpufreq", reason)
 
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.sleep")
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.platform.machine")

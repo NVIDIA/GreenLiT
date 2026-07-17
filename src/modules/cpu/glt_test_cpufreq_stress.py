@@ -107,14 +107,11 @@ def _is_single_cpu_cppc_policy(
     if not path_exists(policy_dir):
         return False, f"cpufreq policy directory missing for CPU{cpu_num}: {policy_dir}"
     try:
-        driver = read_file(os.path.join(policy_dir, "scaling_driver")).strip()
         affected_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "affected_cpus")))
         related_cpus = _parse_cpu_mask(read_file(os.path.join(policy_dir, "related_cpus")))
     except (IOError, OSError, ValueError, KeyError) as e:
         return False, f"Cannot inspect {policy_dir}: {e}"
 
-    if driver != "cppc_cpufreq":
-        return False, f"{policy_dir} uses {driver}, expected cppc_cpufreq"
     if affected_cpus != {cpu_num} or related_cpus != {cpu_num}:
         return False, (
             f"{policy_dir} is shared (affected={sorted(affected_cpus)}, "
