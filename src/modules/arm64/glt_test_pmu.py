@@ -88,8 +88,7 @@ def _format_patch_guidance():
         for name, description in KNOWN_PATCH_SERIES.items()
     ]
     return (
-        "Consider checking whether the kernel is missing the T410 patch "
-        "groups from data/kernel-patches/vera.txt with check-kernel-patches: "
+        "Verify that the kernel includes the required T410 PMU patch groups: "
         + "; ".join(patch_lines)
     )
 

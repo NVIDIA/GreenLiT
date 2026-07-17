@@ -10,8 +10,6 @@ GreenLiT provides automated tests to verify system functionality and stability o
   - [Install](#install)
   - [Secure Boot](#secure-boot)
 - [Basic Usage](#basic-usage)
-  - [Kernel Patch Checker](#kernel-patch-checker-pre-requisite)
-  - [Kernel Configuration Checker](#kernel-configuration-checker-pre-requisite)
   - [Running Tests](#running-tests)
   - [Test Cases](#test-cases)
   - [Test Plans](#test-plans)
@@ -128,96 +126,6 @@ sudo rm -rf /usr/local/share/greenlit/linux
 ```
 
 ## Basic Usage
-
-### Kernel Patch Checker (Pre-requisite)
-
-Before running the test suite, verify that required upstream kernel patches are present in your kernel branch. Run this from within a Linux kernel git repository.
-
-**After installation:**
-```bash
-cd /path/to/linux-source
-check-kernel-patches -b <branch> /usr/share/greenlit/data/kernel-patches/<sha-list.txt>
-```
-
-**Without installation (from repo):**
-```bash
-cd /path/to/linux-source
-python3 <greenlit-repo>/src/scripts/check_kernel_patches.py -b <branch> <sha-list.txt>
-```
-
-**Example:**
-```bash
-# After installation
-check-kernel-patches -b my-kernel-branch /usr/share/greenlit/data/kernel-patches/grace.txt
-
-# Without installation
-python3 ~/greenlit/src/scripts/check_kernel_patches.py -b my-kernel-branch \
-  ~/greenlit/data/kernel-patches/grace.txt ~/greenlit/data/kernel-patches/vera.txt
-
-# Use grace.txt for Grace, grace.txt and vera.txt for Vera
-```
-
-**Options:**
-- `-b, --branch`: Target branch (default: current)
-- `-u, --upstream`: Upstream ref (default: upstream/master)
-
-**Status meanings:**
-- `EXISTS`: Commit found in branch with matching diff
-- `REVIEW`: Commit found but diff differs - needs manual review
-- `ABSENT`: Commit not found in branch (needs backporting)
-- `SERIES`: Shown after EXISTS/REVIEW if patch series has missing members
-
-**Notes in parentheses:**
-| Note | Meaning |
-|------|---------|
-| `(sha)` | Cherry-pick marker references the input SHA |
-| `(sha, no SHA marker)` | Found by title match, no cherry-pick marker |
-| `(sha, different marker SHA)` | Marker references a different upstream SHA |
-| `(sha, SHA not in upstream)` | Marker SHA not in configured upstream |
-
-**Exit code:** Returns count of REVIEW + ABSENT commits (0 = all commits exist)
-
-### Kernel Configuration Checker (Pre-requisite)
-
-After running the patch checker, verify your kernel configuration meets NVIDIA's requirements.
-
-**After installation:**
-```bash
-check-kernel-config -c /boot/config-$(uname -r) /usr/share/greenlit/data/kernel-config/grace.txt
-```
-
-**Without installation (from repo):**
-```bash
-python3 ~/greenlit/src/scripts/check_kernel_config.py -c /boot/config-$(uname -r) <reference.txt>
-```
-
-**Example:**
-```bash
-# After installation - Grace platform
-check-kernel-config -c /boot/config-$(uname -r) /usr/share/greenlit/data/kernel-config/grace.txt
-
-# After installation - Vera platform (extends Grace)
-check-kernel-config -c /boot/config-$(uname -r) \
-  /usr/share/greenlit/data/kernel-config/grace.txt \
-  /usr/share/greenlit/data/kernel-config/vera.txt
-
-# Without installation
-python3 ~/greenlit/src/scripts/check_kernel_config.py -c .config \
-  ~/greenlit/data/kernel-config/grace.txt
-
-# Use grace.txt for Grace, grace.txt and vera.txt for Vera
-```
-
-**Options:**
-- `-c, --config`: Path to kernel config file (e.g., `/boot/config-$(uname -r)` or `.config`)
-- `-v, --verbose`: Show passed configs in addition to failures
-- `<reference-files>`: One or more reference specification files (positional arguments)
-
-**Status meanings:**
-- `[PASS]`: Config meets requirements (shown with `-v`)
-- `[FAIL]`: Config does not meet requirements
-
-**Exit code:** Returns count of failed configs (0 = all configs pass)
 
 ### Running Tests
 
@@ -344,9 +252,9 @@ Test sessions and logs are stored in the `/var/cache/greenlit/` directory with a
 
 ## Recommended workflow
 
-On a **Linux** target system, a typical end-to-end run follows this order. Use one or more `<reference-files>` per platform (Grace: `grace.txt`; Vera: `grace.txt` and `vera.txt`); see the kernel checker sections above.
+On a **Linux** target system, a typical end-to-end run follows this order.
 
-1. **Check the host** — GreenLiT requires Linux for install, kernel checks, and full test execution.
+1. **Check the host** — GreenLiT requires Linux for install and full test execution.
 
    ```bash
    uname -s
@@ -361,32 +269,13 @@ On a **Linux** target system, a typical end-to-end run follows this order. Use o
    sudo ./install.sh
    ```
 
-3. **Verify kernel patches** (optional, when validating a kernel branch) — See [Kernel Patch Checker](#kernel-patch-checker-pre-requisite).
-
-   ```bash
-   cd /path/to/linux-source
-   check-kernel-patches -b <branch> \
-     /usr/share/greenlit/data/kernel-patches/<reference-files>
-   ```
-
-   `<reference-files>` are one or more patch list paths (for example `grace.txt`, or `grace.txt` and `vera.txt` for Vera).
-
-4. **Verify kernel configuration** — See [Kernel Configuration Checker](#kernel-configuration-checker-pre-requisite).
-
-   ```bash
-   check-kernel-config -c /boot/config-$(uname -r) \
-     /usr/share/greenlit/data/kernel-config/<reference-files>
-   ```
-
-   `<reference-files>` are one or more config reference paths (same Grace/Vera pattern as above).
-
-5. **Run tests** — See [Running Tests](#running-tests) and [Test Plans](#test-plans).
+3. **Run tests** — See [Running Tests](#running-tests) and [Test Plans](#test-plans).
 
    ```bash
    sudo glt-test-suite --sanity
    ```
 
-6. **Review results** — See [Test Reports](#test-reports). Session logs are under `/var/cache/greenlit/`.
+4. **Review results** — See [Test Reports](#test-reports). Session logs are under `/var/cache/greenlit/`.
 
 ## Advanced Usage
 

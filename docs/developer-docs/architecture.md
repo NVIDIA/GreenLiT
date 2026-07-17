@@ -7,7 +7,6 @@ Here's a high-level overview of the directory structure:
 ```
 greenlit/
 ├── confs/                  # Test configuration files
-├── data/                   # Test data files
 ├── docs/                   # Documentation
 ├── external_tests/         # Packaged standalone executable tests
 ├── install.sh              # Installation script
@@ -38,7 +37,7 @@ greenlit/
 │   │   ├── system/         # System state and configuration tests
 │   │   ├── tpm/            # TPM tests
 │   │   └── virt/           # Virtualization tests
-│   └── scripts/            # Standalone checker scripts (poetry entry points, e.g. check_kernel_config.py)
+│   └── scripts/            # Python utility modules
 ├── tests                   # Unit tests files
 │   ├── common/             # Unit tests for common helpers
 │   └── modules/            # Unit tests for module test logic
@@ -72,8 +71,6 @@ Use this table when modifying the repository. For how to run the suite on a syst
 | External executable test | `external_tests/` (installed to `/usr/share/greenlit/executing_dir/`) | [user-manual.md](../user-guides/user-manual.md), [writing-test-cases.md](writing-test-cases.md) |
 | Per-test skip or config YAML | `confs/glt-confs.d/` (installed to `/usr/share/greenlit/confs.d/`) | [configuration.md](../user-guides/configuration.md) |
 | Hardware manifest | `confs/hardware-manifest.json` | — |
-| Reference data (patches, kernel config lists, etc.) | `data/` (installed to `/usr/share/greenlit/data/`) | — |
-| Standalone checker entry points (e.g. `check_kernel_config.py`, `check_kernel_patches.py`) | `src/scripts/` | `pyproject.toml` `[tool.poetry.scripts]` |
 | Framework unit test | `tests/` (typically `tests/common/` for helpers or `tests/modules/` for module test logic) | [development-setup.md](development-setup.md), [AGENTS.md](../../AGENTS.md) |
 
 Unit tests under `tests/modules/` validate module test logic with mocks. They do not define

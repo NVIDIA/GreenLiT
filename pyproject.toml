@@ -22,7 +22,6 @@ include = [
     "confs/glt-confs.d/**/*",
     "confs/greenlit.service",
     "confs/greenlit.timer",
-    "data/**/*",
     "external_tests/**/*",
     "src/modules/i2c/kretprobes/*",
     "src/modules/iommu/sva_invalidate/*",
@@ -38,8 +37,6 @@ packaging = "^25.0"
 
 [tool.poetry.scripts]
 glt-test-suite = "greenlit.greenlit:main"
-check-kernel-patches = "scripts.check_kernel_patches:main"
-check-kernel-config = "scripts.check_kernel_config:main"
 
 [tool.poetry.group.dev]
 optional = true
