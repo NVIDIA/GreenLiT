@@ -26,7 +26,7 @@ def parse_cpu_mask(mask_text):
     for part in mask_text.split(","):
         part = part.strip()
         if not part:
-            continue
+            raise ValueError(f"Invalid CPU mask with empty segment: {mask_text!r}")
         if "-" not in part:
             cpus.add(int(part))
             continue
