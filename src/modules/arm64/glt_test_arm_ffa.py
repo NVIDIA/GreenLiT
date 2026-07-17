@@ -34,6 +34,8 @@ ARM_FFA_MODULE_ALIAS = "arm-ffa"
 ARM_FFA_CONFIG = "CONFIG_ARM_FFA_TRANSPORT"
 ARM_FFA_SMCCC_CONFIG = "CONFIG_ARM_FFA_SMCCC"
 ARM_FFA_SYSFS_DEVICES_PATH = "/sys/bus/arm_ffa/devices"
+ARM_FFA_RXTX_MAP_FAILURE_PATTERN = "failed to register FFA RxTx buffers"
+ARM_FFA_REQUIRED_PARTITION_ATTRS = ("partition_id", "uuid", "modalias")
 
 
 def _query_ffa_modinfo():
@@ -64,6 +66,61 @@ def _query_ffa_modinfo():
     return module_name, is_builtin
 
 
+def _validate_ffa_partition_attrs(partitions):
+    """Verify each discovered FF-A partition exposes its expected sysfs data."""
+    for partition in partitions:
+        partition_path = os.path.join(ARM_FFA_SYSFS_DEVICES_PATH, partition)
+        for attr_name in ARM_FFA_REQUIRED_PARTITION_ATTRS:
+            attr_path = os.path.join(partition_path, attr_name)
+            try:
+                with open(attr_path, "r", encoding="utf-8") as attr_file:
+                    attr_value = attr_file.read().strip()
+            except OSError as err:
+                return False, f"Failed to read {attr_path}: {err}"
+
+            if not attr_value:
+                return False, f"ARM FF-A partition {partition} has empty {attr_name}"
+
+    return True, ""
+
+
+def _validate_ffa_runtime():
+    """Return discovered partitions and any FF-A runtime failure reason."""
+    if glt_utils.check_kernel_log(ARM_FFA_RXTX_MAP_FAILURE_PATTERN):
+        return [], (
+            "ARM FF-A RXTX_MAP registration failed. Verify the kernel includes "
+            "'firmware: arm_ffa: Respect firmware advertised RX/TX buffer size "
+            "limits'."
+        )
+
+    if not os.path.isdir(ARM_FFA_SYSFS_DEVICES_PATH):
+        return [], (
+            f"ARM FF-A bus not registered: {ARM_FFA_SYSFS_DEVICES_PATH} missing. "
+            "Probe likely failed; check dmesg for ARM FF-A errors."
+        )
+
+    try:
+        partitions = sorted(os.listdir(ARM_FFA_SYSFS_DEVICES_PATH))
+    except OSError as err:
+        return [], (
+            f"Failed to list ARM FF-A partitions in "
+            f"{ARM_FFA_SYSFS_DEVICES_PATH}: {err}"
+        )
+
+    if not partitions:
+        return [], (
+            f"ARM FF-A bus registered but no partitions were discovered in "
+            f"{ARM_FFA_SYSFS_DEVICES_PATH}. Firmware may not be exposing any "
+            "FF-A endpoints, or probe failed after bus registration."
+        )
+
+    valid, reason = _validate_ffa_partition_attrs(partitions)
+    if not valid:
+        return [], reason
+
+    return partitions, ""
+
+
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
@@ -76,9 +133,12 @@ def test_arm_ffa_availability(_, logger):
     1. CONFIG_ARM_FFA_TRANSPORT is enabled as built-in or module
     2. CONFIG_ARM_FFA_SMCCC is enabled
     3. The FF-A module is discoverable via its 'arm-ffa' alias (modinfo)
-    4. If built-in, the arm_ffa sysfs bus exposes at least one partition
-    5. If modular, the resolved module is loadable and visible in lsmod
-    6. The running system shows FF-A initialization in the kernel log
+    4. If modular, the resolved module is loadable and visible in lsmod
+    5. RXTX_MAP did not report the firmware buffer-size regression
+    6. The arm_ffa sysfs bus exposes usable partition attributes
+    7. The running system shows FF-A initialization in the kernel log
+
+    PATCH: https://patch.msgid.link/20260602-b4-ffa-rxtx-map-fixes-v2-1-7cb06508da84@nvidia.com
     """
     kconfig_path = "/boot/config-" + platform.uname().release
     try:
@@ -150,18 +210,10 @@ def test_arm_ffa_availability(_, logger):
                 f"{module_name} did not appear in lsmod after modprobe"
             )
 
-    if not os.path.isdir(ARM_FFA_SYSFS_DEVICES_PATH):
-        GLTCore.GLTTestResult.fail(
-            f"ARM FF-A bus not registered: {ARM_FFA_SYSFS_DEVICES_PATH} missing. "
-            "Probe likely failed; check dmesg for ARM FF-A errors."
-        )
-    partitions = os.listdir(ARM_FFA_SYSFS_DEVICES_PATH)
-    if not partitions:
-        GLTCore.GLTTestResult.fail(
-            f"ARM FF-A bus registered but no partitions were discovered in "
-            f"{ARM_FFA_SYSFS_DEVICES_PATH}. Firmware may not be exposing any "
-            "FF-A endpoints, or probe failed after bus registration."
-        )
+    partitions, reason = _validate_ffa_runtime()
+    if reason:
+        GLTCore.GLTTestResult.fail(reason)
+
     logger.info("ARM FF-A bus registered with %d partition(s): %s",
                 len(partitions), ", ".join(partitions))
 
