@@ -65,7 +65,8 @@ SCALING_FREQ_MIN_PERCENT = 70
 CPPC_PERF_LIMITED_CLEAR_MASK = "0x3"
 CPU_SYSFS_ROOT = "/sys/devices/system/cpu"
 CPU_HOTPLUG_OFFLINE_SETTLE_SECS = 2
-CPU_HOTPLUG_ONLINE_SETTLE_SECS = 3
+CPU_HOTPLUG_ONLINE_TIMEOUT_SECS = 15
+CPU_HOTPLUG_ONLINE_POLL_SECS = 1
 CPU_HOTPLUG_POLICY_TIMEOUT_SECS = 15
 CPU_HOTPLUG_POLICY_POLL_SECS = 1
 KERNEL_LOG_COMMAND_TIMEOUT_SECS = 30
@@ -226,6 +227,22 @@ def _wait_for_cppc_policy_for_cpu(
         time.sleep(poll_secs)
 
 
+def _verify_cppc_policy_absent_for_cpu(
+        cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir,
+        read_file=glt_utils.read_sysfs_value):
+    """Return whether a CPU's cpufreq policy is absent or unreadable while offline."""
+    policy_dir = _get_cpufreq_policy_dir(cpu_num, cpu_root, path_exists)
+    if not path_exists(policy_dir):
+        return True, ""
+    try:
+        read_file(os.path.join(policy_dir, "scaling_cur_freq"))
+    except (IOError, OSError, ValueError, KeyError):
+        return True, ""
+    return False, (
+        f"cpufreq policy still readable for offline CPU{cpu_num}: {policy_dir}"
+    )
+
+
 def _is_cppc_not_applicable(reason):
     """Return whether a cppc prerequisite failure means this test should skip."""
     return reason.startswith("cpufreq sysfs not available") or \
@@ -244,6 +261,19 @@ def _is_cpu_online(cpu_num, logger=None, unreadable_is_online=True):
         if logger:
             logger.warning("Cannot read online state for cpu%d", cpu_num)
         return unreadable_is_online
+
+
+def _wait_for_cpu_online(
+        cpu_num, timeout_secs=CPU_HOTPLUG_ONLINE_TIMEOUT_SECS,
+        poll_secs=CPU_HOTPLUG_ONLINE_POLL_SECS, logger=None):
+    """Wait until a CPU reports online after hotplug."""
+    deadline = time.monotonic() + timeout_secs
+    while True:
+        if _is_cpu_online(cpu_num, logger=logger, unreadable_is_online=False):
+            return True, ""
+        if time.monotonic() >= deadline:
+            return False, f"CPU{cpu_num} did not come back online after hotplug."
+        time.sleep(poll_secs)
 
 
 def _read_sysfs_int_value(path):
@@ -735,10 +765,14 @@ def test_cppc_cpufreq_policy_after_cpu_hotplug(_, logger):
         if _is_cpu_online(cpu_num, logger=logger):
             GLTCore.GLTTestResult.fail(f"CPU{cpu_num} remained online after hotplug offline.")
 
+        ok, reason = _verify_cppc_policy_absent_for_cpu(cpu_num)
+        if not ok:
+            GLTCore.GLTTestResult.fail(reason)
+
         glt_utils.write_sysfs_value(online_path, "1")
-        time.sleep(CPU_HOTPLUG_ONLINE_SETTLE_SECS)
-        if not _is_cpu_online(cpu_num, logger=logger, unreadable_is_online=False):
-            GLTCore.GLTTestResult.fail(f"CPU{cpu_num} did not come back online after hotplug.")
+        ok, reason = _wait_for_cpu_online(cpu_num, logger=logger)
+        if not ok:
+            GLTCore.GLTTestResult.fail(reason)
 
         ok, reason = _wait_for_cppc_policy_for_cpu(cpu_num)
         if not ok:

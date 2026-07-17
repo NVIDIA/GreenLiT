@@ -191,6 +191,93 @@ class TestCpuFreqStress(GLTTestBase):
         self.assertTrue(ok)
         self.assertEqual(reason, "")
 
+    def test_verify_cppc_policy_absent_for_cpu_accepts_missing_policy(self):
+        """Offline teardown is proven when the selected CPU policy directory is gone."""
+        ok, reason = cpufreq_stress._verify_cppc_policy_absent_for_cpu(
+            1,
+            path_exists=lambda _path: False,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_verify_cppc_policy_absent_for_cpu_accepts_unreadable_policy(self):
+        """Offline teardown is also proven when the policy path exists but is unreadable."""
+        def read_file(_path):
+            raise OSError("permission denied")
+
+        ok, reason = cpufreq_stress._verify_cppc_policy_absent_for_cpu(
+            1,
+            path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
+            read_file=read_file,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+
+    def test_verify_cppc_policy_absent_for_cpu_rejects_readable_policy(self):
+        """A still-readable policy while offline means teardown was not observed."""
+        values = {
+            "/sys/devices/system/cpu/cpufreq/policy1/scaling_cur_freq": "3240000",
+        }
+
+        ok, reason = cpufreq_stress._verify_cppc_policy_absent_for_cpu(
+            1,
+            path_exists=lambda path: path == "/sys/devices/system/cpu/cpufreq/policy1",
+            read_file=values.__getitem__,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("still readable", reason)
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.sleep")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.monotonic")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._is_cpu_online")
+    def test_wait_for_cpu_online_polls_until_online(
+        self, mock_is_online, mock_monotonic, mock_sleep
+    ):
+        """Online confirmation must poll instead of relying on one fixed settle sleep."""
+        mock_is_online.side_effect = [False, False, True]
+        mock_monotonic.side_effect = [0.0, 0.0, 1.0, 2.0]
+
+        ok, reason = cpufreq_stress._wait_for_cpu_online(
+            1, timeout_secs=5, poll_secs=1, logger=self.mock_logger
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "")
+        self.assertEqual(mock_is_online.call_count, 3)
+        mock_sleep.assert_has_calls([mock.call(1), mock.call(1)])
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.sleep")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.monotonic")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._is_cpu_online")
+    def test_wait_for_cpu_online_times_out(
+        self, mock_is_online, mock_monotonic, mock_sleep
+    ):
+        """Bounded polling must fail when the CPU never reports online."""
+        mock_is_online.return_value = False
+        mock_monotonic.side_effect = [0.0, 0.0, 1.0, 5.0]
+
+        ok, reason = cpufreq_stress._wait_for_cpu_online(
+            1, timeout_secs=5, poll_secs=1, logger=self.mock_logger
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("did not come back online", reason)
+        mock_sleep.assert_called()
+
+    def _patch_hotplug_teardown_and_online(self):
+        """Patch offline policy teardown and online polling helpers for hotplug tests."""
+        return (
+            self.mock.patch.object(
+                cpufreq_stress, "_verify_cppc_policy_absent_for_cpu",
+                return_value=(True, "")),
+            self.mock.patch.object(
+                cpufreq_stress, "_wait_for_cpu_online",
+                return_value=(True, "")),
+        )
+
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.sleep")
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.platform.machine")
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.write_sysfs_value")
@@ -210,10 +297,11 @@ class TestCpuFreqStress(GLTTestBase):
         mock_read.return_value = "0-2"
         mock_select_cpu.return_value = (1, "")
         mock_validate_policy.return_value = (True, "")
-        mock_is_online.side_effect = [False, True]
+        mock_is_online.return_value = False
         mock_log_count.return_value = ("journalctl", 0)
+        teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
-        with self.mock.patch.object(
+        with teardown_patch, online_patch, self.mock.patch.object(
                 cpufreq_stress, "_wait_for_cppc_policy_for_cpu",
                 return_value=(False, "policy1 did not recreate")):
             with self.assertRaises(GLTCore.GLTTestFail):
@@ -247,10 +335,11 @@ class TestCpuFreqStress(GLTTestBase):
         mock_read.return_value = "0-2"
         mock_select_cpu.return_value = (1, "")
         mock_validate_policy.return_value = (True, "")
-        mock_is_online.side_effect = [False, True]
+        mock_is_online.return_value = False
         mock_log_count.return_value = ("journalctl", 0)
+        teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
-        with self.mock.patch.object(
+        with teardown_patch, online_patch, self.mock.patch.object(
                 cpufreq_stress, "_wait_for_cppc_policy_for_cpu",
                 return_value=(True, "")):
             cpufreq_stress.test_cppc_cpufreq_policy_after_cpu_hotplug(
@@ -293,10 +382,11 @@ class TestCpuFreqStress(GLTTestBase):
         mock_read.return_value = "0-2"
         mock_select_cpu.return_value = (1, "")
         mock_validate_policy.return_value = (True, "")
-        mock_is_online.side_effect = [False, True]
+        mock_is_online.return_value = False
         mock_log_count.side_effect = [("journalctl", 1), ("journalctl", 1)]
+        teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
-        with self.mock.patch.object(
+        with teardown_patch, online_patch, self.mock.patch.object(
                 cpufreq_stress, "_wait_for_cppc_policy_for_cpu",
                 return_value=(True, "")):
             cpufreq_stress.test_cppc_cpufreq_policy_after_cpu_hotplug(
@@ -328,10 +418,11 @@ class TestCpuFreqStress(GLTTestBase):
         mock_read.return_value = "0-2"
         mock_select_cpu.return_value = (1, "")
         mock_validate_policy.return_value = (True, "")
-        mock_is_online.side_effect = [False, True]
+        mock_is_online.return_value = False
         mock_log_count.side_effect = [("journalctl", 0), ("journalctl", 1)]
+        teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
-        with self.mock.patch.object(
+        with teardown_patch, online_patch, self.mock.patch.object(
                 cpufreq_stress, "_wait_for_cppc_policy_for_cpu",
                 return_value=(True, "")):
             with self.assertRaises(GLTCore.GLTTestFail) as ctx:
@@ -379,6 +470,38 @@ class TestCpuFreqStress(GLTTestBase):
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._select_hotplug_cpu")
     @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_policy_for_cpu")
+    def test_hotplug_policy_test_fails_when_policy_still_readable_while_offline(
+        self, mock_validate_policy, mock_select_cpu, mock_prereq, mock_is_online,
+        mock_log_count, mock_read, _mock_write, mock_machine, _mock_sleep
+    ):
+        """The test must prove policy teardown before bringing the CPU back online."""
+        mock_machine.return_value = "aarch64"
+        mock_prereq.return_value = (True, None)
+        mock_read.return_value = "0-2"
+        mock_select_cpu.return_value = (1, "")
+        mock_validate_policy.return_value = (True, "")
+        mock_is_online.return_value = False
+        mock_log_count.return_value = ("journalctl", 0)
+
+        with self.mock.patch.object(
+                cpufreq_stress, "_verify_cppc_policy_absent_for_cpu",
+                return_value=(False, "cpufreq policy still readable for offline CPU1")):
+            with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+                cpufreq_stress.test_cppc_cpufreq_policy_after_cpu_hotplug(
+                    None, self.mock_logger
+                )
+
+        self.assertIn("still readable", str(ctx.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.time.sleep")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.platform.machine")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.write_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._count_kernel_log_occurrences")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._is_cpu_online")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._select_hotplug_cpu")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_policy_for_cpu")
     def test_hotplug_policy_test_fails_when_cpu_does_not_come_back_online(
         self, mock_validate_policy, mock_select_cpu, mock_prereq, mock_is_online,
         mock_log_count, mock_read, _mock_write, mock_machine, _mock_sleep
@@ -389,13 +512,18 @@ class TestCpuFreqStress(GLTTestBase):
         mock_read.return_value = "0-2"
         mock_select_cpu.return_value = (1, "")
         mock_validate_policy.return_value = (True, "")
-        mock_is_online.side_effect = [False, False]
+        mock_is_online.return_value = False
         mock_log_count.return_value = ("journalctl", 0)
 
-        with self.assertRaises(GLTCore.GLTTestFail) as ctx:
-            cpufreq_stress.test_cppc_cpufreq_policy_after_cpu_hotplug(
-                None, self.mock_logger
-            )
+        with self.mock.patch.object(
+                cpufreq_stress, "_verify_cppc_policy_absent_for_cpu",
+                return_value=(True, "")), self.mock.patch.object(
+                cpufreq_stress, "_wait_for_cpu_online",
+                return_value=(False, "CPU1 did not come back online after hotplug.")):
+            with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+                cpufreq_stress.test_cppc_cpufreq_policy_after_cpu_hotplug(
+                    None, self.mock_logger
+                )
 
         self.assertIn("did not come back online", str(ctx.exception))
 
@@ -480,8 +608,9 @@ class TestCpuFreqStress(GLTTestBase):
         mock_read.return_value = "0-2"
         mock_select_cpu.return_value = (1, "")
         mock_validate_policy.return_value = (True, "")
-        mock_is_online.side_effect = [False, True]
+        mock_is_online.return_value = False
         mock_log_count.return_value = ("journalctl", 0)
+        teardown_patch, online_patch = self._patch_hotplug_teardown_and_online()
 
         def write_side_effect(path, value):
             if path == "/sys/devices/system/cpu/cpu1/online" and value == "1" and \
@@ -490,7 +619,7 @@ class TestCpuFreqStress(GLTTestBase):
 
         mock_write.side_effect = write_side_effect
 
-        with self.mock.patch.object(
+        with teardown_patch, online_patch, self.mock.patch.object(
                 cpufreq_stress, "_wait_for_cppc_policy_for_cpu",
                 return_value=(False, "policy1 did not recreate")):
             with self.assertRaises(GLTCore.GLTTestFail) as ctx:
