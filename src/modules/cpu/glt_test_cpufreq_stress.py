@@ -28,6 +28,7 @@ import time
 
 from common import glt_core as GLTCore
 from common import glt_utils
+from common.cpu_topology import parse_cpu_mask as _parse_cpu_mask
 from common.nv_device import NvDev
 
 # =============================================================================
@@ -83,30 +84,6 @@ REQUIRED_PATCHES = (
 def _cpu_cpufreq_glob(filename):
     """Return glob results for a cpufreq sysfs file across all CPUs."""
     return glob.glob(f"/sys/devices/system/cpu/cpu[0-9]*/cpufreq/{filename}")
-
-
-def _parse_cpu_mask(mask_text):
-    """Parse a Linux CPU mask such as '0-3,8' into a set of CPU numbers."""
-    cpus = set()
-    mask_text = mask_text.strip()
-    if not mask_text:
-        return cpus
-
-    for part in mask_text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" not in part:
-            cpus.add(int(part))
-            continue
-
-        start_text, end_text = part.split("-", 1)
-        start = int(start_text)
-        end = int(end_text)
-        if end < start:
-            raise ValueError(f"Invalid CPU range: {part}")
-        cpus.update(range(start, end + 1))
-    return cpus
 
 
 def _get_cpufreq_policy_dir(cpu_num, cpu_root=CPU_SYSFS_ROOT, path_exists=os.path.isdir):
