@@ -17,10 +17,14 @@
 Python script to test PCI.
 """
 
+# pylint: disable=too-many-lines
+
 import os
 import platform
 import re
 import subprocess
+import time
+import uuid
 from common import glt_core as GLTCore
 from common import glt_utils
 from common import pci_utils
@@ -782,4 +786,360 @@ test_pci_acs_configurability.attr.post_hooks = GLTCore.PostHooks.create(
     postsuccess=_acs_kexec_conditional_reboot_hook,
     postfail=_acs_kexec_conditional_reboot_hook,
     postafail=_acs_kexec_conditional_reboot_hook,
+)
+
+
+def _setpci_read_word(bdf: str, offset: str):
+    """Read a 16-bit word from PCI config space at `offset` on `bdf` via setpci."""
+    try:
+        result = subprocess.run(
+            ["setpci", "-s", bdf, f"{offset}.w"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    try:
+        return int(result.stdout.strip(), 16)
+    except ValueError:
+        return None
+
+
+def _setpci_write_word(bdf: str, offset: str, value: int) -> bool:
+    """Write a 16-bit `value` to `offset` on `bdf` via setpci."""
+    try:
+        subprocess.run(
+            ["setpci", "-s", bdf, f"{offset}.w={value:#x}"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    return True
+
+
+def _pci_bdfs_on_path(sysfs_path: str) -> list[str]:
+    """Return the PCI BDF components on the resolved sysfs path, root-first.
+
+    For a PCI endpoint this yields [root_port, bridge..., endpoint]; for a
+    non-PCI device (or a missing path) it yields an empty list.
+    """
+    bdf_component_re = re.compile(
+        r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]$")
+    real = os.path.realpath(sysfs_path)
+    return [comp for comp in real.split(os.sep) if bdf_component_re.match(comp)]
+
+
+# pylint: disable=too-many-return-statements,too-many-branches
+def _resolve_and_validate_target(bdf: str):
+    """Validate that `bdf` is a safe, expendable ConnectX target."""
+    mlx_vendor_id = "15b3"
+    # Block devices that are RAM-backed or file-backed (a loop device's backing
+    # file lives on a real filesystem that is itself in /proc/mounts and thus
+    # already checked). These are outside the DPC blast radius by construction,
+    # so the storage-domain gate ignores them instead of failing closed.
+    virtual_block_dev_re = re.compile(r"^(loop|zram|ram)\d+(p\d+)?$")
+
+    connectx_bdfs = [b.lower() for b in pci_utils.get_bdfs_by_pci_id(mlx_vendor_id)]
+    if bdf not in connectx_bdfs:
+        return False, f"configured device {bdf} is not a ConnectX/mlx5 device"
+
+    target_chain = _pci_bdfs_on_path(f"/sys/bus/pci/devices/{bdf}")
+    target_root = target_chain[0] if target_chain else None
+    if not target_root:
+        return False, (
+            f"refusing: cannot resolve the PCIe root port of {bdf}; unable "
+            "to prove domain isolation from management and storage devices"
+        )
+
+    # Refuse any function of the device that carries the default route
+    # (the management network typically rides the other port/function), and
+    # any management NIC that shares the target's root-port (DPC
+    # containment) domain. Unreadable route tables fail closed: an empty
+    # iface set must not skip this gate.
+    target_slot = bdf.rsplit(".", 1)[0]
+    try:
+        mgmt_ifaces = pci_utils.default_route_ifaces()
+    except OSError:
+        return False, (
+            "refusing: cannot read default-route tables. Unable to prove "
+            "isolation from the management network"
+        )
+    for iface in mgmt_ifaces:
+        iface_bdfs = pci_utils.iface_pci_bdfs(iface)
+        if not iface_bdfs:
+            return False, (
+                f"refusing: cannot resolve PCI backing device for "
+                f"default-route interface {iface}. Unable to prove isolation"
+            )
+        for iface_bdf in iface_bdfs:
+            if iface_bdf.rsplit(".", 1)[0] == target_slot:
+                return False, f"refusing: {bdf} carries the management network route"
+            mgmt_chain = _pci_bdfs_on_path(f"/sys/bus/pci/devices/{iface_bdf}")
+            if not mgmt_chain:
+                return False, (
+                    f"refusing: cannot resolve PCI chain for management device "
+                    f"{iface_bdf}. Unable to prove isolation from {bdf}"
+                )
+            if mgmt_chain[0] == target_root:
+                return False, (
+                    f"refusing: {bdf} shares PCIe domain {target_root} with "
+                    f"the management network device ({iface_bdf})"
+                )
+
+    # Refuse if the target shares a PCIe root-port (DPC containment) domain
+    # with the root disk or any mounted filesystem. Mounted devices are
+    # resolved through dm/md/crypt stacks to their physical disks; anything
+    # that cannot be traced to a PCI device fails closed (refused), except
+    # loop/zram/ram devices, which are RAM- or file-backed and therefore
+    # outside the DPC blast radius. Unreadable /proc/mounts fails closed.
+    try:
+        mounted_devs = pci_utils.mounted_block_devices()
+    except OSError:
+        return False, (
+            "refusing: cannot read /proc/mounts; unable to prove isolation "
+            "from mounted storage"
+        )
+    for dev in mounted_devs:
+        if virtual_block_dev_re.match(dev):
+            continue
+        leaves = pci_utils.block_device_physical_leaves(dev)
+        if not leaves:
+            return False, (
+                f"refusing: mounted block device {dev} resolves to no "
+                "backing devices; cannot prove it is outside the DPC "
+                "blast radius"
+            )
+        for leaf in leaves:
+            if virtual_block_dev_re.match(leaf):
+                continue
+            dev_chain = _pci_bdfs_on_path(f"/sys/class/block/{leaf}")
+            if not dev_chain:
+                return False, (
+                    f"refusing: mounted block device {dev} (backing device "
+                    f"{leaf}) does not resolve to a PCI device; cannot prove "
+                    "it is outside the DPC blast radius"
+                )
+            if dev_chain[0] == target_root:
+                return False, (
+                    f"refusing: {bdf} shares PCIe domain {target_root} "
+                    f"with mounted storage ({dev})"
+                )
+
+    return True, ""
+# pylint: enable=too-many-return-statements,too-many-branches
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
+def test_msix_mem_restore_no_ur(sd, logger):
+    """
+    Verify the kernel restores MSI-X messages with memory decoding enabled:
+    FLR a vfio-bound ConnectX PF whose saved config has COMMAND.Memory
+    cleared and check that the MSI-X-table restore does not fault as an
+    Unsupported Request / RP PIO error / DPC containment.
+
+    The fix is NOT yet upstream: a FAIL is remediated by backporting
+    "PCI/MSI: Enable memory decoding before restoring MSI-X messages"
+    (patch 4/4 of the v20 "Error recovery for vfio-pci devices on s390x"
+    series).
+
+    DESTRUCTIVE: on an unpatched kernel this wedges the target NIC and a BMC
+    power cycle may be required to recover it.
+
+    JIRA: DGX-17078
+    PATCH: https://lore.kernel.org/all/20260622171840.1618-5-alifm@linux.ibm.com/
+    """
+    target_bdf_env = "GLT_MSIX_MEM_RESTORE_BDF"
+    pci_command_offset = "0x04"
+    pci_command_memory = 0x2
+    # Kernel-log fragments that identify the UR / RP PIO / DPC / AER signature
+    # of the unpatched MSI-X restore path. Each is checked for as a substring
+    # of the current-boot kernel log via glt_utils.check_kernel_log().
+    fault_signatures = (
+        "DPC: containment event",
+        "RP PIO",
+        "Memory Request received UR Completion",
+        "AER: Uncorrected",
+        "severity=Uncorrected",
+    )
+    patch_fail_msg = (
+        "MSI-X restore raised an Unsupported Request / DPC containment — kernel "
+        "lacks the memory-decoding fix. Consider backporting "
+        "https://lore.kernel.org/all/20260622171840.1618-5-alifm@linux.ibm.com/ "
+        "(PCI/MSI: Enable memory decoding before restoring MSI-X messages) to "
+        "fix it."
+    )
+    msix_bdf_re = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
+
+    if (not glt_utils.is_cli_available("lspci")
+            or not glt_utils.is_cli_available("setpci")):
+        GLTCore.GLTTestResult.skip("lspci/setpci not available; install pciutils")
+
+    bdf = os.environ.get(target_bdf_env, "").strip().lower()
+    if not bdf:
+        GLTCore.GLTTestResult.skip(
+            f"set {target_bdf_env} to an expendable ConnectX BDF; this test "
+            "is destructive and may require a BMC power cycle to recover")
+    dev_path = f"/sys/bus/pci/devices/{bdf}"
+    if not msix_bdf_re.match(bdf) or not os.path.exists(dev_path):
+        GLTCore.GLTTestResult.skip(f"configured device {bdf} not present")
+
+    safe, reason = _resolve_and_validate_target(bdf)
+    if not safe:
+        GLTCore.GLTTestResult.skip(reason)
+
+    try:
+        iommu_groups = os.listdir("/sys/kernel/iommu_groups")
+    except OSError:
+        iommu_groups = []
+    if not iommu_groups:
+        GLTCore.GLTTestResult.skip("IOMMU not enabled; vfio requires IOMMU")
+
+    if not glt_utils.is_cli_available("vfio_mlx5"):
+        GLTCore.GLTTestResult.skip("vfio_mlx5 not found; install DOCA libvfio-mlx5")
+
+    try:
+        subprocess.run(["modprobe", "vfio-pci"],
+                       capture_output=True, text=True, check=True)
+    except subprocess.CalledProcessError:
+        GLTCore.GLTTestResult.skip("vfio-pci module unavailable")
+
+    drv_link = f"{dev_path}/driver"
+
+    sd.progress_record_time(test_msix_mem_restore_no_ur.__name__,
+                            "MsixMemRestoreMutated")
+
+    if os.path.islink(drv_link):
+        orig_driver = os.path.basename(os.path.realpath(drv_link))
+        try:
+            glt_utils.write_sysfs_value(
+                f"/sys/bus/pci/devices/{bdf}/driver/unbind", bdf)
+        except OSError as e:
+            GLTCore.GLTTestResult.skip(
+                f"could not unbind {orig_driver} from {bdf}: {e}")
+    try:
+        glt_utils.write_sysfs_value(
+            f"/sys/bus/pci/devices/{bdf}/driver_override", "vfio-pci")
+        glt_utils.write_sysfs_value("/sys/bus/pci/drivers/vfio-pci/bind", bdf)
+    except OSError as e:
+        GLTCore.GLTTestResult.skip(f"could not bind {bdf} to vfio-pci: {e}")
+    if (not os.path.islink(drv_link)
+            or os.path.basename(os.path.realpath(drv_link)) != "vfio-pci"):
+        GLTCore.GLTTestResult.skip(f"{bdf} did not bind to vfio-pci")
+    logger.info("%s bound to vfio-pci", bdf)
+
+    vf_token = str(uuid.uuid4())
+    try:
+        # pylint: disable-next=consider-using-with
+        proc = subprocess.Popen(
+            ["vfio_mlx5", f"--device={bdf},vf_token={vf_token}",
+             "--memsize=1G"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError as e:
+        GLTCore.GLTTestResult.skip(f"could not launch vfio_mlx5: {e}")
+
+    try:
+        lspci_out = ""
+        msix_enabled = False
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                GLTCore.GLTTestResult.skip(
+                    f"vfio_mlx5 exited early (rc={proc.returncode}) before "
+                    f"enabling MSI-X on {bdf}")
+            try:
+                result = subprocess.run(["lspci", "-vv", "-s", bdf],
+                                        capture_output=True, text=True,
+                                        check=False)
+                lspci_out = result.stdout if result.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                lspci_out = ""
+            if "MSI-X: Enable+" in lspci_out:
+                msix_enabled = True
+                break
+            time.sleep(1)
+        if not msix_enabled:
+            GLTCore.GLTTestResult.skip(
+                f"vfio_mlx5 did not enable MSI-X on {bdf} within 60s")
+
+        # BAR0 base + MSI-X vector-table offset, for log attribution only.
+        bar0 = re.search(r"Region 0: Memory at ([0-9a-f]+)", lspci_out)
+        table = re.search(r"Vector table: BAR=(\d+) offset=([0-9a-f]+)",
+                          lspci_out)
+        logger.info(
+            "MSI-X enabled on %s (BAR0=%s, vector table BAR=%s offset=0x%s)",
+            bdf,
+            bar0.group(1) if bar0 else "?",
+            table.group(1) if table else "?",
+            table.group(2) if table else "?")
+
+        command = _setpci_read_word(bdf, pci_command_offset)
+        if command is None:
+            GLTCore.GLTTestResult.skip(
+                f"could not read COMMAND on {bdf} via setpci")
+        if not _setpci_write_word(bdf, pci_command_offset,
+                                  command & ~pci_command_memory):
+            GLTCore.GLTTestResult.skip(f"failed to clear COMMAND.Memory on {bdf}")
+        readback = _setpci_read_word(bdf, pci_command_offset)
+        if readback is None or readback & pci_command_memory:
+            GLTCore.GLTTestResult.skip(
+                f"COMMAND.Memory did not clear on {bdf} "
+                f"(read back {'unreadable' if readback is None else hex(readback)})")
+
+        # FLR is the chosen reliable trigger for this regression. There might be
+        # other reset paths that could hit the MSI-X path under test.
+        logger.info("Triggering FLR on %s", bdf)
+        try:
+            subprocess.run(
+                ["sh", "-c", f"echo 1 > {dev_path}/reset"],
+                capture_output=True, text=True, check=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            GLTCore.GLTTestResult.fail(
+                f"FLR write on {bdf} did not complete within 120s")
+        except subprocess.CalledProcessError as e:
+            GLTCore.GLTTestResult.fail(
+                f"FLR write on {bdf} failed (rc={e.returncode}): "
+                f"{(e.stderr or '').strip()}")
+        except (OSError, subprocess.SubprocessError) as e:
+            GLTCore.GLTTestResult.fail(f"FLR could not be issued on {bdf} ({e})")
+
+        try:
+            with open(f"/sys/bus/pci/devices/{bdf}/config", "rb") as cfg:
+                vendor = cfg.read(2)
+            speed = glt_utils.read_sysfs_value(
+                f"/sys/bus/pci/devices/{bdf}/current_link_speed")
+            healthy = (len(vendor) == 2 and vendor != b"\xff\xff"
+                       and not speed.startswith("Unknown"))
+        except OSError:
+            healthy = False
+
+        for signature in fault_signatures:
+            if glt_utils.check_kernel_log(signature):
+                logger.error("fault signature in kernel log: %s", signature)
+                GLTCore.GLTTestResult.fail(patch_fail_msg)
+
+        if not healthy:
+            GLTCore.GLTTestResult.fail(
+                "device did not recover after FLR "
+                "(config inaccessible / link down)")
+
+        logger.info("FLR completed cleanly on %s; no UR/DPC/AER signature", bdf)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+# pylint: enable=too-many-branches
+
+
+_msix_mem_restore_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
+    "MsixMemRestoreMutated", lambda: True)
+test_msix_mem_restore_no_ur.attr.post_hooks = GLTCore.PostHooks.create(
+    postsuccess=_msix_mem_restore_reboot_hook,
+    postskip=_msix_mem_restore_reboot_hook,
+    postfail=_msix_mem_restore_reboot_hook,
+    postafail=_msix_mem_restore_reboot_hook,
 )
