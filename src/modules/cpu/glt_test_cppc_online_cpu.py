@@ -21,6 +21,7 @@ import platform
 
 from common import glt_core as GLTCore
 from common import glt_utils
+from common.cpu_topology import parse_cpu_mask as _parse_cpu_mask
 
 
 CPU_SYSFS_ROOT = "/sys/devices/system/cpu"
@@ -30,31 +31,6 @@ CPPC_RESTORE_REBOOT_MARKER = "CPPCRestoreReboot"
 CPPC_RESTORE_RESULT_REASON = "CPPCRestoreResultReason"
 GLT_REBOOT_MARKER = "TriggerReboot"
 MIN_REBOOT_CPUS = 1
-
-
-def _parse_cpu_mask(mask_text):
-    """Parse a Linux CPU mask such as '0-3,8' into a set of CPU numbers."""
-    cpus = set()
-    mask_text = mask_text.strip()
-    if not mask_text:
-        return cpus
-
-    for part in mask_text.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" not in part:
-            cpus.add(int(part))
-            continue
-
-        start_text, end_text = part.split("-", 1)
-        start = int(start_text)
-        end = int(end_text)
-        if end < start:
-            raise ValueError(f"Invalid CPU range: {part}")
-        cpus.update(range(start, end + 1))
-
-    return cpus
 
 
 def _read_file(path):
