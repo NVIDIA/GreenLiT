@@ -60,17 +60,16 @@ for the canonical local-check commands.
 ## Manual Runtime Configuration
 
 `pip install .` only installs the Python package — it does not stage the
-runtime configuration, data files, or systemd units that a real GreenLiT
+runtime configuration files or systemd units that a real GreenLiT
 install needs. `install.sh` does all of this automatically for end users (see
 the [README](../../README.md)); if you're testing runtime/service integration
 against a `pip install .`-based dev checkout without running the full
 installer, stage it manually:
 
 ```bash
-sudo mkdir -p /usr/share/greenlit/{confs.d,data,executing_dir}
+sudo mkdir -p /usr/share/greenlit/{confs.d,executing_dir}
 sudo cp confs/hardware-manifest.json /usr/share/greenlit/
 sudo cp confs/glt-confs.d/* /usr/share/greenlit/confs.d/
-sudo cp data/* /usr/share/greenlit/data/
 sudo cp -r external_tests/* /usr/share/greenlit/executing_dir/
 
 # Set up systemd services

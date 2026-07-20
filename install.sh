@@ -309,13 +309,11 @@ install_from_local_wheels() {
 setup_configuration() {
   echo "Creating GreenLiT configuration directories..."
   mkdir -p /usr/share/greenlit/confs.d
-  mkdir -p /usr/share/greenlit/data
   mkdir -p /usr/share/greenlit/executing_dir
 
   echo "Copying configuration files..."
   cp confs/hardware-manifest.json /usr/share/greenlit/
   cp confs/glt-confs.d/* /usr/share/greenlit/confs.d/
-  cp -r data/* /usr/share/greenlit/data/
 
   echo "Copying external test scripts..."
   if [ -d "external_tests" ]; then
@@ -438,20 +436,6 @@ print_completion() {
   echo "  List available tests:   sudo glt-test-suite --list --sanity"
   echo "  Run sanity tests:       sudo glt-test-suite --sanity --arm64"
   echo "  Run with verbose mode:  sudo glt-test-suite --verbose --standard --tpm"
-  echo
-  echo "Kernel patch checker (run from Linux kernel git repo):"
-  echo "  # For Grace:"
-  echo "  check-kernel-patches -b <branch> /usr/share/greenlit/data/kernel-patches/grace.txt"
-  echo "  # For Vera:"
-  echo "  check-kernel-patches -b <branch> /usr/share/greenlit/data/kernel-patches/grace.txt /usr/share/greenlit/data/kernel-patches/vera.txt"
-  echo
-  echo "Kernel config checker:"
-  echo "  # For Grace:"
-  echo "  check-kernel-config -c /boot/config-\$(uname -r) /usr/share/greenlit/data/kernel-config/grace.txt"
-  echo "  # For Vera:"
-  echo "  check-kernel-config -c /boot/config-\$(uname -r) /usr/share/greenlit/data/kernel-config/grace.txt /usr/share/greenlit/data/kernel-config/vera.txt"
-  echo
-  echo "Please run both checkers before running the tests."
   echo
   echo "For more information, refer to the GreenLiT documentation"
 }

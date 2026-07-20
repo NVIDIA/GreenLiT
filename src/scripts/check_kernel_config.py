@@ -17,8 +17,7 @@
 Kernel config checker - validates kernel configuration against NVIDIA reference specifications.
 
 Usage:
-    check-kernel-config -c /boot/config-$(uname -r) grace.txt
-    check-kernel-config -c /boot/config-$(uname -r) grace.txt vera.txt
+    python3 check_kernel_config.py -c <kernel-config> <reference-file> [<reference-file> ...]
 """
 
 import argparse
@@ -182,9 +181,8 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  check-kernel-config -c /boot/config-$(uname -r) grace.txt
-  check-kernel-config -c .config grace.txt vera.txt
-  check-kernel-config -c /boot/config-6.8.0 grace.txt -v
+  python3 check_kernel_config.py -c <kernel-config> <reference-file>
+  python3 check_kernel_config.py -c <kernel-config> <reference-file> --verbose
         """
     )
     parser.add_argument(
