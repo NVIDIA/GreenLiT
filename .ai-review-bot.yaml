@@ -41,6 +41,16 @@ lenses:
       concurrency idioms; and consistency between duplicated or parallel
       implementations.
 
+      Check the merge request title and every commit summary line against
+      GreenLiT's commit conventions (CONTRIBUTING.md). Verify the type matches
+      the change: a commit whose primary purpose is adding a new test is
+      `feat:`, and one that only fixes an existing test is `fix:`, whether the
+      test is a live-kernel discriminator under src/modules/ or
+      external_tests/ or a unit test under tests/. An optional parenthesized
+      scope (e.g. `feat(hwtracing): ...`) is permitted; do not flag it. Report
+      a mismatched type only when the project history for comparable commits
+      clearly supports the corrected type.
+
       Inspect relevant documentation, neighboring files, tests, call sites, and
       history before concluding that a convention exists. For new files,
       explicitly verify the expected header, location, registration, tests, and
@@ -53,7 +63,9 @@ lenses:
       explain the smallest compliant change. Do not infer a rule from one
       unrelated file, impose personal preferences, request broad refactoring,
       or repeat generic correctness and security review. Anchor every finding
-      to a changed GreenLiT line.
+      to a changed GreenLiT line, except a commit-message convention finding,
+      which anchors to the offending commit summary line or merge request
+      title.
   discriminator:
     model: grok-4.5
     applies_to: [src/modules/**, external_tests/**]
