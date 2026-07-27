@@ -6,6 +6,7 @@ import signal
 
 from tests.test_base import GLTTestBase
 from src.common.glt_utils import (
+    _load_kernel_for_kexec,  # pylint: disable=protected-access
     append_kernel_parameter,
     arm_for_reset,
     check_kernel_log,
@@ -19,6 +20,7 @@ from src.common.glt_utils import (
     is_cli_available,
     parse_linux_version,
     reboot,
+    reboot_with_kexec,
     reboot_with_reisub,
     remove_kernel_parameter,
     start_systemd_timer,
@@ -440,6 +442,93 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                 self.mock_logger, "REISUB"
             )
             mock_kill.assert_called_once_with(12345, signal.SIGTERM)
+
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.glt_utils._find_extract_vmlinux",
+        return_value="/usr/bin/extract-vmlinux",
+    )
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.glt_utils.subprocess.run"
+    )
+    def test_load_kernel_for_kexec_extracts_unknown_format(
+        self, mock_run, _mock_find
+    ):
+        """An unrecognized vmlinuz is extracted, retried, and removed."""
+        extracted_paths = []
+
+        def run_side_effect(cmd, **kwargs):
+            if cmd[0] == "kexec" and cmd[2].startswith("/boot/"):
+                raise subprocess.CalledProcessError(
+                    1,
+                    cmd,
+                    stderr="Cannot determine the file type of /boot/vmlinuz-test",
+                )
+            if cmd[0] == "/usr/bin/extract-vmlinux":
+                extracted_paths.append(kwargs["stdout"].name)
+                return self.mock.Mock(returncode=0, stderr=b"")
+            return self.mock.Mock(returncode=0)
+
+        mock_run.side_effect = run_side_effect
+
+        loaded, reason = _load_kernel_for_kexec(
+            "/boot/vmlinuz-test",
+            "/boot/initrd-test",
+            "root=test",
+        )
+
+        self.assertTrue(loaded)
+        self.assertEqual(reason, "")
+        self.assertEqual(mock_run.call_count, 3)
+        self.assertEqual(len(extracted_paths), 1)
+        self.assertEqual(
+            mock_run.call_args_list[2].args[0][2],
+            extracted_paths[0],
+        )
+        self.assertFalse(os.path.exists(extracted_paths[0]))
+
+    def test_reboot_with_kexec_stops_when_kernel_load_fails(self):
+        """A load failure is returned without triggering a kexec reboot."""
+        files = [
+            "/boot/initrd.img-test-kernel",
+            "/boot/vmlinuz-test-kernel",
+        ]
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.platform.release",
+            return_value="test-kernel",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.glob.glob", return_value=files
+        ), GLTTestBase.unittest.mock.patch(
+            "builtins.open",
+            GLTTestBase.unittest.mock.mock_open(
+                read_data="BOOT_IMAGE=/boot/vmlinuz-test-kernel root=test"
+            ),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._load_kernel_for_kexec",
+            return_value=(False, "extraction failed"),
+        ) as mock_loader, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.systemd_enable"
+        ) as mock_systemd, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.os.system"
+        ) as mock_system:
+            loaded, reason = reboot_with_kexec(
+                "test_case", self.mock_sd, custom_cmdline="test.option=1"
+            )
+
+        self.assertFalse(loaded)
+        self.assertEqual(reason, "extraction failed")
+        mock_loader.assert_called_once_with(
+            "/boot/vmlinuz-test-kernel",
+            "/boot/initrd.img-test-kernel",
+            (
+                "BOOT_IMAGE=/boot/vmlinuz-test-kernel root=test "
+                "test.option=1 glt_kexec_boot=1"
+            ),
+        )
+        mock_systemd.assert_not_called()
+        mock_system.assert_not_called()
+        self.mock_sd.progress_record_time.assert_not_called()
 
     @GLTTestBase.unittest.mock.patch("os._exit")
     @GLTTestBase.unittest.mock.patch("os.system")

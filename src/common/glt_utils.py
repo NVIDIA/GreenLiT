@@ -27,6 +27,7 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 
 from common.kernel_cmdline import KernelCmdlineManager
 from common.nv_device import NvDev
@@ -640,6 +641,100 @@ def reboot(testcase, sd):
     return False
 
 
+def _find_extract_vmlinux() -> str:
+    """Find extract-vmlinux for decompressing vmlinuz (e.g. Ubuntu arm64 zboot)."""
+    release = platform.release()
+    candidates = [
+        f"/usr/src/linux-headers-{release}/scripts/extract-vmlinux",
+        shutil.which("extract-vmlinux"),
+    ]
+    candidates.extend(
+        sorted(glob.glob("/usr/src/linux-*/scripts/extract-vmlinux"), reverse=True)
+    )
+    for candidate in candidates:
+        if (
+            candidate
+            and os.path.exists(candidate)
+            and os.access(candidate, os.X_OK)
+        ):
+            return candidate
+    return ""
+
+
+def _load_kernel_for_kexec(
+    vmlinuz_path: str,
+    initrd_path: str,
+    kexec_cmdline: str,
+) -> tuple[bool, str]:
+    """Load one kernel; extract and retry if kexec cannot identify the file type."""
+    try:
+        subprocess.run(
+            [
+                "kexec",
+                "-l",
+                vmlinuz_path,
+                f"--initrd={initrd_path}",
+                f"--command-line={kexec_cmdline}",
+            ],
+            shell=False,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        reason = (e.stderr or e.stdout or "").strip()
+        if "cannot determine the file type" not in reason.lower():
+            return False, reason or str(e)
+    except OSError as e:
+        return False, str(e)
+
+    extractor = _find_extract_vmlinux()
+    if not extractor:
+        return False, f"Unable to find extract-vmlinux for {vmlinuz_path}"
+
+    image_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            prefix="greenlit-kexec-Image-", delete=False
+        ) as output:
+            image_path = output.name
+            subprocess.run(
+                [extractor, vmlinuz_path],
+                check=True,
+                stdout=output,
+                stderr=subprocess.PIPE,
+                timeout=60,
+                text=True,
+            )
+        subprocess.run(
+            [
+                "kexec",
+                "-l",
+                image_path,
+                f"--initrd={initrd_path}",
+                f"--command-line={kexec_cmdline}",
+            ],
+            shell=False,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True, ""
+    except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as e:
+        if isinstance(e, subprocess.CalledProcessError):
+            reason = (e.stderr or e.stdout or "").strip() or str(e)
+        else:
+            reason = str(e)
+        return False, reason
+    finally:
+        if image_path:
+            try:
+                os.remove(image_path)
+            except OSError:
+                pass
+
+
 # pylint: disable=too-many-return-statements,too-many-branches
 def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | None]:
     """
@@ -662,8 +757,6 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
 
     if custom_cmdline is not None and any(c in custom_cmdline for c in "\n\r\0"):
         return False
-
-    sd.progress_record_time(testcase, "TriggerKexec")
 
     try:
         kernel_version = platform.release()
@@ -693,20 +786,13 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
             filter(None, [current_cmdline, (custom_cmdline or "").strip(), "glt_kexec_boot=1"])
         )
 
-        # Use shell=False to prevent command injection (CWE-78)
-        subprocess.run(
-            [
-                "kexec",
-                "-l",
-                vmlinuz_path,
-                f"--initrd={initrd_path}",
-                f"--command-line={kexec_cmdline}"
-            ],
-            shell=False,
-            check=True,
-            capture_output=True,
-            text=True
+        loaded, reason = _load_kernel_for_kexec(
+            vmlinuz_path,
+            initrd_path,
+            kexec_cmdline,
         )
+        if not loaded:
+            return False, reason
 
         kexec_loaded_path = "/sys/kernel/kexec_loaded"
         try:
@@ -715,6 +801,10 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
                     return (False, "Kernel not loaded for kexec after load attempt")
         except FileNotFoundError:
             return (False, "kexec_loaded sysfs not available")
+
+        # Record the reboot marker only after a kernel is confirmed loaded.
+        # Extraction or load failures must not look like a reboot attempt.
+        sd.progress_record_time(testcase, "TriggerKexec")
 
         if systemd_enable():
             os.system("systemctl kexec")
@@ -730,8 +820,8 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
             # Consider passing logger to record the error.
             os.kill(os.getpid(), signal.SIGTERM)
 
-    except subprocess.CalledProcessError as e:
-        return (False, f"{e.stderr}")
+    except OSError as e:
+        return (False, f"{e}")
 
     return (True, None)
 
