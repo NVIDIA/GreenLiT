@@ -23,7 +23,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Iterable, Optional
 
-PERF_VERSION_TIMEOUT_SECONDS = 30
+PERF_VERSION_TIMEOUT_SECONDS = 5
+PERF_TEST_TIMEOUT_SECONDS = 120
 
 
 class PerfTestStatus(Enum):
@@ -138,49 +139,104 @@ def _summarize_output(output: str) -> str:
     return "\n".join(lines[-10:])
 
 
+def natural_sort_key(path: Path):
+    """Return a key that sorts embedded numeric components numerically."""
+    return tuple(
+        int(part) if part.isdigit() else part
+        for part in re.split(r"(\d+)", str(path))
+    )
+
+
 def _get_perf_candidates():
     """Return perf command candidates without requiring them to exist."""
     candidates = ["perf"]
     candidates.extend(
-        str(path) for path in sorted(Path("/usr/lib").glob("linux-tools*/perf"))
+        str(path)
+        for path in sorted(
+            Path("/usr/lib").glob("linux-tools*/perf"),
+            key=natural_sort_key,
+        )
     )
     candidates.extend(
-        str(path) for path in sorted(Path("/usr/lib/linux-tools").glob("*/perf"))
+        str(path)
+        for path in sorted(
+            Path("/usr/lib/linux-tools").glob("*/perf"),
+            key=natural_sort_key,
+        )
     )
     return list(dict.fromkeys(candidates))
 
 
-def _candidate_matches_kernel(
+def _perf_version_matches_kernel(perf_version: str, kernel_version: str) -> bool:
+    """Return True when perf and kernel versions are compatible."""
+    if not perf_version or not kernel_version:
+        return False
+    if perf_version == kernel_version:
+        return True
+
+    shorter = perf_version
+    longer = kernel_version
+    if len(shorter) > len(longer):
+        shorter, longer = longer, shorter
+    return longer.startswith((f"{shorter}.", f"{shorter}-", f"{shorter}+"))
+
+
+def _normalized_tool_dir(candidate: str) -> str:
+    """Return the linux-tools directory version token for a candidate path."""
+    tool_dir = Path(candidate).parent.name
+    if tool_dir.startswith("linux-tools-"):
+        return tool_dir[len("linux-tools-"):]
+    return tool_dir
+
+
+def _candidate_is_kernel_compatible(
     candidate: str,
     kernel_release: str,
     kernel_version: str,
     perf_version: str,
 ) -> bool:
-    """Return True when a perf candidate matches the running kernel."""
+    """Return True for exact or abbreviated matches to the running kernel."""
     perf_base_version = perf_version.split("-", 1)[0]
-    if perf_base_version == kernel_version:
+    if _perf_version_matches_kernel(perf_base_version, kernel_version):
         return True
 
-    tool_dir = Path(candidate).parent.name
-    normalized_tool_dir = (
-        tool_dir[len("linux-tools-"):]
-        if tool_dir.startswith("linux-tools-")
-        else tool_dir
-    )
+    normalized_tool_dir = _normalized_tool_dir(candidate)
     if normalized_tool_dir in (kernel_release, kernel_version):
         return True
     return normalized_tool_dir.startswith(f"{kernel_version}-")
 
 
+def _candidate_is_exact_kernel_match(
+    candidate: str,
+    kernel_release: str,
+    kernel_version: str,
+    perf_version: str,
+) -> bool:
+    """Return True when a candidate exactly matches kernel base or release."""
+    perf_base_version = perf_version.split("-", 1)[0]
+    if perf_base_version == kernel_version:
+        return True
+    return _normalized_tool_dir(candidate) in (kernel_release, kernel_version)
+
+
 def _run_perf_test(perf_cmd: str, test_name: str) -> PerfTestResult:
     """Run one perf selftest by name and normalize the result."""
-    result = subprocess.run(
-        [perf_cmd, "test", "-vv", test_name],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            [perf_cmd, "test", "-vv", test_name],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=PERF_TEST_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return PerfTestResult(
+            PerfTestStatus.FAIL,
+            f"perf test '{test_name}' timed out after "
+            f"{PERF_TEST_TIMEOUT_SECONDS} seconds",
+            test_name=test_name,
+        )
     output = (result.stdout or "") + (result.stderr or "")
 
     if result.returncode != 0:
@@ -227,7 +283,8 @@ def has_coresight_fallback_evidence(
 def resolve_perf_command(logger=None) -> Optional[str]:
     """Resolve a perf command that works for the running kernel."""
     kernel_release = platform.uname().release
-    kernel_version = kernel_release.split("-", 1)[0]
+    kernel_version = re.split(r"[-+]", kernel_release, 1)[0]
+    compatible_candidate = None
 
     for candidate in _get_perf_candidates():
         try:
@@ -264,33 +321,46 @@ def resolve_perf_command(logger=None) -> Optional[str]:
 
         version_match = re.search(r"perf version\s+([^\s]+)", output)
         perf_version = version_match.group(1) if version_match else ""
-        if _candidate_matches_kernel(
+        if not _candidate_is_kernel_compatible(
+                candidate, kernel_release, kernel_version, perf_version):
+            if logger:
+                logger.debug(
+                    "perf resolver skipped non-matching candidate: %s reports %r",
+                    candidate,
+                    perf_version,
+                )
+            continue
+
+        if _candidate_is_exact_kernel_match(
                 candidate, kernel_release, kernel_version, perf_version):
             return candidate
 
-        if logger:
-            logger.debug(
-                "perf resolver skipped non-matching candidate: %s reports %r",
-                candidate,
-                perf_version,
-            )
+        if compatible_candidate is None:
+            compatible_candidate = candidate
 
-    return None
+    return compatible_candidate
 
 
 def run_perf_test_candidates(
     candidates: Iterable[str],
     perf_cmd: str = "perf",
 ) -> PerfTestResult:
-    """Run the first listed perf selftest candidate that exists."""
+    """Run the first listed perf selftest candidate using perf_cmd."""
     candidate_names = tuple(candidates)
-    list_result = subprocess.run(
-        [perf_cmd, "test", "list"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    try:
+        list_result = subprocess.run(
+            [perf_cmd, "test", "list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=PERF_TEST_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return PerfTestResult(
+            PerfTestStatus.FAIL,
+            f"perf test list timed out after {PERF_TEST_TIMEOUT_SECONDS} seconds",
+        )
 
     if list_result.returncode != 0:
         reason = (list_result.stderr or list_result.stdout or "").strip()

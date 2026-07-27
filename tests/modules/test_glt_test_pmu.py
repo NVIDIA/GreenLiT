@@ -1,6 +1,7 @@
 """Unit tests for ARM64 PMU helper functions."""
-# pylint: disable=protected-access
+# pylint: disable=duplicate-code,protected-access,too-many-public-methods
 
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -59,33 +60,49 @@ class TestPmuHelpers(GLTTestBase):
             },
         )
 
-    def test_get_nvidia_perf_list_uses_argument_vector(self):
-        """Test perf list JSON is invoked without a shell."""
-        cmd_output = self.mock.MagicMock()
-        cmd_output.stdout = '[{"Unit": "nvidia_pcie_pmu_0"}]'
+    def test_get_nvidia_perf_list_uses_resolved_perf_command(self):
+        """Test perf list JSON is read through the caller-supplied perf binary."""
+        completed = subprocess.CompletedProcess(
+            ["/perf", "list", "-j"],
+            0,
+            stdout='[{"Unit": "nvidia_ucf_pmu_0"}]',
+            stderr="",
+        )
 
         with self.mock.patch.object(
-                glt_test_pmu.subprocess, "run", return_value=cmd_output
+            glt_test_pmu.subprocess, "run", return_value=completed
         ) as mock_run:
             self.assertEqual(
-                glt_test_pmu._get_nvidia_perf_list(self.mock_logger),
-                {"nvidia_pcie_pmu"})
+                glt_test_pmu._get_nvidia_perf_list("/perf", self.mock_logger),
+                {"nvidia_ucf_pmu"},
+            )
 
         mock_run.assert_called_once_with(
-            ["perf", "list", "-j"],
-            check=True, text=True,
-            stdout=glt_test_pmu.subprocess.PIPE,
-            stderr=glt_test_pmu.subprocess.PIPE)
+            ["/perf", "list", "-j"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=glt_test_pmu.PERF_LIST_TIMEOUT_SECONDS,
+        )
 
-    def test_get_nvidia_perf_list_handles_missing_perf(self):
-        """Test missing perf command reports no NVIDIA PMU families."""
+    def test_get_nvidia_perf_list_times_out(self):
+        """Test a hung perf list command raises instead of returning empty."""
+        timeout = subprocess.TimeoutExpired(
+            ["/perf", "list", "-j"],
+            timeout=glt_test_pmu.PERF_LIST_TIMEOUT_SECONDS,
+        )
+
         with self.mock.patch.object(
-                glt_test_pmu.subprocess, "run",
-                side_effect=FileNotFoundError):
-            self.assertEqual(
-                glt_test_pmu._get_nvidia_perf_list(self.mock_logger), set())
+            glt_test_pmu.subprocess, "run", side_effect=timeout
+        ):
+            with self.assertRaisesRegex(ValueError, "perf list timed out"):
+                glt_test_pmu._get_nvidia_perf_list("/perf", self.mock_logger)
 
-        self.mock_logger.error.assert_called_once()
+        self.mock_logger.error.assert_called_once_with(
+            "perf list timed out after %s seconds",
+            glt_test_pmu.PERF_LIST_TIMEOUT_SECONDS,
+        )
 
     def test_classify_pmu_devices(self):
         """Test classifying named PMU devices versus fallback devices."""
@@ -112,6 +129,10 @@ class TestPmuHelpers(GLTTestBase):
                     "armv8_pmuv3_0",
                     "nvidia_not_a_perf_source"):
                 (pmu_path / name).mkdir()
+            (pmu_path / "nvidia_fake_pmu_0").write_text(
+                "not a directory\n",
+                encoding="utf-8",
+            )
 
             self.assertEqual(
                 glt_test_pmu._get_nvidia_pmu_devices(pmu_path),
@@ -315,8 +336,11 @@ class TestPmuValidation(GLTTestBase):
 
         with self.mock.patch.object(glt_test_pmu, "NvDev") as nvdev_cls, \
                 self.mock.patch.object(
+                    glt_test_pmu.perf_utils, "resolve_perf_command",
+                    return_value="/perf"), \
+                self.mock.patch.object(
                     glt_test_pmu, "_get_nvidia_perf_list",
-                    return_value={"nvidia_uncore_pmu"}), \
+                    return_value={"nvidia_uncore_pmu"}) as mock_perf_list, \
                 self.mock.patch.object(
                     glt_test_pmu, "_get_nvidia_pmu_devices",
                     return_value=["nvidia_uncore_pmu_0"]):
@@ -336,3 +360,31 @@ class TestPmuValidation(GLTTestBase):
         self.assertEqual(
             glt_test_pmu.test_nvidia_perf_events.attr.result[0],
             GLTCore.GLTTestResult.FAIL)
+        mock_perf_list.assert_called_once_with("/perf", self.mock_logger)
+
+    def test_test_nvidia_perf_events_fails_on_perf_list_timeout(self):
+        """Decorated PMU test fails when perf list times out."""
+        fake_nvdev = self.mock.MagicMock()
+        fake_nvdev.is_cpu_type.side_effect = lambda cpu: cpu == "vera"
+        glt_test_pmu.test_nvidia_perf_events.attr.result = (
+            GLTCore.GLTTestResult.NA, "")
+
+        with self.mock.patch.object(glt_test_pmu, "NvDev") as nvdev_cls, \
+                self.mock.patch.object(
+                    glt_test_pmu.perf_utils, "resolve_perf_command",
+                    return_value="/perf"), \
+                self.mock.patch.object(
+                    glt_test_pmu, "_get_nvidia_perf_list",
+                    side_effect=ValueError("perf list timed out after 30 seconds")):
+            nvdev_cls.return_value = fake_nvdev
+            nvdev_cls.get_release_info.return_value = {
+                "NAME": "Ubuntu",
+                "VERSION_ID": "24.04",
+            }
+            fake_nvdev.get_release_info.return_value = (
+                nvdev_cls.get_release_info.return_value)
+
+            with self.assertRaisesRegex(
+                    GLTCore.GLTTestFail,
+                    "perf list timed out"):
+                glt_test_pmu.test_nvidia_perf_events(None, self.mock_logger)

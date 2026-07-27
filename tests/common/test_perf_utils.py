@@ -1,5 +1,5 @@
 """Unit tests for common/perf_utils.py."""
-# pylint: disable=wrong-import-position
+# pylint: disable=duplicate-code,too-many-public-methods,wrong-import-position
 
 import subprocess
 import sys
@@ -11,11 +11,13 @@ from tests.test_base import GLTTestBase
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from common.perf_utils import (
+    PERF_TEST_TIMEOUT_SECONDS,
     PERF_VERSION_TIMEOUT_SECONDS,
     PerfTestStatus,
     get_perf_kernel_version_warning,
     get_perf_version,
     has_coresight_fallback_evidence,
+    natural_sort_key,
     resolve_perf_command,
     run_perf_test_candidates,
 )
@@ -31,6 +33,183 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             stdout=stdout,
             stderr=stderr,
         )
+
+    def test_natural_sort_key_orders_perf_versions_numerically(self):
+        """Perf candidate path sorting follows numeric version components."""
+        paths = [
+            Path("/usr/lib/linux-tools/6.9/perf"),
+            Path("/usr/lib/linux-tools/6.18/perf"),
+            Path("/usr/lib/linux-tools/6.17.13/perf"),
+        ]
+
+        self.assertEqual(
+            [str(path) for path in sorted(paths, key=natural_sort_key)],
+            [
+                "/usr/lib/linux-tools/6.9/perf",
+                "/usr/lib/linux-tools/6.17.13/perf",
+                "/usr/lib/linux-tools/6.18/perf",
+            ],
+        )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_rejects_path_version_substring(self, mock_run):
+        """A kernel version token must not match an adjacent numeric suffix."""
+        mock_run.return_value = self._completed(stdout="perf version 6.10\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.10/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.1-mpam+"),
+        ):
+            self.assertIsNone(resolve_perf_command(self.mock_logger))
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_accepts_abbreviated_perf_version(self, mock_run):
+        """A compatible abbreviated perf version can match the running kernel."""
+        mock_run.return_value = self._completed(stdout="perf version 6.17\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.17/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(self.mock_logger),
+                "/usr/lib/linux-tools/6.17/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_prefers_exact_over_abbreviated_version(
+        self, mock_run
+    ):
+        """An exact kernel-version candidate beats an earlier compatible one."""
+        candidates = [
+            "/usr/lib/linux-tools-6.17/perf",
+            "/usr/lib/linux-tools/6.17.13/perf",
+        ]
+        results = {
+            "/usr/lib/linux-tools-6.17/perf": self._completed(
+                stdout="perf version 6.17\n"
+            ),
+            "/usr/lib/linux-tools/6.17.13/perf": self._completed(
+                stdout="perf version 6.17.13\n"
+            ),
+        }
+
+        def fake_run(cmd, **_):
+            return results[cmd[0]]
+
+        mock_run.side_effect = fake_run
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(self.mock_logger),
+                "/usr/lib/linux-tools/6.17.13/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_prefers_exact_for_local_build_release(
+        self, mock_run
+    ):
+        """An exact candidate beats abbreviated compat for local build kernels."""
+        candidates = [
+            "/usr/lib/linux-tools-6.17/perf",
+            "/usr/lib/linux-tools/6.17.13/perf",
+        ]
+        results = {
+            "/usr/lib/linux-tools-6.17/perf": self._completed(
+                stdout="perf version 6.17\n"
+            ),
+            "/usr/lib/linux-tools/6.17.13/perf": self._completed(
+                stdout="perf version 6.17.13\n"
+            ),
+        }
+
+        def fake_run(cmd, **_):
+            return results[cmd[0]]
+
+        mock_run.side_effect = fake_run
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(self.mock_logger),
+                "/usr/lib/linux-tools/6.17.13/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_accepts_local_build_plus_suffix(self, mock_run):
+        """A local build '+' suffix can match an otherwise identical perf version."""
+        mock_run.return_value = self._completed(stdout="perf version 6.17.13\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.17.13/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(self.mock_logger),
+                "/usr/lib/linux-tools/6.17.13/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_rejects_extended_version_suffix(self, mock_run):
+        """A reported version with an adjacent numeric suffix is not compatible."""
+        mock_run.return_value = self._completed(stdout="perf version 6.17.130\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.17.130/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertIsNone(resolve_perf_command(self.mock_logger))
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_skips_timed_out_candidate(self, mock_run):
+        """A hanging perf wrapper does not block resolver fallback candidates."""
+        candidates = ["perf", "/usr/lib/linux-tools/6.17/perf"]
+        results = {
+            "perf": subprocess.TimeoutExpired(
+                ["perf", "--version"],
+                timeout=PERF_VERSION_TIMEOUT_SECONDS,
+            ),
+            "/usr/lib/linux-tools/6.17/perf": self._completed(
+                stdout="perf version 6.17.13\n"
+            ),
+        }
+
+        def fake_run(cmd, **_):
+            result = results[cmd[0]]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        mock_run.side_effect = fake_run
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(self.mock_logger),
+                "/usr/lib/linux-tools/6.17/perf",
+            )
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_get_perf_version(self, mock_run):
@@ -258,9 +437,46 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             ["/usr/lib/linux-tools/6.17/perf", "test", "list"],
         )
         self.assertEqual(
+            mock_run.call_args_list[0].kwargs.get("timeout"),
+            PERF_TEST_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(
             mock_run.call_args_list[1].args[0],
             ["/usr/lib/linux-tools/6.17/perf", "test", "-vv", "perf all PMU test"],
         )
+        self.assertEqual(
+            mock_run.call_args_list[1].kwargs.get("timeout"),
+            PERF_TEST_TIMEOUT_SECONDS,
+        )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_list_timeout_returns_fail(self, mock_run):
+        """A hung perf test list is reported as FAIL, not raised."""
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            ["perf", "test", "list"], PERF_TEST_TIMEOUT_SECONDS
+        )
+
+        result = run_perf_test_candidates(["perf all PMU test"])
+
+        self.assertEqual(result.status, PerfTestStatus.FAIL)
+        self.assertIn("timed out", result.reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_run_perf_test_candidates_run_timeout_returns_fail(self, mock_run):
+        """A hung perf test -vv is reported as FAIL, not raised."""
+        mock_run.side_effect = [
+            self._completed(stdout="  5.2: perf all PMU test\n"),
+            subprocess.TimeoutExpired(
+                ["perf", "test", "-vv", "perf all PMU test"],
+                PERF_TEST_TIMEOUT_SECONDS,
+            ),
+        ]
+
+        result = run_perf_test_candidates(["perf all PMU test"])
+
+        self.assertEqual(result.status, PerfTestStatus.FAIL)
+        self.assertEqual(result.test_name, "perf all PMU test")
+        self.assertIn("timed out", result.reason)
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_run_perf_test_candidates_accepts_old_name_first(self, mock_run):

@@ -105,6 +105,8 @@ ARM_SPE_EVENT_SOURCE_PATH = "/sys/bus/event_source/devices"
 ARM_SPE_PMUS = ("arm_spe_0", "arm_spe_1", "arm_spe_2", "arm_spe_3")
 ARM_SPE_RECORD_TIMEOUT_SECONDS = 180
 ARM_SPE_DECODE_TIMEOUT_SECONDS = 120
+CSPMU_RECORD_TIMEOUT_SECONDS = 30
+PERF_LIST_TIMEOUT_SECONDS = 30
 COMMON_DATA_SOURCE_LEVELS = ("LVL L2", "LVL Local RAM", "LVL Remote RAM")
 DATA_SOURCE_OPS = ("OP LOAD", "OP STORE")
 
@@ -139,9 +141,12 @@ def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
 
     try:
         pmus = sorted(
-            name for name in os.listdir(base_path)
-            if name.startswith("arm_spe")
-            and os.path.isdir(os.path.join(base_path, name))
+            (
+                name for name in os.listdir(base_path)
+                if name.startswith("arm_spe")
+                and os.path.isdir(os.path.join(base_path, name))
+            ),
+            key=lambda name: perf_utils.natural_sort_key(Path(name)),
         )
     except OSError as err:
         if logger:
@@ -240,7 +245,7 @@ def _parse_perf_stat_csv(stderr, busy_cpu, idle_cpu):
     return counts[busy_cpu], counts[idle_cpu]
 
 
-def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger):
+def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger, perf_cmd):
     """Run a single perf stat SMT probe and return (busy_cycles, idle_cycles).
 
     Uses one subprocess so perf stat owns the workload lifetime exactly.
@@ -249,7 +254,7 @@ def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger):
     try:
         result = subprocess.run(
             [
-                "perf", "stat", "-x,", "-e", "cycles", "-A",
+                perf_cmd, "stat", "-x,", "-e", "cycles", "-A",
                 "-C", f"{busy_cpu},{idle_cpu}",
                 "--", "taskset", "-c", str(busy_cpu), "timeout", "2s", "yes",
             ],
@@ -273,16 +278,23 @@ def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger):
     return _parse_perf_stat_csv(result.stderr or "", busy_cpu, idle_cpu)
 
 
-def _get_nvidia_perf_list(logger):
+def _get_nvidia_perf_list(perf_cmd, logger):
     """Get NVIDIA-specific perf event unit families."""
     try:
         cmd_output = subprocess.run(
-            ["perf", "list", "-j"],
-            check=True, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            [perf_cmd, "list", "-j"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=PERF_LIST_TIMEOUT_SECONDS)
     except (subprocess.CalledProcessError, OSError) as e:
         logger.error("Error executing command: %s", e)
         return set()
+    except subprocess.TimeoutExpired as e:
+        logger.error("perf list timed out after %s seconds", e.timeout)
+        raise ValueError(
+            f"perf list timed out after {e.timeout} seconds"
+        ) from e
 
     try:
         perf_list_json = json.loads(cmd_output.stdout)
@@ -305,6 +317,7 @@ def _get_nvidia_pmu_devices(pmu_path=NVIDIA_PMU_SYSFS_PATH):
             for device in path.iterdir()
             if device.name.lower().startswith("nvidia_")
             and re.search(r"_pmu(?:_|$)", device.name.lower())
+            and device.is_dir()
         )
     except OSError:
         return []
@@ -434,12 +447,10 @@ def _record_arm_spe(perf_cmd, perf_data_path, pmu, logger):
     """Record a small workload with the requested ARM SPE PMU."""
     event = f"{pmu}/ts_enable=1,load_filter=1,store_filter=1,min_latency=1/"
     logger.info("Recording ARM SPE data to %s", perf_data_path)
-    # GreenLiT targets Linux DUTs with GNU coreutils; status=none keeps dd quiet
-    # while perf owns the record output.
     return subprocess.run(
         [
             perf_cmd, "record", "-o", perf_data_path, "-e", event, "--",
-            "dd", "if=/dev/zero", "of=/dev/null", "bs=1M", "count=512", "status=none",
+            "dd", "if=/dev/zero", "of=/dev/null", "bs=64M", "count=8",
         ],
         check=False,
         text=True,
@@ -469,7 +480,14 @@ def test_nvidia_perf_events(_, logger):
             version.parse("9.5"):
         GLTCore.GLTTestResult.skip("RHEL supports coresight if version >= 9.5.")
 
-    nvevent_from_dut = _get_nvidia_perf_list(logger)
+    perf_cmd = perf_utils.resolve_perf_command(logger)
+    if perf_cmd is None:
+        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+
+    try:
+        nvevent_from_dut = _get_nvidia_perf_list(perf_cmd, logger)
+    except ValueError as exc:
+        GLTCore.GLTTestResult.fail(str(exc))
     pmu_devices = _get_nvidia_pmu_devices()
     failure_reason = None
     if is_grace:
@@ -512,21 +530,42 @@ def test_all_pmu_events(_, logger):
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 def test_perf_cspmu_rejects_foreign_events(_, logger):
-    """Verify perf rejects CSPMU events from other PMUs (related to commit 15c7ef73)."""
+    """Verify CSPMU rejects events meant for other PMUs (commit 15c7ef73).
+
+    Uses `perf stat -e r2` so Core PMU can run the raw event when CSPMU
+    correctly returns ENOENT for foreign events.
+    """
     nvdev = NvDev()
     if not nvdev.is_cpu_type("grace") and not nvdev.is_cpu_type("vera"):
         GLTCore.GLTTestResult.skip("This is not NVIDIA Grace or Vera CPU.")
 
-    if not glt_utils.is_cli_available("perf"):
+    # Commit 15c7ef73 only applies when nvidia_*_pmu devices are registered.
+    pmu_devices = _get_nvidia_pmu_devices()
+    if not pmu_devices:
+        GLTCore.GLTTestResult.skip(
+            "No CoreSight nvidia_*_pmu devices registered; "
+            "cannot verify commit 15c7ef73."
+        )
+
+    perf_cmd = perf_utils.resolve_perf_command(logger)
+    if perf_cmd is None:
         GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
 
     try:
-        # Test if the kernel properly rejects PMU events meant for other PMUs (commit 15c7ef73).
+        # Repro from commit 15c7ef73: Core PMU should handle raw r2 after CSPMU
+        # rejects the foreign event with ENOENT.
         cmd_output = subprocess.run(
-            "perf record -q -o /dev/null -e cycles:Pu -a -- sleep 0.1",
-            shell=True, executable="/bin/bash", check=True, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        logger.debug("perf record completed: %s", cmd_output)
+            [perf_cmd, "stat", "-e", "r2", "--", "sleep", "1"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=CSPMU_RECORD_TIMEOUT_SECONDS)
+        logger.debug("perf stat completed: %s", cmd_output)
+    except subprocess.TimeoutExpired:
+        GLTCore.GLTTestResult.fail(
+            f"perf command timed out after {CSPMU_RECORD_TIMEOUT_SECONDS} seconds. "
+            "This may indicate that perf or the workload stalled."
+        )
     except subprocess.CalledProcessError as e:
         stderr_line = " ".join((e.stderr or "").splitlines())
         GLTCore.GLTTestResult.fail(
@@ -557,27 +596,40 @@ def test_arm_spe_pmu(sd, logger):
             "SPE requires OS and firmware support, please check both."
         )
 
-    if not glt_utils.is_cli_available("perf"):
+    perf_cmd = perf_utils.resolve_perf_command(logger)
+    if perf_cmd is None:
         GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
 
     perf_data_path = os.path.join(sd.log_dir, "test_arm_spe_pmu.perf.data")
 
     try:
         subprocess.run(
-            ["perf", "record", "-e", "arm_spe//", "-o", perf_data_path, "--",
+            [perf_cmd, "record", "-e", "arm_spe//", "-o", perf_data_path, "--",
              "dd", "if=/dev/zero", "of=/dev/null", "bs=1M", "count=500"],
             check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=ARM_SPE_RECORD_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        GLTCore.GLTTestResult.fail(
+            f"perf record timed out after {ARM_SPE_RECORD_TIMEOUT_SECONDS} seconds "
+            "with arm_spe event"
+        )
     except subprocess.CalledProcessError as e:
         stderr_out = e.stderr.decode(errors="replace") if e.stderr else ""
         GLTCore.GLTTestResult.fail(f"perf record failed with arm_spe event: {e} - {stderr_out}")
 
     try:
         cmd_output = subprocess.run(
-            ["perf", "report", "-i", perf_data_path, "--stdio"],
+            [perf_cmd, "report", "-i", perf_data_path, "--stdio"],
             check=True, text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            timeout=ARM_SPE_DECODE_TIMEOUT_SECONDS)
         logger.debug(cmd_output.stdout)
+    except subprocess.TimeoutExpired:
+        GLTCore.GLTTestResult.fail(
+            f"perf report timed out after {ARM_SPE_DECODE_TIMEOUT_SECONDS} seconds "
+            f"with {perf_data_path}"
+        )
     except subprocess.CalledProcessError as e:
         GLTCore.GLTTestResult.fail(f"perf report failed with {perf_data_path}: {e} - {e.stdout}")
 
@@ -615,14 +667,19 @@ def test_pmccntr_smt_handling(_, logger):
         )
     busy_cpu, idle_cpu = pair
 
-    for tool in ("perf", "taskset", "timeout", "yes"):
+    perf_cmd = perf_utils.resolve_perf_command(logger)
+    if perf_cmd is None:
+        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+
+    for tool in ("taskset", "timeout", "yes"):
         if not glt_utils.is_cli_available(tool):
             GLTCore.GLTTestResult.fail(
                 f"Required tool '{tool}' not found; install it to run this test."
             )
 
     try:
-        busy_cycles, idle_cycles = _probe_pmccntr_smt(busy_cpu, idle_cpu, logger)
+        busy_cycles, idle_cycles = _probe_pmccntr_smt(
+            busy_cpu, idle_cpu, logger, perf_cmd)
     except ValueError as exc:
         GLTCore.GLTTestResult.fail(f"PMCCNTR_EL0 SMT probe failed: {exc}")
 
@@ -679,7 +736,10 @@ def test_perf_arm_spe_olympus_data_source(sd, logger):
         GLTCore.GLTTestResult.fail("ARM SPE PMU is not available under /sys/bus/event_source/devices.")
     logger.info("Using ARM SPE PMU: %s", pmu)
 
-    perf_data_path = os.path.join(sd.log_dir, "test_perf_arm_spe_olympus_data_source.perf.data")
+    os.makedirs(sd.log_dir, exist_ok=True)
+    perf_data_path = os.path.join(
+        sd.log_dir, "test_perf_arm_spe_olympus_data_source.perf.data"
+    )
 
     try:
         result = _record_arm_spe(perf_cmd, perf_data_path, pmu, logger)

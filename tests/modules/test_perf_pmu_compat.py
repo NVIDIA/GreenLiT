@@ -192,9 +192,9 @@ class TestPerfPmuCompatibility(GLTTestBase):
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_probe_pmccntr_smt_timeout_raises_value_error(self, mock_run):
         """Outer perf timeout is converted to a probe failure."""
-        mock_run.side_effect = subprocess.TimeoutExpired(["perf"], 10)
+        mock_run.side_effect = subprocess.TimeoutExpired(["/perf"], 10)
         with self.assertRaises(ValueError) as ctx:
-            glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger)
+            glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger, "/perf")
         self.assertIn("timed out", str(ctx.exception))
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
@@ -202,8 +202,26 @@ class TestPerfPmuCompatibility(GLTTestBase):
         """Subprocess startup errors are converted to probe failures."""
         mock_run.side_effect = PermissionError("perf not executable")
         with self.assertRaises(ValueError) as ctx:
-            glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger)
+            glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger, "/perf")
         self.assertIn("failed to start", str(ctx.exception))
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    def test_probe_pmccntr_smt_uses_resolved_perf_command(self, mock_run):
+        """Probe argv uses the caller-supplied resolved perf binary."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["/perf"],
+            returncode=0,
+            stdout="",
+            stderr=(
+                "CPU0,500000000,,cycles,1000004265,100.00,,\n"
+                "CPU1,40000,,cycles,1000004265,100.00,,\n"
+            ),
+        )
+        busy, idle = glt_test_pmu._probe_pmccntr_smt(
+            0, 1, self.mock_logger, "/perf")
+        self.assertEqual(busy, 500000000)
+        self.assertEqual(idle, 40000)
+        self.assertEqual(mock_run.call_args.args[0][0], "/perf")
 
     # --- test_pmccntr_smt_handling (decorated function) ---
 
@@ -244,7 +262,10 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_nvdev.return_value.is_cpu_type.return_value = True
         mock_pair.return_value = (2, 3)
         mock_glt_utils.is_cli_available.side_effect = lambda t: t != "taskset"
-        with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+        with GLTTestBase.unittest.mock.patch(
+            "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
+            return_value="/perf",
+        ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("taskset", str(ctx.exception))
 
@@ -260,7 +281,12 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_pair.return_value = (2, 3)
         mock_glt_utils.is_cli_available.return_value = True
         mock_probe.return_value = (2_558_580_492, 305_749)
-        glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
+        with GLTTestBase.unittest.mock.patch(
+            "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
+            return_value="/perf",
+        ):
+            glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
+        mock_probe.assert_called_once_with(2, 3, self.mock_logger, "/perf")
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._probe_pmccntr_smt")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._find_online_smt_pair")
@@ -275,7 +301,10 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_glt_utils.is_cli_available.return_value = True
         # Unpatched: idle CPU reports cycles near the busy CPU
         mock_probe.return_value = (2_880_457_316, 2_880_459_810)
-        with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+        with GLTTestBase.unittest.mock.patch(
+            "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
+            return_value="/perf",
+        ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("c3d78c34ad00", str(ctx.exception))
 
@@ -291,7 +320,10 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_pair.return_value = (2, 3)
         mock_glt_utils.is_cli_available.return_value = True
         mock_probe.return_value = (50_000, 1_000)
-        with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+        with GLTTestBase.unittest.mock.patch(
+            "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
+            return_value="/perf",
+        ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("floor", str(ctx.exception))
 
@@ -307,9 +339,221 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_pair.return_value = (2, 3)
         mock_glt_utils.is_cli_available.return_value = True
         mock_probe.side_effect = ValueError("No cycle count found for CPU 3")
-        with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+        with GLTTestBase.unittest.mock.patch(
+            "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
+            return_value="/perf",
+        ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("CPU 3", str(ctx.exception))
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
+    @GLTTestBase.unittest.mock.patch(
+        "src.modules.arm64.glt_test_pmu._get_nvidia_pmu_devices"
+    )
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_cspmu_foreign_event_check_uses_resolved_perf_command(
+        self, mock_nvdev, mock_get_devices, mock_perf_utils, mock_run
+    ):
+        """CSPMU rejection check avoids shell=True and uses resolved perf."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        mock_get_devices.return_value = ["nvidia_pcie_pmu_0"]
+        mock_perf_utils.resolve_perf_command.return_value = "/perf"
+        mock_run.return_value = self._completed_process(stdout="recorded")
+
+        glt_test_pmu.test_perf_cspmu_rejects_foreign_events(
+            None,
+            self.mock_logger,
+        )
+
+        mock_run.assert_called_once_with(
+            [
+                "/perf",
+                "stat",
+                "-e",
+                "r2",
+                "--",
+                "sleep",
+                "1",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=glt_test_pmu.CSPMU_RECORD_TIMEOUT_SECONDS,
+        )
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
+    @GLTTestBase.unittest.mock.patch(
+        "src.modules.arm64.glt_test_pmu._get_nvidia_pmu_devices"
+    )
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_cspmu_foreign_event_check_times_out_cleanly(
+        self, mock_nvdev, mock_get_devices, mock_perf_utils, mock_run
+    ):
+        """CSPMU perf stat timeout reports a framework failure."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        mock_get_devices.return_value = ["nvidia_pcie_pmu_0"]
+        mock_perf_utils.resolve_perf_command.return_value = "/perf"
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            ["/perf", "stat"], glt_test_pmu.CSPMU_RECORD_TIMEOUT_SECONDS
+        )
+
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "perf command timed out"):
+            glt_test_pmu.test_perf_cspmu_rejects_foreign_events(
+                None,
+                self.mock_logger,
+            )
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
+    @GLTTestBase.unittest.mock.patch(
+        "src.modules.arm64.glt_test_pmu._get_nvidia_pmu_devices"
+    )
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_cspmu_foreign_event_check_skips_without_nvidia_pmu(
+        self, mock_nvdev, mock_get_devices, mock_perf_utils, mock_run
+    ):
+        """Empty nvidia_*_pmu sysfs list skips to avoid a vacuous pass."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        mock_get_devices.return_value = []
+
+        with self.assertRaises(GLTCore.GLTTestSkip) as ctx:
+            glt_test_pmu.test_perf_cspmu_rejects_foreign_events(
+                None,
+                self.mock_logger,
+            )
+
+        self.assertIn("nvidia_*_pmu", str(ctx.exception))
+        mock_perf_utils.resolve_perf_command.assert_not_called()
+        mock_run.assert_not_called()
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    def test_arm_spe_pmu_uses_resolved_perf_command(self, mock_run):
+        """Legacy ARM SPE smoke test uses the kernel-compatible perf binary."""
+        self.mock_sd.log_dir = "/tmp/greenlit"
+        report_output = "\n".join([
+            "Samples:",
+            "l1d-miss",
+            "l1d-access",
+            "llc-miss",
+            "llc-access",
+            "tlb-access",
+            "memory",
+            "branch",
+        ])
+        mock_run.side_effect = [
+            self._completed_process(args=["record"], stdout=b""),
+            self._completed_process(args=["report"], stdout=report_output),
+        ]
+
+        with self.mock.patch.object(
+            glt_test_pmu.check_kernel_config,
+            "parse_kconfig",
+            return_value={"CONFIG_ARM_SPE_PMU": "y"},
+        ), self.mock.patch.object(
+            glt_test_pmu.os.path, "exists", return_value=True
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ):
+            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+        expected_calls = [
+            self.mock.call(
+                [
+                    "/perf",
+                    "record",
+                    "-e",
+                    "arm_spe//",
+                    "-o",
+                    "/tmp/greenlit/test_arm_spe_pmu.perf.data",
+                    "--",
+                    "dd",
+                    "if=/dev/zero",
+                    "of=/dev/null",
+                    "bs=1M",
+                    "count=500",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=glt_test_pmu.ARM_SPE_RECORD_TIMEOUT_SECONDS,
+            ),
+            self.mock.call(
+                [
+                    "/perf",
+                    "report",
+                    "-i",
+                    "/tmp/greenlit/test_arm_spe_pmu.perf.data",
+                    "--stdio",
+                ],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS,
+            ),
+        ]
+        mock_run.assert_has_calls(expected_calls, any_order=False)
+
+    def test_arm_spe_pmu_fails_when_no_perf_command_exists(self):
+        """ARM SPE smoke test fails before record when no usable perf exists."""
+        with self.mock.patch.object(
+            glt_test_pmu.check_kernel_config,
+            "parse_kconfig",
+            return_value={"CONFIG_ARM_SPE_PMU": "y"},
+        ), self.mock.patch.object(
+            glt_test_pmu.os.path, "exists", return_value=True
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=None
+        ), self.mock.patch.object(
+            glt_test_pmu.subprocess, "run"
+        ) as mock_run, self.assertRaises(GLTCore.GLTTestFail):
+            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+        mock_run.assert_not_called()
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    def test_arm_spe_pmu_record_timeout_fails_cleanly(self, mock_run):
+        """ARM SPE smoke test reports perf record timeouts as test failures."""
+        self.mock_sd.log_dir = "/tmp/greenlit"
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            ["/perf", "record"], glt_test_pmu.ARM_SPE_RECORD_TIMEOUT_SECONDS
+        )
+
+        with self.mock.patch.object(
+            glt_test_pmu.check_kernel_config,
+            "parse_kconfig",
+            return_value={"CONFIG_ARM_SPE_PMU": "y"},
+        ), self.mock.patch.object(
+            glt_test_pmu.os.path, "exists", return_value=True
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf record timed out"):
+            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    def test_arm_spe_pmu_report_timeout_fails_cleanly(self, mock_run):
+        """ARM SPE smoke test reports perf report timeouts as test failures."""
+        self.mock_sd.log_dir = "/tmp/greenlit"
+        mock_run.side_effect = [
+            self._completed_process(args=["record"], stdout=b""),
+            subprocess.TimeoutExpired(
+                ["/perf", "report"], glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS
+            ),
+        ]
+
+        with self.mock.patch.object(
+            glt_test_pmu.check_kernel_config,
+            "parse_kconfig",
+            return_value={"CONFIG_ARM_SPE_PMU": "y"},
+        ), self.mock.patch.object(
+            glt_test_pmu.os.path, "exists", return_value=True
+        ), self.mock.patch.object(
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf report timed out"):
+            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
 
     def test_decode_arm_spe_uses_data_source_fields(self):
         """The decode helper asks perf script for data_src output."""
@@ -351,17 +595,19 @@ class TestPerfPmuCompatibility(GLTTestBase):
             )
 
     def test_find_arm_spe_pmu_ignores_non_directory_entries(self):
-        """ARM SPE PMU discovery ignores sysfs files that share the prefix."""
+        """ARM SPE PMU discovery ignores files and naturally sorts directories."""
         with tempfile.TemporaryDirectory() as tmpdir:
             with open(os.path.join(tmpdir, "arm_spe_0"), "w", encoding="utf-8") as handle:
                 handle.write("not a directory\n")
             with open(os.path.join(tmpdir, "arm_spe_note"), "w", encoding="utf-8") as handle:
                 handle.write("not a directory\n")
-            os.mkdir(os.path.join(tmpdir, "arm_spe_2"))
+            # Use names outside ARM_SPE_PMUS so discovery reaches natural-sort fallback.
+            os.mkdir(os.path.join(tmpdir, "arm_spe_10"))
+            os.mkdir(os.path.join(tmpdir, "arm_spe_4"))
 
             self.assertEqual(
                 glt_test_pmu._find_arm_spe_pmu(base_path=tmpdir),
-                "arm_spe_2",
+                "arm_spe_4",
             )
 
     def test_find_arm_spe_pmu_logs_listdir_errors(self):
@@ -452,9 +698,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
                 "dd",
                 "if=/dev/zero",
                 "of=/dev/null",
-                "bs=1M",
-                "count=512",
-                "status=none",
+                "bs=64M",
+                "count=8",
             ],
             check=False,
             text=True,
@@ -500,7 +745,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
             return_value=self._completed_process(
                 stdout="1 |OP LOAD|LVL L2 hit| memcpy"
             ),
-        ):
+        ), self.mock.patch.object(glt_test_pmu.os, "makedirs") as mock_makedirs:
             glt_test_pmu.test_perf_arm_spe_olympus_data_source(
                 self.mock_sd,
                 self.mock_logger,
@@ -512,6 +757,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
             "arm_spe_0",
             self.mock_logger,
         )
+        mock_makedirs.assert_called_once_with("/tmp/greenlit", exist_ok=True)
         self.mock_logger.info.assert_any_call(
             "Decoded ARM SPE data-source summary: decoded_lines=%d",
             1,
