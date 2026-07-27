@@ -17,32 +17,40 @@
 Python script to test I2C.
 """
 import os
+import platform
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from common import glt_core as GLTCore
 from common import glt_utils
 from common.nv_device import NvDev
+from scripts import check_kernel_config
 
 
-def _first_eligible_tegra_i2c_device() -> str | None:
+_I2C_ACPI_RUNTIME_PM_BUG_HEADER = "BUG: sleeping function called from invalid context"
+_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT = 10
+_I2C_ACPI_RUNTIME_PM_IPMI_TRIGGER_ATTEMPTS = 5
+_I2C_ACPI_RUNTIME_PM_LOG_OVERLAP_LINES = 20
+_I2C_ACPI_RUNTIME_PM_QUIET_INTERVAL_SECONDS = 2
+_IPMI_TEGRA_TOPOLOGY_ERROR = "error"
+_IPMI_TEGRA_TOPOLOGY_MATCH = "match"
+_IPMI_TEGRA_TOPOLOGY_NO_MATCH = "no_match"
+
+
+@dataclass(frozen=True)
+class _KernelLogSnapshot:
+    """Kernel log text plus journal cursor and backend command status.
+
+    query_succeeded records whether the selected log command completed
+    successfully; empty successful cursor deltas are valid snapshots.
     """
-    Return the basename of the first NVDA2017:* device bound to the
-    tegra-i2c platform driver, or None if none is bound.
-    """
-    drv = Path("/sys/bus/platform/drivers/tegra-i2c")
-    if not drv.is_dir():
-        return None
 
-    candidates = [
-        entry.name
-        for entry in drv.iterdir()
-        if entry.name.startswith("NVDA2017:") and entry.is_symlink()
-    ]
-    if not candidates:
-        return None
-    return sorted(candidates)[0]
+    text: str
+    cursor: str | None
+    query_succeeded: bool
+    backend: str
 
 
 def _tegra_i2c_devices(prefix: str = "NVDA2017:",
@@ -76,27 +84,71 @@ def _tegra_i2c_kernel_error_messages(dev_name: str) -> list[str]:
     ]
 
 
-def _kernel_log_text() -> str:
-    """Return the current boot kernel log text, or an empty string if unavailable."""
-    if glt_utils.is_cli_available("journalctl"):
-        try:
-            result = subprocess.run(["journalctl", "--no-pager", "-b0", "-k"],
-                                    capture_output=True, text=True, check=False, timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
-        else:
-            if result.returncode == 0:
-                return result.stdout
-
+def _dmesg_kernel_log_snapshot() -> _KernelLogSnapshot:
+    """Return a full dmesg snapshot for legacy full-log comparisons."""
     if glt_utils.is_cli_available("dmesg"):
         try:
-            result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False, timeout=10)
-        except subprocess.TimeoutExpired:
-            return ""
+            result = subprocess.run(["dmesg"], capture_output=True, text=True, check=False,
+                                    timeout=_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            return _KernelLogSnapshot("", None, False, "dmesg")
         if result.returncode == 0:
-            return result.stdout
+            text = result.stdout
+            if not text.strip():
+                text = ""
+            return _KernelLogSnapshot(text, None, True, "dmesg")
 
-    return ""
+    return _KernelLogSnapshot("", None, False, "dmesg")
+
+
+def _journal_kernel_log_snapshot(after_cursor: str | None = None) -> _KernelLogSnapshot:
+    """Return a journalctl kernel-log snapshot without dmesg fallback."""
+    if glt_utils.is_cli_available("journalctl"):
+        command = ["journalctl", "--no-pager", "-b0", "-k", "--show-cursor"]
+        if after_cursor:
+            command.insert(4, f"--after-cursor={after_cursor}")
+        try:
+            result = subprocess.run(command,
+                                    capture_output=True, text=True, check=False,
+                                    timeout=_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired):
+            return _KernelLogSnapshot("", None, False, "journal")
+        if result.returncode == 0:
+            lines = result.stdout.splitlines()
+            cursor = next(
+                (line.removeprefix("-- cursor: ").removesuffix(" --")
+                 for line in reversed(lines) if line.startswith("-- cursor: ")),
+                None,
+            )
+            text = "\n".join(line for line in lines if not line.startswith("-- cursor: "))
+            if not text.strip():
+                text = ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            return _KernelLogSnapshot(text, cursor, True, "journal")
+
+    return _KernelLogSnapshot("", None, False, "journal")
+
+
+def _kernel_log_snapshot() -> _KernelLogSnapshot:
+    """Return the best full kernel log snapshot for baseline comparisons.
+
+    Non-empty journal or dmesg text is the usable full-log criterion. If
+    neither reader returns text, keep a successful empty journal result;
+    otherwise return the dmesg result, including its failure state.
+    """
+    journal_snapshot = _journal_kernel_log_snapshot()
+    if journal_snapshot.text:
+        return journal_snapshot
+
+    dmesg_snapshot = _dmesg_kernel_log_snapshot()
+    if dmesg_snapshot.text:
+        return dmesg_snapshot
+
+    if journal_snapshot.query_succeeded:
+        return journal_snapshot
+
+    return dmesg_snapshot
 
 
 def _new_tegra_i2c_kernel_errors(dev_name: str, previous_log: str, current_log: str) -> list[str]:
@@ -113,6 +165,17 @@ def _new_tegra_i2c_kernel_errors(dev_name: str, previous_log: str, current_log: 
         for message in _tegra_i2c_kernel_error_messages(dev_name)
         if message in current_log
     ]
+
+
+def _kernel_log_delta(baseline_log: str, current_log: str) -> str:
+    """Return the comparable suffix of a contiguous full-log snapshot."""
+    baseline_tail = "\n".join(
+        baseline_log.splitlines()[-_I2C_ACPI_RUNTIME_PM_LOG_OVERLAP_LINES:]
+    )
+    new_log = current_log[len(baseline_log):]
+    if baseline_tail:
+        new_log = f"{baseline_tail}\n{new_log}"
+    return new_log
 
 
 def _dev_unbind_bind(dev_name: str) -> tuple[bool, str]:
@@ -135,6 +198,114 @@ def _dev_unbind_bind(dev_name: str) -> tuple[bool, str]:
         return (False, f"write {bind}: {exc}")
 
     time.sleep(0.5)
+    return (True, "")
+
+
+def _has_tegra_i2c_acpi_irq_safe_bug(log: str) -> bool:
+    """Return true when log shows Tegra I2C sleeping in ACPI runtime resume."""
+    required_markers = (
+        "acpi_subsys_runtime_resume",
+        "rpm_resume",
+        "tegra_i2c_xfer",
+    )
+    for block in log.split(_I2C_ACPI_RUNTIME_PM_BUG_HEADER)[1:]:
+        has_mutex_frame = "mutex_lock" in block
+        if has_mutex_frame and all(marker in block for marker in required_markers):
+            return True
+
+    return False
+
+
+def _tegra_i2c_parent_from_ipmi_devpath(
+    udev_output: str, tegra_i2c_devices: set[str]
+) -> str | None:
+    """Return the Tegra I2C parent of /dev/ipmi0 when the topology matches."""
+    devpaths = []
+    for line in udev_output.splitlines():
+        if line.startswith("P: "):
+            devpaths.append(line.removeprefix("P: ").strip())
+        elif line.startswith("E: DEVPATH="):
+            devpaths.append(line.removeprefix("E: DEVPATH=").strip())
+
+    for devpath in devpaths:
+        if "IPI0001" not in devpath:
+            continue
+        path_parts = set(Path(devpath).parts)
+        for dev_name in tegra_i2c_devices:
+            if dev_name in path_parts:
+                return dev_name
+
+    return None
+
+
+def _ipmi_over_tegra_i2c_acpi_topology(logger) -> tuple[str, str, Path | None]:
+    """Inspect whether /dev/ipmi0 is connected through ACPI Tegra I2C."""
+    if not Path("/dev/ipmi0").exists():
+        return (_IPMI_TEGRA_TOPOLOGY_NO_MATCH, "/dev/ipmi0 is not present.", None)
+
+    try:
+        # Use shell=False to prevent command injection (CWE-78)
+        result = subprocess.run(
+            ["udevadm", "info", "-n", "/dev/ipmi0"],
+            capture_output=True, shell=False, text=True, check=False,
+            timeout=_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT
+        )
+    except (FileNotFoundError, PermissionError, subprocess.TimeoutExpired) as exc:
+        logger.error(f"udevadm failed for /dev/ipmi0: {exc}")
+        return (_IPMI_TEGRA_TOPOLOGY_ERROR, f"udevadm failed for /dev/ipmi0: {exc}", None)
+
+    if result.returncode != 0:
+        logger.error(result.stdout)
+        logger.error(result.stderr)
+        return (
+            _IPMI_TEGRA_TOPOLOGY_ERROR,
+            "udevadm failed while inspecting /dev/ipmi0.",
+            None,
+        )
+
+    parent = _tegra_i2c_parent_from_ipmi_devpath(
+        result.stdout, set(_tegra_i2c_devices(prefix="NVDA"))
+    )
+    if parent is None:
+        return (
+            _IPMI_TEGRA_TOPOLOGY_NO_MATCH,
+            "/dev/ipmi0 is not under IPI0001 on a bound ACPI Tegra I2C device.",
+            None,
+        )
+
+    return (_IPMI_TEGRA_TOPOLOGY_MATCH, parent, Path("/sys/devices/platform") / parent)
+
+
+def _tegra_i2c_runtime_status(tegra_i2c_device_path: Path) -> str | None:
+    """Return the runtime PM status for a Tegra I2C platform device."""
+    try:
+        return (tegra_i2c_device_path / "power" / "runtime_status").read_text(
+            encoding="utf-8"
+        ).strip()
+    except (FileNotFoundError, PermissionError, OSError):
+        return None
+
+
+def _run_ipmitool_mc_info(logger) -> tuple[bool, str]:
+    """Run the IPMI command that exercises the SSIF I2C path."""
+    try:
+        # Use shell=False to prevent command injection (CWE-78)
+        result = subprocess.run(
+            ["ipmitool", "mc", "info"], capture_output=True,
+            shell=False, text=True, check=False,
+            timeout=_I2C_ACPI_RUNTIME_PM_COMMAND_TIMEOUT
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.error(f"ipmitool mc info failed: {exc}")
+        return (False, f"ipmitool mc info failed; cannot exercise Tegra I2C: {exc}")
+    if result.returncode != 0:
+        logger.error(result.stdout)
+        logger.error(result.stderr)
+        return (False, "ipmitool mc info failed; cannot exercise Tegra I2C.")
+    if "Device Available          : yes" not in result.stdout:
+        logger.error(result.stdout)
+        return (False, "Invalid IPMI device state detected by ipmitool.")
+
     return (True, "")
 
 
@@ -231,6 +402,126 @@ def test_ipmi_i2c_pec(_, logger):
             GLTCore.GLTTestResult.fail(f"Error executing command: {e}")
 
 
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_tegra_i2c_acpi_runtime_pm_irq_safe(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify ACPI-backed Tegra I2C runtime PM does not sleep while atomic
+    during IPMI-triggered runtime resume.
+
+    PATCH: https://git.kernel.org/torvalds/c/14d069d92951 v6.11+
+    """
+
+    if not Path("/sys/firmware/acpi").is_dir():
+        GLTCore.GLTTestResult.skip(
+            "System is not ACPI-booted; this test only runs on ACPI systems.")
+
+    topology_status, topology_reason, tegra_i2c_path = _ipmi_over_tegra_i2c_acpi_topology(
+        logger
+    )
+    if topology_status == _IPMI_TEGRA_TOPOLOGY_ERROR:
+        GLTCore.GLTTestResult.fail(topology_reason)
+    if topology_status == _IPMI_TEGRA_TOPOLOGY_NO_MATCH:
+        GLTCore.GLTTestResult.skip(topology_reason)
+
+    if not glt_utils.is_cli_available("ipmitool"):
+        GLTCore.GLTTestResult.fail("Please install 'ipmitool' to perform the test.")
+
+    config_path = Path(f"/boot/config-{platform.uname().release}")
+    try:
+        kernel_config = check_kernel_config.parse_kconfig(str(config_path))
+    except (FileNotFoundError, PermissionError, OSError):
+        kernel_config = None
+
+    baseline_snapshot = _kernel_log_snapshot()
+    baseline_log = baseline_snapshot.text
+    journal_backend = baseline_snapshot.backend == "journal"
+    journal_cursor_available = bool(journal_backend and baseline_snapshot.cursor)
+    if not baseline_log:
+        GLTCore.GLTTestResult.fail(
+            "Cannot read kernel log; cannot check for sleeping-while-atomic "
+            "during Tegra I2C ACPI runtime resume.")
+    if _has_tegra_i2c_acpi_irq_safe_bug(baseline_log):
+        GLTCore.GLTTestResult.fail(
+            "Kernel log already contains sleeping-while-atomic BUG with "
+            "mutex_lock during acpi_subsys_runtime_resume/tegra_i2c_xfer.")
+
+    saw_suspended_at_trigger = False
+    runtime_status_at_trigger = None
+    for _ in range(_I2C_ACPI_RUNTIME_PM_IPMI_TRIGGER_ATTEMPTS):
+        time.sleep(_I2C_ACPI_RUNTIME_PM_QUIET_INTERVAL_SECONDS)
+        runtime_status_at_trigger = _tegra_i2c_runtime_status(tegra_i2c_path)
+        if runtime_status_at_trigger == "suspended":
+            saw_suspended_at_trigger = True
+        ok, reason = _run_ipmitool_mc_info(logger)
+        if not ok:
+            GLTCore.GLTTestResult.fail(reason)
+
+    bug_reason = (
+        "Found sleeping-while-atomic BUG in kernel log during Tegra I2C "
+        "ACPI runtime resume (mutex_lock from tegra_i2c_xfer via "
+        "acpi_subsys_runtime_resume). "
+        "Backport kernel commit 14d069d92951 to fix it.")
+
+    if journal_cursor_available:
+        post_snapshot = _journal_kernel_log_snapshot(
+            baseline_snapshot.cursor
+        )
+        if not post_snapshot.query_succeeded:
+            GLTCore.GLTTestResult.fail(
+                "Cannot read post-trigger kernel log; cannot check for "
+                "sleeping-while-atomic during Tegra I2C ACPI runtime resume.")
+        new_log = post_snapshot.text
+    else:
+        if journal_backend:
+            post_snapshot = _journal_kernel_log_snapshot(None)
+        else:
+            post_snapshot = _dmesg_kernel_log_snapshot()
+        log = post_snapshot.text
+        if not post_snapshot.query_succeeded:
+            GLTCore.GLTTestResult.fail(
+                "Cannot read post-trigger kernel log; cannot check for "
+                "sleeping-while-atomic during Tegra I2C ACPI runtime resume.")
+        if not log:
+            GLTCore.GLTTestResult.fail(
+                "Post-trigger kernel log snapshot is empty; cannot reliably "
+                "diff new entries for sleeping-while-atomic BUG.")
+        if not log.startswith(baseline_log):
+            if _has_tegra_i2c_acpi_irq_safe_bug(log):
+                GLTCore.GLTTestResult.fail(bug_reason)
+            GLTCore.GLTTestResult.fail(
+                "Kernel log cursor is non-contiguous; cannot reliably diff new "
+                "entries for sleeping-while-atomic BUG.")
+        new_log = _kernel_log_delta(baseline_log, log)
+
+    if _has_tegra_i2c_acpi_irq_safe_bug(new_log):
+        GLTCore.GLTTestResult.fail(bug_reason)
+
+    if not saw_suspended_at_trigger:
+        GLTCore.GLTTestResult.fail(
+            f"Tegra I2C runtime_status at trigger was {runtime_status_at_trigger}; "
+            "runtime resume was not confirmed, so absence of "
+            "sleeping-while-atomic BUG is non-conclusive.")
+
+    if kernel_config is None:
+        GLTCore.GLTTestResult.skip(
+            "Cannot read kernel config; ipmitool exercised IPMI-over-Tegra-I2C, "
+            "but absence of sleeping-while-atomic BUG is non-conclusive.")
+    else:
+        missing_configs = [
+            config
+            for config in ("CONFIG_DEBUG_ATOMIC_SLEEP", "CONFIG_KALLSYMS")
+            if kernel_config.get(config) != "y"
+        ]
+        if missing_configs:
+            GLTCore.GLTTestResult.skip(
+                f"{', '.join(missing_configs)} is not enabled; ipmitool exercised "
+                "IPMI-over-Tegra-I2C, but absence of sleeping-while-atomic BUG "
+                "is non-conclusive.")
+
+
 def _restore_tegra_i2c_binding(_scheduler, attr, logger):
     dev_names = getattr(attr, "rebind_devices", None)
     if dev_names is None:
@@ -274,9 +565,10 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
         GLTCore.GLTTestResult.skip(
             "System is not ACPI-booted; this test only runs on ACPI-booted systems.")
 
-    dev_name = _first_eligible_tegra_i2c_device()
-    if dev_name is None:
+    devices = _tegra_i2c_devices()
+    if not devices:
         GLTCore.GLTTestResult.skip("No tegra-i2c device bound to the platform driver.")
+    dev_name = devices[0]
 
     test_tegra_i2c_dma_pio_fallback.attr.picked_device = dev_name
 
@@ -335,7 +627,7 @@ def test_tegra410_i2c_device(_, logger):
 
     logger.info("Detected Tegra410 I2C platform devices: %s", ", ".join(devices))
 
-    kernel_log = _kernel_log_text()
+    kernel_log = _kernel_log_snapshot().text
     if not kernel_log:
         GLTCore.GLTTestResult.skip(
             "Kernel log is unavailable; cannot validate Tegra410 I2C probe/transfer errors.")
@@ -354,7 +646,7 @@ def test_tegra410_i2c_device(_, logger):
                 f"{dev_name} is not bound to tegra-i2c after rebind. "
                 "Include kernel commit 59717f260183 to add Tegra410 support.")
 
-        current_log = _kernel_log_text()
+        current_log = _kernel_log_snapshot().text
         if not current_log:
             GLTCore.GLTTestResult.skip(
                 f"Kernel log unavailable after rebinding {dev_name}; cannot validate new errors.")
