@@ -157,6 +157,14 @@ class TestGLTCore(GLTTestBase):
         self.assertIn("Quick sanity check", GLTPlanType.SANITY.description)
         self.assertIn("Standard test cases", GLTPlanType.STANDARD.description)
         self.assertIn("Stress system", GLTPlanType.STRESS.description)
+        self.assertIn(
+            "may hang and require a power cycle",
+            GLTPlanType.STANDARD.description,
+        )
+        self.assertIn(
+            "may hang and require a power cycle",
+            GLTPlanType.STRESS.description,
+        )
 
     def test_plan(self):
         """Test the GLTPlan class"""

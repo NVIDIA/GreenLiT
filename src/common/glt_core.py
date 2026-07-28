@@ -267,8 +267,18 @@ class GLTPlanType(Enum):
     """GLT supported test plans"""
 
     SANITY = ("sanity", "(default) Quick sanity check.", ["ext_executable"])
-    STANDARD = ("standard", "Standard test cases, reboot will be performed.", ["ext_executable"])
-    STRESS = ("stress", "Stress system, reboot will be performed.", ["ext_executable"])
+    STANDARD = (
+        "standard",
+        "Standard test cases, reboot will be performed. "
+        "The system may hang and require a power cycle to recover.",
+        ["ext_executable"],
+    )
+    STRESS = (
+        "stress",
+        "Stress system, reboot will be performed. "
+        "The system may hang and require a power cycle to recover.",
+        ["ext_executable"],
+    )
     EXT_EXECUTABLE = ("ext_executable", "External test cases.", [])
 
     def __init__(self, value, description, nested):
