@@ -1308,33 +1308,32 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         ) as mock_popen, GLTTestBase.unittest.mock.patch(
             "subprocess.run", return_value=mock_process
         ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_systemd_running", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
             "src.common.glt_utils.systemd_enable", return_value=True
         ):
             mock_process.communicate.return_value = ("", "")
             mock_process.returncode = 0
 
             result = reboot_with_reisub(self.mock_logger, self.mock_sd)
-            self.assertFalse(result)
+            self.assertEqual(result, (True, None))
 
             # Verify progress_record_time was called
             self.mock_sd.progress_record_time.assert_called_once_with(
                 self.mock_logger, "REISUB"
             )
 
-            expected_cmd = (
-                "sh -c 'sleep 5; \\\n"
-                "                         echo s > /proc/sysrq-trigger; \\\n"
-                "                         echo u > /proc/sysrq-trigger; \\\n"
-                "                         echo b > /proc/sysrq-trigger'"
-            )
-
             mock_popen.assert_called_once()
             actual_cmd = mock_popen.call_args[0][0]
-            self.assertEqual(actual_cmd, expected_cmd)
+            self.assertIn("sleep 5", actual_cmd)
+            for action in ("s", "u", "b"):
+                self.assertIn(
+                    f"echo {action} > /proc/sysrq-trigger", actual_cmd
+                )
 
         # Test without systemd
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.systemd_enable", return_value=False
+            "src.common.glt_utils.is_systemd_running", return_value=False
         ), GLTTestBase.unittest.mock.patch(
             "os.kill"
         ) as mock_kill, GLTTestBase.unittest.mock.patch(
@@ -1344,13 +1343,33 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             self.mock_sd.progress_record_time.reset_mock()
 
             result = reboot_with_reisub(self.mock_logger, self.mock_sd)
-            self.assertFalse(result)  # Function should return False
-
-            # Verify progress_record_time was called in this case too
-            self.mock_sd.progress_record_time.assert_called_once_with(
-                self.mock_logger, "REISUB"
+            self.assertEqual(
+                result,
+                (
+                    False,
+                    "SIGTERM did not terminate the process while "
+                    "emulating shutdown",
+                ),
             )
+
+            self.mock_sd.progress_record_time.assert_not_called()
             mock_kill.assert_called_once_with(12345, signal.SIGTERM)
+
+        # systemd runs but the unit cannot be enabled: do not kill the suite
+        self.mock_sd.progress_record_time.reset_mock()
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_systemd_running", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.systemd_enable", return_value=False
+        ), GLTTestBase.unittest.mock.patch(
+            "subprocess.Popen"
+        ) as mock_popen, GLTTestBase.unittest.mock.patch("os.kill") as mock_kill:
+            ok, reason = reboot_with_reisub(self.mock_logger, self.mock_sd)
+            self.assertFalse(ok)
+            self.assertIn("greenlit.service", reason)
+            self.mock_sd.progress_record_time.assert_not_called()
+            mock_popen.assert_not_called()
+            mock_kill.assert_not_called()
 
     @GLTTestBase.unittest.mock.patch(
         "src.common.glt_utils._find_extract_vmlinux",
@@ -1439,15 +1458,123 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         mock_system.assert_not_called()
         self.mock_sd.progress_record_time.assert_not_called()
 
+    def test_reboot_with_kexec_reports_service_that_cannot_be_enabled(self):
+        """A masked greenlit.service is reported, not silently fatal."""
+        files = [
+            "/boot/initrd.img-test-kernel",
+            "/boot/vmlinuz-test-kernel",
+        ]
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.platform.release",
+            return_value="test-kernel",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.glob.glob", return_value=files
+        ), GLTTestBase.unittest.mock.patch(
+            "builtins.open",
+            GLTTestBase.unittest.mock.mock_open(read_data="1"),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._load_kernel_for_kexec",
+            return_value=(True, ""),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_systemd_running", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.systemd_enable", return_value=False
+        ) as mock_systemd, GLTTestBase.unittest.mock.patch(
+            "os._exit"
+        ) as mock_exit, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._unload_kernel_for_kexec",
+            return_value=(True, ""),
+        ) as mock_unload, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.os.system"
+        ) as mock_system, GLTTestBase.unittest.mock.patch(
+            "os.kill"
+        ) as mock_kill:
+            ok, reason = reboot_with_kexec("test_case", self.mock_sd)
+
+            self.assertFalse(ok)
+            self.assertIn("greenlit.service", reason)
+            self.mock_sd.progress_record_time.assert_not_called()
+            mock_unload.assert_called_once_with()
+            mock_system.assert_not_called()
+            mock_kill.assert_not_called()
+
+            # The service is enabled, but systemctl rejects the kexec request.
+            self.mock_sd.progress_record_time.reset_mock()
+            mock_systemd.return_value = True
+            mock_system.return_value = 1
+            mock_unload.reset_mock()
+            ok, reason = reboot_with_kexec("test_case", self.mock_sd)
+
+            self.assertFalse(ok)
+            self.assertEqual(reason, "systemctl kexec failed with status 1")
+            self.mock_sd.progress_record_time.assert_called_once_with(
+                "test_case", "TriggerKexec"
+            )
+            self.mock_sd.progress_delete_time.assert_called_once_with(
+                "test_case", "TriggerKexec"
+            )
+            mock_unload.assert_called_once_with()
+            mock_exit.assert_not_called()
+
+    def test_reboot_with_kexec_reports_when_sigterm_does_not_terminate(self):
+        """Report failure if the development-mode SIGTERM returns."""
+        files = [
+            "/boot/initrd.img-test-kernel",
+            "/boot/vmlinuz-test-kernel",
+        ]
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.platform.release",
+            return_value="test-kernel",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.glob.glob", return_value=files
+        ), GLTTestBase.unittest.mock.patch(
+            "builtins.open",
+            GLTTestBase.unittest.mock.mock_open(read_data="1"),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._load_kernel_for_kexec",
+            return_value=(True, ""),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_systemd_running", return_value=False
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._unload_kernel_for_kexec",
+            return_value=(True, ""),
+        ) as mock_unload, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.os.system"
+        ) as mock_system, GLTTestBase.unittest.mock.patch(
+            "os.kill"
+        ) as mock_kill, GLTTestBase.unittest.mock.patch(
+            "os.getpid", return_value=12345
+        ):
+            ok, reason = reboot_with_kexec("test_case", self.mock_sd)
+
+        self.assertFalse(ok)
+        self.assertEqual(
+            reason,
+            "SIGTERM did not terminate the process while emulating shutdown",
+        )
+        self.mock_sd.progress_record_time.assert_not_called()
+        mock_unload.assert_called_once_with()
+        mock_kill.assert_called_once_with(12345, signal.SIGTERM)
+        mock_system.assert_not_called()
+
     @GLTTestBase.unittest.mock.patch("os._exit")
     @GLTTestBase.unittest.mock.patch("os.system")
+    @GLTTestBase.unittest.mock.patch("src.common.glt_utils.is_systemd_running")
     @GLTTestBase.unittest.mock.patch("src.common.glt_utils.systemd_enable")
-    def test_reboot(self, mock_systemd_enable, mock_system, mock_exit):
+    def test_reboot(
+        self, mock_systemd_enable, mock_is_systemd, mock_system, mock_exit
+    ):
         """Test reboot function"""
         mock_testcase = GLTTestBase.unittest.mock.MagicMock()
 
-        # Test with systemd enabled
+        # systemd is running and the service can be enabled
+        mock_is_systemd.return_value = True
         mock_systemd_enable.return_value = True
+        mock_system.return_value = 0
         result = reboot(mock_testcase, self.mock_sd)
         self.mock_sd.progress_record_time.assert_called_once_with(
             mock_testcase, "TriggerReboot"
@@ -1456,11 +1583,40 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         mock_exit.assert_called_once_with(0)
         self.assertFalse(result)
 
-        # Test with systemd disabled
-        mock_systemd_enable.return_value = False
+        # The reboot command itself fails: remove the saved reboot marker.
+        self.mock_sd.progress_record_time.reset_mock()
+        mock_system.reset_mock()
+        mock_system.return_value = 1
+        mock_exit.reset_mock()
+        result = reboot(mock_testcase, self.mock_sd)
+        self.mock_sd.progress_record_time.assert_called_once_with(
+            mock_testcase, "TriggerReboot"
+        )
+        self.mock_sd.progress_delete_time.assert_called_once_with(
+            mock_testcase, "TriggerReboot"
+        )
+        mock_exit.assert_not_called()
+        self.assertFalse(result)
+
+        # No systemd at all: emulate system off
+        self.mock_sd.progress_record_time.reset_mock()
+        mock_is_systemd.return_value = False
         with GLTTestBase.unittest.mock.patch("os.kill") as mock_kill:
             result = reboot(mock_testcase, self.mock_sd)
+            self.mock_sd.progress_record_time.assert_not_called()
             mock_kill.assert_called_once()
+            self.assertFalse(result)
+
+        # systemd runs but the unit cannot be enabled (masked, missing, ...):
+        # report failure instead of silently killing the suite.
+        mock_is_systemd.return_value = True
+        mock_systemd_enable.return_value = False
+        mock_system.reset_mock()
+        with GLTTestBase.unittest.mock.patch("os.kill") as mock_kill:
+            result = reboot(mock_testcase, self.mock_sd)
+            self.mock_sd.progress_record_time.assert_not_called()
+            mock_kill.assert_not_called()
+            mock_system.assert_not_called()
             self.assertFalse(result)
 
     @GLTTestBase.unittest.mock.patch("subprocess.run")
