@@ -18,7 +18,6 @@ Python script to test ARM coresight.
 """
 from packaging import version
 from common import glt_core as GLTCore
-from common import glt_utils
 from common import perf_utils
 from common.nv_device import NvDev
 
@@ -40,10 +39,12 @@ def test_perf_coresight(_, logger):
         GLTCore.GLTTestResult.skip("RHEL supports coresight with " +
                                    "version >= 9.5.")
 
-    if not glt_utils.is_cli_available("perf"):
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
+    if perf_cmd is None:
+        GLTCore.GLTTestResult.fail(perf_reason)
 
-    result = perf_utils.run_perf_test_candidates(["arm coresight"])
+    result = perf_utils.run_perf_test_candidates(
+        ["arm coresight"], perf_cmd=perf_cmd)
     logger.debug(
         "perf Coresight test status=%s test_name=%s reason=%s",
         result.status.value, result.test_name, result.reason)

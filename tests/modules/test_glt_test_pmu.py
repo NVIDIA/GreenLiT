@@ -337,7 +337,7 @@ class TestPmuValidation(GLTTestBase):
         with self.mock.patch.object(glt_test_pmu, "NvDev") as nvdev_cls, \
                 self.mock.patch.object(
                     glt_test_pmu.perf_utils, "resolve_perf_command",
-                    return_value="/perf"), \
+                    return_value=("/perf", "")), \
                 self.mock.patch.object(
                     glt_test_pmu, "_get_nvidia_perf_list",
                     return_value={"nvidia_uncore_pmu"}) as mock_perf_list, \
@@ -372,7 +372,7 @@ class TestPmuValidation(GLTTestBase):
         with self.mock.patch.object(glt_test_pmu, "NvDev") as nvdev_cls, \
                 self.mock.patch.object(
                     glt_test_pmu.perf_utils, "resolve_perf_command",
-                    return_value="/perf"), \
+                    return_value=("/perf", "")), \
                 self.mock.patch.object(
                     glt_test_pmu, "_get_nvidia_perf_list",
                     side_effect=ValueError("perf list timed out after 30 seconds")):

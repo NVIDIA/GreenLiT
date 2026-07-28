@@ -1,5 +1,5 @@
 """Unit tests for CoreSight perf compatibility."""
-# pylint: disable=wrong-import-position
+# pylint: disable=wrong-import-position,duplicate-code
 
 import sys
 from pathlib import Path
@@ -17,10 +17,9 @@ class TestPerfCoresightCompatibility(GLTTestBase):
     """Test CoreSight behavior around perf selftest compatibility."""
 
     @GLTTestBase.unittest.mock.patch("src.modules.hwtracing.glt_test_coresight.perf_utils")
-    @GLTTestBase.unittest.mock.patch("src.modules.hwtracing.glt_test_coresight.glt_utils")
     @GLTTestBase.unittest.mock.patch("src.modules.hwtracing.glt_test_coresight.NvDev")
     def test_perf_coresight_uses_fallback_when_selftest_is_missing(
-        self, mock_nvdev, mock_glt_utils, mock_perf_utils
+        self, mock_nvdev, mock_perf_utils
     ):
         """Coresight test accepts fallback evidence when no selftest is listed."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
@@ -28,7 +27,7 @@ class TestPerfCoresightCompatibility(GLTTestBase):
             "NAME": "Ubuntu",
             "VERSION_ID": "24.04",
         }
-        mock_glt_utils.is_cli_available.return_value = True
+        mock_perf_utils.resolve_perf_command.return_value = ("/perf", "")
         mock_perf_utils.PerfTestStatus = perf_utils.PerfTestStatus
         mock_perf_utils.run_perf_test_candidates.return_value = perf_utils.PerfTestResult(
             perf_utils.PerfTestStatus.NO_MATCH,
@@ -38,17 +37,18 @@ class TestPerfCoresightCompatibility(GLTTestBase):
 
         glt_test_coresight.test_perf_coresight(None, self.mock_logger)
 
-        mock_perf_utils.run_perf_test_candidates.assert_called_once_with(["arm coresight"])
+        mock_perf_utils.run_perf_test_candidates.assert_called_once_with(
+            ["arm coresight"], perf_cmd="/perf"
+        )
         mock_perf_utils.has_coresight_fallback_evidence.assert_called_once_with()
         self.mock_logger.info.assert_called_once_with(
             "No perf Coresight selftest found; using cs_etm/sysfs fallback."
         )
 
     @GLTTestBase.unittest.mock.patch("src.modules.hwtracing.glt_test_coresight.perf_utils")
-    @GLTTestBase.unittest.mock.patch("src.modules.hwtracing.glt_test_coresight.glt_utils")
     @GLTTestBase.unittest.mock.patch("src.modules.hwtracing.glt_test_coresight.NvDev")
     def test_perf_coresight_fails_when_selftest_and_fallback_are_missing(
-        self, mock_nvdev, mock_glt_utils, mock_perf_utils
+        self, mock_nvdev, mock_perf_utils
     ):
         """Coresight test fails when neither perf selftest nor fallback exists."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
@@ -56,7 +56,7 @@ class TestPerfCoresightCompatibility(GLTTestBase):
             "NAME": "Ubuntu",
             "VERSION_ID": "24.04",
         }
-        mock_glt_utils.is_cli_available.return_value = True
+        mock_perf_utils.resolve_perf_command.return_value = ("/perf", "")
         mock_perf_utils.PerfTestStatus = perf_utils.PerfTestStatus
         mock_perf_utils.run_perf_test_candidates.return_value = perf_utils.PerfTestResult(
             perf_utils.PerfTestStatus.NO_MATCH,
