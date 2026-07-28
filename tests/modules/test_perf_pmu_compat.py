@@ -1,5 +1,5 @@
 """Unit tests for PMU perf compatibility."""
-# pylint: disable=wrong-import-position,protected-access,unused-argument,too-many-public-methods
+# pylint: disable=wrong-import-position,protected-access,unused-argument,too-many-public-methods,duplicate-code
 
 import os
 import subprocess
@@ -42,7 +42,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
     ):
         """PMU test uses resolved perf for old and 6.17 selftest names."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
-        mock_perf_utils.resolve_perf_command.return_value = "/perf"
+        mock_perf_utils.resolve_perf_command.return_value = ("/perf", "")
         mock_perf_utils.PerfTestStatus = perf_utils.PerfTestStatus
         mock_perf_utils.run_perf_test_candidates.return_value = self._perf_pass(
             "Parsing of all PMU events from sysfs"
@@ -50,7 +50,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
         glt_test_pmu.test_all_pmu_events(None, self.mock_logger)
 
-        mock_perf_utils.resolve_perf_command.assert_called_once_with(self.mock_logger)
+        mock_perf_utils.resolve_perf_command.assert_called_once_with()
         mock_perf_utils.run_perf_test_candidates.assert_called_once_with(
             ["perf all PMU test", "Parsing of all PMU events from sysfs"],
             perf_cmd="/perf",
@@ -63,7 +63,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
     ):
         """PMU test fails clearly when neither old nor 6.17 names exist."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
-        mock_perf_utils.resolve_perf_command.return_value = "/perf"
+        mock_perf_utils.resolve_perf_command.return_value = ("/perf", "")
         mock_perf_utils.PerfTestStatus = perf_utils.PerfTestStatus
         mock_perf_utils.run_perf_test_candidates.return_value = perf_utils.PerfTestResult(
             perf_utils.PerfTestStatus.NO_MATCH,
@@ -81,7 +81,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
     ):
         """PMU test fails before selftest discovery when no usable perf exists."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
-        mock_perf_utils.resolve_perf_command.return_value = None
+        mock_perf_utils.resolve_perf_command.return_value = (None, "no usable perf")
 
         with self.assertRaises(GLTCore.GLTTestFail):
             glt_test_pmu.test_all_pmu_events(None, self.mock_logger)
@@ -264,7 +264,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_glt_utils.is_cli_available.side_effect = lambda t: t != "taskset"
         with GLTTestBase.unittest.mock.patch(
             "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
-            return_value="/perf",
+            return_value=("/perf", ""),
         ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("taskset", str(ctx.exception))
@@ -283,7 +283,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_probe.return_value = (2_558_580_492, 305_749)
         with GLTTestBase.unittest.mock.patch(
             "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
-            return_value="/perf",
+            return_value=("/perf", ""),
         ):
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         mock_probe.assert_called_once_with(2, 3, self.mock_logger, "/perf")
@@ -303,7 +303,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_probe.return_value = (2_880_457_316, 2_880_459_810)
         with GLTTestBase.unittest.mock.patch(
             "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
-            return_value="/perf",
+            return_value=("/perf", ""),
         ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("c3d78c34ad00", str(ctx.exception))
@@ -322,7 +322,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_probe.return_value = (50_000, 1_000)
         with GLTTestBase.unittest.mock.patch(
             "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
-            return_value="/perf",
+            return_value=("/perf", ""),
         ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("floor", str(ctx.exception))
@@ -341,7 +341,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_probe.side_effect = ValueError("No cycle count found for CPU 3")
         with GLTTestBase.unittest.mock.patch(
             "src.modules.arm64.glt_test_pmu.perf_utils.resolve_perf_command",
-            return_value="/perf",
+            return_value=("/perf", ""),
         ), self.assertRaises(GLTCore.GLTTestFail) as ctx:
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
         self.assertIn("CPU 3", str(ctx.exception))
@@ -358,7 +358,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         """CSPMU rejection check avoids shell=True and uses resolved perf."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
         mock_get_devices.return_value = ["nvidia_pcie_pmu_0"]
-        mock_perf_utils.resolve_perf_command.return_value = "/perf"
+        mock_perf_utils.resolve_perf_command.return_value = ("/perf", "")
         mock_run.return_value = self._completed_process(stdout="recorded")
 
         glt_test_pmu.test_perf_cspmu_rejects_foreign_events(
@@ -395,7 +395,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         """CSPMU perf stat timeout reports a framework failure."""
         mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
         mock_get_devices.return_value = ["nvidia_pcie_pmu_0"]
-        mock_perf_utils.resolve_perf_command.return_value = "/perf"
+        mock_perf_utils.resolve_perf_command.return_value = ("/perf", "")
         mock_run.side_effect = subprocess.TimeoutExpired(
             ["/perf", "stat"], glt_test_pmu.CSPMU_RECORD_TIMEOUT_SECONDS
         )
@@ -455,7 +455,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         ), self.mock.patch.object(
             glt_test_pmu.os.path, "exists", return_value=True
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ):
             glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
 
@@ -506,7 +506,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
         ), self.mock.patch.object(
             glt_test_pmu.os.path, "exists", return_value=True
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=None
+            glt_test_pmu.perf_utils, "resolve_perf_command",
+            return_value=(None, "no usable perf")
         ), self.mock.patch.object(
             glt_test_pmu.subprocess, "run"
         ) as mock_run, self.assertRaises(GLTCore.GLTTestFail):
@@ -529,7 +530,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         ), self.mock.patch.object(
             glt_test_pmu.os.path, "exists", return_value=True
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf record timed out"):
             glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
 
@@ -551,7 +552,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         ), self.mock.patch.object(
             glt_test_pmu.os.path, "exists", return_value=True
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf report timed out"):
             glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
 
@@ -732,7 +733,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.mock.patch.object(
             glt_test_pmu, "NvDev", return_value=fake_nvdev
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.mock.patch.object(
             glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
         ), self.mock.patch.object(
@@ -772,7 +773,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.mock.patch.object(
             glt_test_pmu, "NvDev", return_value=fake_nvdev
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.mock.patch.object(
             glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
         ), self.mock.patch.object(
@@ -798,7 +799,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.mock.patch.object(
             glt_test_pmu, "NvDev", return_value=fake_nvdev
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.mock.patch.object(
             glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
         ), self.mock.patch.object(
@@ -823,7 +824,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.mock.patch.object(
             glt_test_pmu, "NvDev", return_value=fake_nvdev
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.mock.patch.object(
             glt_test_pmu, "_find_arm_spe_pmu", return_value=None
         ), self.mock.patch.object(
@@ -845,7 +846,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.mock.patch.object(
             glt_test_pmu, "NvDev", return_value=fake_nvdev
         ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value="/perf"
+            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
         ), self.mock.patch.object(
             glt_test_pmu, "_find_arm_spe_pmu", return_value="arm_spe_0"
         ), self.mock.patch.object(

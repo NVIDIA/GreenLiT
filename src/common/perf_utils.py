@@ -19,12 +19,22 @@ import platform
 import re
 import subprocess
 from dataclasses import dataclass
-from enum import Enum
+from enum import Enum, IntEnum
 from pathlib import Path
 from typing import Iterable, Optional
 
 PERF_VERSION_TIMEOUT_SECONDS = 5
 PERF_TEST_TIMEOUT_SECONDS = 120
+
+
+class _PerfRejectRank(IntEnum):
+    """How far a rejected perf candidate got before it was refused."""
+
+    NOT_INSTALLED = 0
+    PROBE_TIMEOUT = 1
+    PROBE_FAILED = 2
+    VERSION_MISMATCH = 3
+    NO_KERNEL_BINARY = 4
 
 
 class PerfTestStatus(Enum):
@@ -280,11 +290,30 @@ def has_coresight_fallback_evidence(
     return any(coresight_devices_dir.iterdir())
 
 
-def resolve_perf_command(logger=None) -> Optional[str]:
-    """Resolve a perf command that works for the running kernel."""
+def _best_rejection_reason(rejections) -> str:
+    """Return the reason from the candidate that got furthest before refusal."""
+    best_rank = -1
+    best_reason = ""
+    for rank, reason in rejections:
+        if rank > best_rank:
+            best_rank = rank
+            best_reason = reason
+    return best_reason
+
+
+def resolve_perf_command() -> tuple[Optional[str], str]:
+    """Resolve a perf command that works for the running kernel.
+
+    Returns:
+        (command, ""):  a perf command usable for the running kernel.
+        (None, reason): no usable perf was found. reason names the candidate
+                        that got furthest, why it was refused, and the remedy,
+                        so callers can report it instead of guessing.
+    """
     kernel_release = platform.uname().release
     kernel_version = re.split(r"[-+]", kernel_release, 1)[0]
     compatible_candidate = None
+    rejections: list[tuple[_PerfRejectRank, str]] = []
 
     for candidate in _get_perf_candidates():
         try:
@@ -297,48 +326,73 @@ def resolve_perf_command(logger=None) -> Optional[str]:
                 timeout=PERF_VERSION_TIMEOUT_SECONDS,
             )
         except OSError as err:
-            if logger:
-                logger.debug("perf resolver skipped candidate %s: %s", candidate, err)
+            rejections.append((
+                _PerfRejectRank.NOT_INSTALLED,
+                f"'{candidate}' could not be executed ({err}). Install the "
+                f"linux-tools package matching kernel {kernel_release}, or "
+                "build perf from the matching kernel tree.",
+            ))
             continue
         except subprocess.TimeoutExpired:
-            if logger:
-                logger.debug(
-                    "perf resolver skipped candidate %s: --version timed out after %ss",
-                    candidate,
-                    PERF_VERSION_TIMEOUT_SECONDS,
-                )
+            rejections.append((
+                _PerfRejectRank.PROBE_TIMEOUT,
+                f"'{candidate} --version' timed out after "
+                f"{PERF_VERSION_TIMEOUT_SECONDS} seconds.",
+            ))
             continue
 
         output = result.stdout or ""
-        if result.returncode != 0 or "perf not found for kernel" in output:
-            if logger:
-                logger.debug(
-                    "perf resolver rejected candidate: %s --version returned %r",
-                    candidate,
-                    output.strip(),
-                )
+        if "perf not found for kernel" in output:
+            rejections.append((
+                _PerfRejectRank.NO_KERNEL_BINARY,
+                f"'{candidate}' has no perf binary for kernel "
+                f"{kernel_release} ({output.strip()}). Install the matching "
+                "linux-tools package, or build perf from the matching "
+                "kernel tree.",
+            ))
+            continue
+        if result.returncode != 0:
+            rejections.append((
+                _PerfRejectRank.PROBE_FAILED,
+                f"'{candidate} --version' failed with exit status "
+                f"{result.returncode} ({output.strip()}).",
+            ))
             continue
 
         version_match = re.search(r"perf version\s+([^\s]+)", output)
         perf_version = version_match.group(1) if version_match else ""
         if not _candidate_is_kernel_compatible(
                 candidate, kernel_release, kernel_version, perf_version):
-            if logger:
-                logger.debug(
-                    "perf resolver skipped non-matching candidate: %s reports %r",
-                    candidate,
-                    perf_version,
-                )
+            if perf_version:
+                rejections.append((
+                    _PerfRejectRank.VERSION_MISMATCH,
+                    f"'{candidate}' is perf {perf_version}, which does not "
+                    f"match kernel {kernel_release}. GreenLiT requires a "
+                    "matching perf so tests are not run against a stale "
+                    "perf ABI. Install the matching linux-tools package, or "
+                    "build perf from the matching kernel tree.",
+                ))
+            else:
+                rejections.append((
+                    _PerfRejectRank.PROBE_FAILED,
+                    "could not parse a perf version from "
+                    f"'{candidate} --version' output ({output.strip()!r}).",
+                ))
             continue
 
         if _candidate_is_exact_kernel_match(
                 candidate, kernel_release, kernel_version, perf_version):
-            return candidate
+            return (candidate, "")
 
         if compatible_candidate is None:
             compatible_candidate = candidate
 
-    return compatible_candidate
+    if compatible_candidate is not None:
+        return (compatible_candidate, "")
+
+    best = _best_rejection_reason(rejections)
+    reason = f"No usable perf found: {best}" if best else "No usable perf found."
+    return (None, reason)
 
 
 def run_perf_test_candidates(

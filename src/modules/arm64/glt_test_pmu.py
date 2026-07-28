@@ -480,9 +480,9 @@ def test_nvidia_perf_events(_, logger):
             version.parse("9.5"):
         GLTCore.GLTTestResult.skip("RHEL supports coresight if version >= 9.5.")
 
-    perf_cmd = perf_utils.resolve_perf_command(logger)
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+        GLTCore.GLTTestResult.fail(perf_reason)
 
     try:
         nvevent_from_dut = _get_nvidia_perf_list(perf_cmd, logger)
@@ -512,9 +512,9 @@ def test_all_pmu_events(_, logger):
     if not nvdev.is_cpu_type("grace") and not nvdev.is_cpu_type("vera"):
         GLTCore.GLTTestResult.skip("This is not NVIDIA Grace or Vera CPU.")
 
-    perf_cmd = perf_utils.resolve_perf_command(logger)
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+        GLTCore.GLTTestResult.fail(perf_reason)
 
     result = perf_utils.run_perf_test_candidates(
         ["perf all PMU test", "Parsing of all PMU events from sysfs"],
@@ -547,9 +547,9 @@ def test_perf_cspmu_rejects_foreign_events(_, logger):
             "cannot verify commit 15c7ef73."
         )
 
-    perf_cmd = perf_utils.resolve_perf_command(logger)
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+        GLTCore.GLTTestResult.fail(perf_reason)
 
     try:
         # Repro from commit 15c7ef73: Core PMU should handle raw r2 after CSPMU
@@ -596,9 +596,9 @@ def test_arm_spe_pmu(sd, logger):
             "SPE requires OS and firmware support, please check both."
         )
 
-    perf_cmd = perf_utils.resolve_perf_command(logger)
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+        GLTCore.GLTTestResult.fail(perf_reason)
 
     perf_data_path = os.path.join(sd.log_dir, "test_arm_spe_pmu.perf.data")
 
@@ -667,9 +667,9 @@ def test_pmccntr_smt_handling(_, logger):
         )
     busy_cpu, idle_cpu = pair
 
-    perf_cmd = perf_utils.resolve_perf_command(logger)
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+        GLTCore.GLTTestResult.fail(perf_reason)
 
     for tool in ("taskset", "timeout", "yes"):
         if not glt_utils.is_cli_available(tool):
@@ -726,9 +726,9 @@ def test_perf_arm_spe_olympus_data_source(sd, logger):
 
     logger.info("Detected platform: vera=True; CPU core expected: Olympus")
 
-    perf_cmd = perf_utils.resolve_perf_command(logger)
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+        GLTCore.GLTTestResult.fail(perf_reason)
     logger.info("Using perf command: %s", perf_cmd)
 
     pmu = _find_arm_spe_pmu(logger=logger)

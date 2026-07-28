@@ -63,7 +63,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.1-mpam+"),
         ):
-            self.assertIsNone(resolve_perf_command(self.mock_logger))
+            self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_accepts_abbreviated_perf_version(self, mock_run):
@@ -78,7 +78,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
             self.assertEqual(
-                resolve_perf_command(self.mock_logger),
+                resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17/perf",
             )
 
@@ -111,7 +111,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
             self.assertEqual(
-                resolve_perf_command(self.mock_logger),
+                resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17.13/perf",
             )
 
@@ -144,7 +144,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             return_value=self.mock.Mock(release="6.17.13+"),
         ):
             self.assertEqual(
-                resolve_perf_command(self.mock_logger),
+                resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17.13/perf",
             )
 
@@ -161,7 +161,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             return_value=self.mock.Mock(release="6.17.13+"),
         ):
             self.assertEqual(
-                resolve_perf_command(self.mock_logger),
+                resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17.13/perf",
             )
 
@@ -177,7 +177,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
-            self.assertIsNone(resolve_perf_command(self.mock_logger))
+            self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_skips_timed_out_candidate(self, mock_run):
@@ -207,7 +207,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
             self.assertEqual(
-                resolve_perf_command(self.mock_logger),
+                resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17/perf",
             )
 
@@ -306,7 +306,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
             self.assertEqual(
-                resolve_perf_command(self.mock_logger),
+                resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17/perf",
             )
 
@@ -324,7 +324,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
-            self.assertIsNone(resolve_perf_command(self.mock_logger))
+            self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_rejects_similar_version_path_prefix(self, mock_run):
@@ -338,7 +338,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
-            self.assertIsNone(resolve_perf_command(self.mock_logger))
+            self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_accepts_package_revision_suffix(self, mock_run):
@@ -352,7 +352,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.17.13-mpam+"),
         ):
-            self.assertEqual(resolve_perf_command(self.mock_logger), "/usr/bin/perf")
+            self.assertEqual(resolve_perf_command()[0], "/usr/bin/perf")
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_matches_linux_tools_release_directory(
@@ -369,7 +369,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils.platform.uname",
             return_value=self.mock.Mock(release="6.17.0-1022-nvidia-64k"),
         ):
-            self.assertEqual(resolve_perf_command(self.mock_logger), candidate)
+            self.assertEqual(resolve_perf_command()[0], candidate)
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_skips_candidate_when_version_probe_times_out(
@@ -385,7 +385,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             "common.perf_utils._get_perf_candidates",
             return_value=["/usr/lib/linux-tools/6.17/perf"],
         ):
-            self.assertIsNone(resolve_perf_command(self.mock_logger))
+            self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_returns_none_when_no_valid_perf_exists(
@@ -399,7 +399,7 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         with self.mock.patch(
             "common.perf_utils._get_perf_candidates", return_value=["perf"]
         ):
-            self.assertIsNone(resolve_perf_command(self.mock_logger))
+            self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_run_perf_test_candidates_accepts_617_pmu_name(self, mock_run):
@@ -595,6 +595,140 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             self.assertTrue(
                 has_coresight_fallback_evidence(event_sources, coresight)
             )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_reports_version_mismatch_reason(self, mock_run):
+        """A version-mismatched perf is named in the reason, not called missing."""
+        mock_run.return_value = self._completed(stdout="perf version 7.0.12\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=["perf"]
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="7.0.0-2015-nvidia-bos-64k"),
+        ):
+            command, reason = resolve_perf_command()
+
+        self.assertIsNone(command)
+        self.assertIn("7.0.12", reason)
+        self.assertIn("7.0.0-2015-nvidia-bos-64k", reason)
+        self.assertNotIn("Please install 'perf'", reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_reports_missing_binary_reason(self, mock_run):
+        """A wrapper with no kernel binary says so instead of 'not installed'."""
+        mock_run.return_value = self._completed(
+            stdout="WARNING: perf not found for kernel 6.17.13\n"
+        )
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=["perf"]
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            command, reason = resolve_perf_command()
+
+        self.assertIsNone(command)
+        self.assertIn("no perf binary", reason)
+        self.assertIn("6.17.13-mpam+", reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_reports_not_installed_reason(self, mock_run):
+        """An unexecutable perf is the only case reported as not installed."""
+        mock_run.side_effect = FileNotFoundError(2, "No such file or directory")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=["perf"]
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            command, reason = resolve_perf_command()
+
+        self.assertIsNone(command)
+        self.assertIn("could not be executed", reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_reports_timeout_reason(self, mock_run):
+        """A hung --version probe is reported as a timeout, not a missing perf."""
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["perf", "--version"], timeout=PERF_VERSION_TIMEOUT_SECONDS
+        )
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=["perf"]
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            command, reason = resolve_perf_command()
+
+        self.assertIsNone(command)
+        self.assertIn("timed out", reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_reason_prefers_most_progressed_candidate(
+        self, mock_run
+    ):
+        """A version mismatch outranks an unexecutable candidate in the reason."""
+        candidates = ["/usr/lib/linux-tools/6.18/perf", "perf"]
+        results = {
+            "/usr/lib/linux-tools/6.18/perf": FileNotFoundError(
+                2, "No such file or directory"
+            ),
+            "perf": self._completed(stdout="perf version 6.18.0\n"),
+        }
+
+        def fake_run(cmd, **_):
+            result = results[cmd[0]]
+            if isinstance(result, Exception):
+                raise result
+            return result
+
+        mock_run.side_effect = fake_run
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            command, reason = resolve_perf_command()
+
+        self.assertIsNone(command)
+        self.assertIn("6.18.0", reason)
+        self.assertNotIn("could not be executed", reason)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_reason_prefers_missing_binary_over_stale_perf(
+        self, mock_run
+    ):
+        """A wrapper with no binary for this kernel outranks a stale perf."""
+        candidates = ["perf", "/usr/lib/linux-tools/6.8/perf"]
+        results = {
+            "perf": self._completed(
+                stdout="WARNING: perf not found for kernel 7.0.0-64k\n"
+            ),
+            "/usr/lib/linux-tools/6.8/perf": self._completed(
+                stdout="perf version 6.8.0\n"
+            ),
+        }
+
+        def fake_run(cmd, **_):
+            return results[cmd[0]]
+
+        mock_run.side_effect = fake_run
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="7.0.0-64k"),
+        ):
+            command, reason = resolve_perf_command()
+
+        self.assertIsNone(command)
+        self.assertIn("no perf binary", reason)
+        self.assertIn("7.0.0-64k", reason)
 
 
 if __name__ == "__main__":

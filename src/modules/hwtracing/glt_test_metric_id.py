@@ -16,9 +16,11 @@
 """
 Python script to test perf metric ID support.
 """
+# pylint: disable=duplicate-code
+import shlex
 import subprocess
 from common import glt_core as GLTCore
-from common import glt_utils
+from common import perf_utils
 
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
@@ -30,12 +32,13 @@ def test_perf_metric_id(_, logger):
     Check whether perf supports metric IDs.
     """
 
-    if not glt_utils.is_cli_available("perf"):
-        GLTCore.GLTTestResult.fail("Please install 'perf' to perform the test.")
+    perf_cmd, perf_reason = perf_utils.resolve_perf_command()
+    if perf_cmd is None:
+        GLTCore.GLTTestResult.fail(perf_reason)
 
     try:
         cmd_output = subprocess.run(
-            "sudo perf stat -v -a -M ipc ls /",
+            f"sudo {shlex.quote(perf_cmd)} stat -v -a -M ipc ls /",
             shell=True, executable='/bin/bash', check=True, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         logger.debug(f"stdout: {cmd_output.stdout}\nstderr: {cmd_output.stderr}")
