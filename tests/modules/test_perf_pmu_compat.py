@@ -431,71 +431,80 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_arm_spe_pmu_uses_resolved_perf_command(self, mock_run):
-        """Legacy ARM SPE smoke test uses the kernel-compatible perf binary."""
-        self.mock_sd.log_dir = "/tmp/greenlit"
-        report_output = "\n".join([
-            "Samples:",
-            "l1d-miss",
-            "l1d-access",
-            "llc-miss",
-            "llc-access",
-            "tlb-access",
-            "memory",
-            "branch",
-        ])
+        """ARM SPE smoke test uses resolved perf and dynamic SPE PMU event."""
+        report_output = "\n".join(
+            f"# Samples: 1K of event '{event_name}'"
+            for event_name in glt_test_pmu.REQUIRED_SPE_REPORT_STRINGS
+            if event_name != "Samples:"
+        )
         mock_run.side_effect = [
-            self._completed_process(args=["record"], stdout=b""),
+            self._completed_process(args=[sys.executable, "-c"]),
             self._completed_process(args=["report"], stdout=report_output),
         ]
 
-        with self.mock.patch.object(
-            glt_test_pmu.check_kernel_config,
-            "parse_kconfig",
-            return_value={"CONFIG_ARM_SPE_PMU": "y"},
-        ), self.mock.patch.object(
-            glt_test_pmu.os.path, "exists", return_value=True
-        ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
-        ):
-            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mock_sd.log_dir = tmpdir
+            perf_data_path = os.path.join(tmpdir, "test_arm_spe_pmu.perf.data")
+            thrash_script_path = os.path.join(tmpdir, "arm_spe_llc_thrash.py")
 
-        expected_calls = [
-            self.mock.call(
-                [
-                    "/perf",
-                    "record",
-                    "-e",
-                    "arm_spe//",
-                    "-o",
-                    "/tmp/greenlit/test_arm_spe_pmu.perf.data",
-                    "--",
-                    "dd",
-                    "if=/dev/zero",
-                    "of=/dev/null",
-                    "bs=1M",
-                    "count=500",
-                ],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=glt_test_pmu.ARM_SPE_RECORD_TIMEOUT_SECONDS,
-            ),
-            self.mock.call(
-                [
-                    "/perf",
-                    "report",
-                    "-i",
-                    "/tmp/greenlit/test_arm_spe_pmu.perf.data",
-                    "--stdio",
-                ],
-                check=True,
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                timeout=glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS,
-            ),
-        ]
-        mock_run.assert_has_calls(expected_calls, any_order=False)
+            with self.mock.patch.object(
+                glt_test_pmu.check_kernel_config,
+                "parse_kconfig",
+                return_value={"CONFIG_ARM_SPE_PMU": "y"},
+            ), self.mock.patch.object(
+                glt_test_pmu,
+                "_select_arm_spe_pmu_cpu",
+                return_value=("arm_spe_2", 2, ""),
+            ) as mock_select_pmu_cpu, self.mock.patch.object(
+                glt_test_pmu.glt_utils, "is_cli_available", return_value=True
+            ), self.mock.patch.object(
+                glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
+            ) as mock_resolve_perf, self.mock.patch.object(
+                glt_test_pmu,
+                "_record_arm_spe_llc_workload",
+                return_value=self._completed_process(
+                    args=["record"], stderr="AUX collision"),
+            ) as mock_record:
+                glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+            mock_select_pmu_cpu.assert_called_once_with(logger=self.mock_logger)
+            mock_resolve_perf.assert_called_once_with()
+            mock_record.assert_called_once_with(
+                "/perf",
+                perf_data_path,
+                "arm_spe_2//",
+                thrash_script_path,
+                2,
+            )
+            expected_calls = [
+                self.mock.call(
+                    [sys.executable, "-c", glt_test_pmu.ARM_SPE_MEMFD_PROBE_SOURCE],
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    timeout=glt_test_pmu.ARM_SPE_MEMFD_PROBE_TIMEOUT_SECONDS,
+                ),
+                self.mock.call(
+                    [
+                        "/perf",
+                        "report",
+                        "-i",
+                        perf_data_path,
+                        "--stdio",
+                    ],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS,
+                ),
+            ]
+            mock_run.assert_has_calls(expected_calls, any_order=False)
+            self.assertIn(
+                "memfd_create",
+                Path(thrash_script_path).read_text(encoding="utf-8"),
+            )
 
     def test_arm_spe_pmu_fails_when_no_perf_command_exists(self):
         """ARM SPE smoke test fails before record when no usable perf exists."""
@@ -504,7 +513,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
             "parse_kconfig",
             return_value={"CONFIG_ARM_SPE_PMU": "y"},
         ), self.mock.patch.object(
-            glt_test_pmu.os.path, "exists", return_value=True
+            glt_test_pmu, "_select_arm_spe_pmu_cpu",
+            return_value=("arm_spe_0", 0, "")
         ), self.mock.patch.object(
             glt_test_pmu.perf_utils, "resolve_perf_command",
             return_value=(None, "no usable perf")
@@ -518,43 +528,70 @@ class TestPerfPmuCompatibility(GLTTestBase):
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_arm_spe_pmu_record_timeout_fails_cleanly(self, mock_run):
         """ARM SPE smoke test reports perf record timeouts as test failures."""
-        self.mock_sd.log_dir = "/tmp/greenlit"
-        mock_run.side_effect = subprocess.TimeoutExpired(
-            ["/perf", "record"], glt_test_pmu.ARM_SPE_RECORD_TIMEOUT_SECONDS
-        )
+        mock_run.side_effect = [
+            self._completed_process(args=[sys.executable, "-c"]),
+        ]
 
-        with self.mock.patch.object(
-            glt_test_pmu.check_kernel_config,
-            "parse_kconfig",
-            return_value={"CONFIG_ARM_SPE_PMU": "y"},
-        ), self.mock.patch.object(
-            glt_test_pmu.os.path, "exists", return_value=True
-        ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
-        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf record timed out"):
-            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mock_sd.log_dir = tmpdir
+            with self.mock.patch.object(
+                glt_test_pmu.check_kernel_config,
+                "parse_kconfig",
+                return_value={"CONFIG_ARM_SPE_PMU": "y"},
+            ), self.mock.patch.object(
+                glt_test_pmu,
+                "_select_arm_spe_pmu_cpu",
+                return_value=("arm_spe_0", 0, ""),
+            ), self.mock.patch.object(
+                glt_test_pmu.glt_utils, "is_cli_available", return_value=True
+            ), self.mock.patch.object(
+                glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
+            ), self.mock.patch.object(
+                glt_test_pmu,
+                "_record_arm_spe_llc_workload",
+                side_effect=subprocess.TimeoutExpired(
+                    ["/perf", "record"],
+                    glt_test_pmu.ARM_SPE_LLC_RECORD_TIMEOUT_SECONDS,
+                ),
+            ), self.assertRaisesRegex(
+                GLTCore.GLTTestFail, "perf record with arm_spe timed out"
+            ):
+                glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+        self.assertEqual(mock_run.call_count, 1)
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_arm_spe_pmu_report_timeout_fails_cleanly(self, mock_run):
         """ARM SPE smoke test reports perf report timeouts as test failures."""
-        self.mock_sd.log_dir = "/tmp/greenlit"
         mock_run.side_effect = [
-            self._completed_process(args=["record"], stdout=b""),
+            self._completed_process(args=[sys.executable, "-c"]),
             subprocess.TimeoutExpired(
                 ["/perf", "report"], glt_test_pmu.ARM_SPE_DECODE_TIMEOUT_SECONDS
             ),
         ]
 
-        with self.mock.patch.object(
-            glt_test_pmu.check_kernel_config,
-            "parse_kconfig",
-            return_value={"CONFIG_ARM_SPE_PMU": "y"},
-        ), self.mock.patch.object(
-            glt_test_pmu.os.path, "exists", return_value=True
-        ), self.mock.patch.object(
-            glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
-        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf report timed out"):
-            glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.mock_sd.log_dir = tmpdir
+            with self.mock.patch.object(
+                glt_test_pmu.check_kernel_config,
+                "parse_kconfig",
+                return_value={"CONFIG_ARM_SPE_PMU": "y"},
+            ), self.mock.patch.object(
+                glt_test_pmu,
+                "_select_arm_spe_pmu_cpu",
+                return_value=("arm_spe_0", 0, ""),
+            ), self.mock.patch.object(
+                glt_test_pmu.glt_utils, "is_cli_available", return_value=True
+            ), self.mock.patch.object(
+                glt_test_pmu.perf_utils, "resolve_perf_command", return_value=("/perf", "")
+            ), self.mock.patch.object(
+                glt_test_pmu,
+                "_record_arm_spe_llc_workload",
+                return_value=self._completed_process(args=["record"]),
+            ), self.assertRaisesRegex(GLTCore.GLTTestFail, "perf report timed out"):
+                glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+        self.assertEqual(mock_run.call_count, 2)
 
     def test_decode_arm_spe_uses_data_source_fields(self):
         """The decode helper asks perf script for data_src output."""

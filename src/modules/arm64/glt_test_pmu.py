@@ -20,7 +20,9 @@ import json
 import os
 import platform
 import re
+import signal
 import subprocess
+import sys
 from pathlib import Path
 
 from packaging import version
@@ -107,8 +109,131 @@ ARM_SPE_RECORD_TIMEOUT_SECONDS = 180
 ARM_SPE_DECODE_TIMEOUT_SECONDS = 120
 CSPMU_RECORD_TIMEOUT_SECONDS = 30
 PERF_LIST_TIMEOUT_SECONDS = 30
+ARM_SPE_LLC_RECORD_TIMEOUT_SECONDS = 300
+ARM_SPE_MEMFD_PROBE_TIMEOUT_SECONDS = 10
 COMMON_DATA_SOURCE_LEVELS = ("LVL L2", "LVL Local RAM", "LVL Remote RAM")
 DATA_SOURCE_OPS = ("OP LOAD", "OP STORE")
+REQUIRED_SPE_REPORT_STRINGS = (
+    "Samples:",
+    "l1d-miss",
+    "l1d-access",
+    "llc-miss",
+    "llc-access",
+    "tlb-access",
+    "memory",
+    "branch",
+)
+PERF_REPORT_SAMPLE_COUNT_PATTERN = re.compile(
+    r"^\s*#\s*Samples:\s*"
+    r"(?P<count>[0-9][0-9,]*(?:\.[0-9]+)?)\s*[KMG]?"
+    r"\s+of event\s+'(?P<event>[^']+)'",
+    re.IGNORECASE,
+)
+ARM_SPE_LLC_THRASH_SIZE_BYTES = 512 * 1024 * 1024
+ARM_SPE_LLC_THRASH_STRIDE_BYTES = 64
+ARM_SPE_LLC_THRASH_PASSES = 2
+# Anonymous mmap thrash sized above Grace LLC to produce llc-miss samples.
+# Invoked via a script file under sd.log_dir (not -c) for shell safety.
+ARM_SPE_LLC_THRASH_SOURCE = f"""\
+import os, mmap
+size = {ARM_SPE_LLC_THRASH_SIZE_BYTES}
+stride = {ARM_SPE_LLC_THRASH_STRIDE_BYTES}
+passes = {ARM_SPE_LLC_THRASH_PASSES}
+fd = os.memfd_create('thrash', 0)
+os.ftruncate(fd, size)
+m = mmap.mmap(fd, size, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE)
+for _ in range(passes):
+    for i in range(0, size, stride):
+        m[i] = (m[i] + 1) & 0xff
+"""
+ARM_SPE_MEMFD_PROBE_SOURCE = (
+    "import os; fd = os.memfd_create('greenlit-spe-probe', 0); os.close(fd)"
+)
+
+
+def _arm_spe_memfd_probe_failure():
+    """Return a failure reason if this interpreter cannot create an anonymous memfd."""
+    try:
+        memfd_probe = subprocess.run(
+            [sys.executable, "-c", ARM_SPE_MEMFD_PROBE_SOURCE],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=ARM_SPE_MEMFD_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as err:
+        return f"Python memfd_create probe timed out after {err.timeout} seconds"
+
+    if memfd_probe.returncode != 0:
+        return (
+            "Python os.memfd_create support is required for ARM SPE LLC thrash "
+            f"workload: stderr={memfd_probe.stderr}"
+        )
+    return None
+
+
+def _log_arm_spe_aux_collision_warnings(stderr, logger):
+    """Log perf AUX collision warnings at debug level only."""
+    for line in (stderr or "").splitlines():
+        lowered = line.lower()
+        if "aux" in lowered and "collision" in lowered:
+            logger.debug("Ignoring perf AUX collision warning: %s", line)
+
+
+def _has_positive_llc_miss_samples(perf_report_output):
+    """Return True when perf report shows positive samples for llc-miss."""
+    for line in perf_report_output.splitlines():
+        match = PERF_REPORT_SAMPLE_COUNT_PATTERN.match(line)
+        if not match or match.group("event").strip() != "llc-miss":
+            continue
+        sample_count = match.group("count").replace(",", "")
+        try:
+            if float(sample_count) > 0:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _terminate_arm_spe_record_process(process, pgid):
+    """Terminate a perf record process group and its descendants."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+            process.wait(timeout=2)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+
+def _record_arm_spe_llc_workload(perf_cmd, perf_data_path, spe_event,
+                                 thrash_script_path, cpu):
+    """Record ARM SPE LLC-thrash workload with process-group timeout cleanup."""
+    record_cmd = [
+        perf_cmd, "record", "-e", spe_event, "-o", perf_data_path, "--",
+        "taskset", "--cpu-list", str(cpu), sys.executable, thrash_script_path,
+    ]
+    process = subprocess.Popen(  # pylint: disable=consider-using-with
+        record_cmd,
+        start_new_session=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    pgid = process.pid
+
+    try:
+        stdout, stderr = process.communicate(
+            timeout=ARM_SPE_LLC_RECORD_TIMEOUT_SECONDS)
+    except BaseException:
+        _terminate_arm_spe_record_process(process, pgid)
+        raise
+
+    return subprocess.CompletedProcess(
+        record_cmd, process.returncode, stdout, stderr)
 
 
 def _count_decoded_data_source(output):
@@ -133,26 +258,24 @@ def _decode_arm_spe(perf_cmd, perf_data_path, logger):
     )
 
 
-def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
-    """Find the first available ARM SPE PMU."""
-    for pmu in ARM_SPE_PMUS:
-        if os.path.isdir(os.path.join(base_path, pmu)):
-            return pmu
-
+def _arm_spe_pmu_candidates(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
+    """Return discovered ARM SPE PMUs in the existing deterministic order."""
+    pmus = [pmu for pmu in ARM_SPE_PMUS if os.path.isdir(os.path.join(base_path, pmu))]
     try:
-        pmus = sorted(
-            (
-                name for name in os.listdir(base_path)
-                if name.startswith("arm_spe")
-                and os.path.isdir(os.path.join(base_path, name))
-            ),
-            key=lambda name: perf_utils.natural_sort_key(Path(name)),
-        )
+        pmus.extend(sorted([
+            name for name in os.listdir(base_path)
+            if name not in pmus and name.startswith("arm_spe")
+            and os.path.isdir(os.path.join(base_path, name))
+        ], key=lambda name: perf_utils.natural_sort_key(Path(name))))
     except OSError as err:
         if logger:
             logger.debug("Unable to list ARM SPE PMUs under %s: %s", base_path, err)
-        return None
+    return pmus
 
+
+def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
+    """Find the first available ARM SPE PMU."""
+    pmus = _arm_spe_pmu_candidates(base_path=base_path, logger=logger)
     return pmus[0] if pmus else None
 
 
@@ -175,6 +298,83 @@ def _parse_cpu_list(s):
         elif part:
             cpus.append(int(part))
     return sorted(set(cpus))
+
+
+def _select_arm_spe_cpu(
+    pmu, base_path=ARM_SPE_EVENT_SOURCE_PATH, allowed_cpus=None
+):
+    """Return the first CPU supported by the selected ARM SPE PMU."""
+    cpumask_path = Path(base_path) / pmu / "cpumask"
+    try:
+        cpumask = cpumask_path.read_text(encoding="utf-8").strip()
+    except OSError as err:
+        return None, (
+            f"Unable to read ARM SPE PMU cpumask at {cpumask_path}: {err}"
+        )
+
+    if not cpumask:
+        return None, f"ARM SPE PMU cpumask at {cpumask_path} is empty"
+
+    try:
+        cpus = _parse_cpu_list(cpumask)
+    except (OverflowError, ValueError) as err:
+        return None, (
+            f"Unable to parse ARM SPE PMU cpumask at {cpumask_path}: "
+            f"{cpumask!r}: {err}"
+        )
+
+    unusable_reason = ""
+    usable_cpus = []
+    if not cpus:
+        unusable_reason = (
+            f"ARM SPE PMU cpumask at {cpumask_path} did not select any CPU"
+        )
+    else:
+        try:
+            available_cpus = (
+                set(os.sched_getaffinity(0))
+                if allowed_cpus is None else set(allowed_cpus)
+            )
+        except OSError as err:
+            unusable_reason = (
+                f"Unable to read current CPU affinity for ARM SPE PMU {pmu}: "
+                f"{err}"
+            )
+        else:
+            usable_cpus = sorted(set(cpus) & available_cpus)
+            if not usable_cpus:
+                unusable_reason = (
+                    f"ARM SPE PMU cpumask at {cpumask_path} has no CPUs in "
+                    "the current process CPU affinity"
+                )
+
+    if unusable_reason:
+        return None, unusable_reason
+    return usable_cpus[0], ""
+
+
+def _select_arm_spe_pmu_cpu(
+    base_path=ARM_SPE_EVENT_SOURCE_PATH, allowed_cpus=None, logger=None
+):
+    """Return the first discovered ARM SPE PMU with an affinity-usable CPU."""
+    unusable_reasons = []
+
+    for pmu in _arm_spe_pmu_candidates(base_path=base_path, logger=logger):
+        cpu, reason = _select_arm_spe_cpu(pmu, base_path=base_path,
+                                          allowed_cpus=allowed_cpus)
+        if cpu is not None:
+            return pmu, cpu, ""
+        unusable_reasons.append(f"{pmu}: {reason}")
+        if logger:
+            logger.debug("Skipping ARM SPE PMU %s: %s", pmu, reason)
+
+    if unusable_reasons:
+        return None, None, (
+            "No discovered ARM SPE PMU has a CPU usable by the current process "
+            f"CPU affinity: {'; '.join(unusable_reasons)}")
+    return None, None, (
+        f"ARM SPE PMU is not available under {base_path}. "
+        "SPE requires OS and firmware support, please check both.")
 
 
 def _find_online_smt_pair():
@@ -579,7 +779,7 @@ def test_perf_cspmu_rejects_foreign_events(_, logger):
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_arm_spe_pmu(sd, logger):
-    """Verify ARM SPE PMU support."""
+    """Verify ARM SPE PMU support with a deterministic LLC-thrash workload."""
     kconfig_path = "/boot/config-" + platform.uname().release
     try:
         kconfig = check_kernel_config.parse_kconfig(kconfig_path)
@@ -590,33 +790,51 @@ def test_arm_spe_pmu(sd, logger):
             f"Kernel config not found at {kconfig_path}, cannot verify CONFIG_ARM_SPE_PMU"
         )
 
-    if not os.path.exists("/sys/bus/event_source/devices/arm_spe_0/"):
-        GLTCore.GLTTestResult.fail(
-            "/sys/bus/event_source/devices/arm_spe_0/ does not exist. "
-            "SPE requires OS and firmware support, please check both."
-        )
+    pmu, spe_cpu, cpu_reason = _select_arm_spe_pmu_cpu(logger=logger)
+    if cpu_reason:
+        GLTCore.GLTTestResult.fail(cpu_reason)
 
     perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
         GLTCore.GLTTestResult.fail(perf_reason)
 
-    perf_data_path = os.path.join(sd.log_dir, "test_arm_spe_pmu.perf.data")
-
-    try:
-        subprocess.run(
-            [perf_cmd, "record", "-e", "arm_spe//", "-o", perf_data_path, "--",
-             "dd", "if=/dev/zero", "of=/dev/null", "bs=1M", "count=500"],
-            check=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=ARM_SPE_RECORD_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
+    if not glt_utils.is_cli_available("taskset"):
         GLTCore.GLTTestResult.fail(
-            f"perf record timed out after {ARM_SPE_RECORD_TIMEOUT_SECONDS} seconds "
-            "with arm_spe event"
+            "Required tool 'taskset' not found; install it to run this test.")
+
+    memfd_failure = _arm_spe_memfd_probe_failure()
+    if memfd_failure:
+        GLTCore.GLTTestResult.fail(memfd_failure)
+
+    perf_data_path = os.path.join(sd.log_dir, "test_arm_spe_pmu.perf.data")
+    thrash_script_path = os.path.join(sd.log_dir, "arm_spe_llc_thrash.py")
+    with open(thrash_script_path, "w", encoding="utf-8") as thrash_file:
+        thrash_file.write(ARM_SPE_LLC_THRASH_SOURCE)
+
+    # dd if=/dev/zero rarely produces llc-miss on Grace; thrash anonymous memory
+    # above LLC size for deterministic llc-miss decode coverage. Deliver via a
+    # script file (not -c) so remote shell quoting cannot mangle it.
+    spe_event = f"{pmu}//"
+    try:
+        record_result = _record_arm_spe_llc_workload(
+            perf_cmd,
+            perf_data_path,
+            spe_event,
+            thrash_script_path,
+            spe_cpu,
         )
-    except subprocess.CalledProcessError as e:
-        stderr_out = e.stderr.decode(errors="replace") if e.stderr else ""
-        GLTCore.GLTTestResult.fail(f"perf record failed with arm_spe event: {e} - {stderr_out}")
+    except subprocess.TimeoutExpired as err:
+        GLTCore.GLTTestResult.fail(
+            f"perf record with arm_spe timed out after {err.timeout} seconds"
+        )
+
+    _log_arm_spe_aux_collision_warnings(record_result.stderr, logger)
+
+    if record_result.returncode != 0:
+        GLTCore.GLTTestResult.fail(
+            f"perf record failed with arm_spe event: returncode={record_result.returncode} "
+            f"stderr={record_result.stderr}"
+        )
 
     try:
         cmd_output = subprocess.run(
@@ -625,24 +843,30 @@ def test_arm_spe_pmu(sd, logger):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             timeout=ARM_SPE_DECODE_TIMEOUT_SECONDS)
         logger.debug(cmd_output.stdout)
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as err:
         GLTCore.GLTTestResult.fail(
-            f"perf report timed out after {ARM_SPE_DECODE_TIMEOUT_SECONDS} seconds "
-            f"with {perf_data_path}"
+            f"perf report timed out after {err.timeout} seconds for {perf_data_path}"
         )
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"perf report failed with {perf_data_path}: {e} - {e.stdout}")
+    except subprocess.CalledProcessError as err:
+        GLTCore.GLTTestResult.fail(
+            f"perf report failed with {perf_data_path}: {err} - {err.stdout}"
+        )
 
-    # Since we are using `perf record -e arm_spe//` instead of `perf mem`,
+    # Since we are using `perf record -e <arm_spe_*>//` instead of `perf mem`,
     # the output format changes. We verify that the SPE event was actually sampled.
-    expected_strings = [
-        "Samples:", "l1d-miss", "l1d-access", "llc-miss", "llc-access",
-        "tlb-access", "memory", "branch"
+    report_stdout = cmd_output.stdout or ""
+    missing = [
+        required_string
+        for required_string in REQUIRED_SPE_REPORT_STRINGS
+        if required_string not in report_stdout
     ]
-    missing = [s for s in expected_strings if s not in cmd_output.stdout]
     if missing:
         GLTCore.GLTTestResult.fail(
             f"Missing expected strings {missing} in perf report with {perf_data_path}"
+        )
+    if not _has_positive_llc_miss_samples(report_stdout):
+        GLTCore.GLTTestResult.fail(
+            f"Missing positive llc-miss samples in perf report with {perf_data_path}"
         )
 
 
