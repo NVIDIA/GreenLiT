@@ -1,0 +1,71 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Observe arm-smmu-v3 STE write sequencing during nest_ste_trig runs.
+ *
+ * Disruptive (unpatched) updates clear STE.V before rewriting other qwords.
+ * Hitless (patched) updates keep STE.V set across every CMD_SYNC.
+ *
+ * Only the nested update-safety transition is under test. The trigger toggles
+ * the guest STE between S1DSS-bypass and S2-bypass; the kernel merges that with
+ * the stage-2 parent, so the *physical* STE arm_smmu_write_entry() rewrites
+ * toggles between Config=0b111 (nested S1+S2, "7") and Config=0b110 (S2-only,
+ * "6"). The benign first install (Config 0/abort -> 6) and the teardown
+ * (6/7 -> abort) legitimately pass through V=0 even on a patched kernel, so
+ * they must NOT count as disruptive. We tag each write with the Config
+ * transition and let the verdict count only the 6<->7 (is_target) writes.
+ *
+ * STE.Config lives in bits [3:1] of STE qword0; STE.V is bit 0. arg1 is the
+ * live entry (current, pre-mutation at kprobe entry); arg2 is the target.
+ * cur_cfg/tgt_cfg are printed on every line so the trace log itself proves,
+ * on real hardware, which Config transition the disruptive write lands on.
+ */
+BEGIN
+{
+	printf("PROBE_LIVE\n");
+	@disruptive_writes = 0;
+}
+
+kprobe:arm_smmu_write_entry
+/comm == "nest_ste_trig"/
+{
+	@entry_ptr[tid] = arg1;
+	@in_write[tid] = 1;
+	@syncs[tid] = 0;
+	@v_zero[tid] = 0;
+	@cur_cfg[tid] = (*((uint64*)arg1) >> 1) & 7;
+	@tgt_cfg[tid] = (*((uint64*)arg2) >> 1) & 7;
+}
+
+kprobe:arm_smmu_ste_writer_sync_entry
+/@in_write[tid] == 1/
+{
+	@syncs[tid]++;
+	$v = *((uint64*)@entry_ptr[tid]) & 1;
+	if ($v == 0) { @v_zero[tid] = 1; }
+}
+
+kretprobe:arm_smmu_write_entry
+/comm == "nest_ste_trig" && @in_write[tid] == 1/
+{
+	$cur = @cur_cfg[tid];
+	$tgt = @tgt_cfg[tid];
+	$is_target = (($cur == 6 && $tgt == 7) || ($cur == 7 && $tgt == 6)) ? 1 : 0;
+	printf("STE_WRITE cur_cfg=%d tgt_cfg=%d is_target=%d syncs=%d v_zero=%d\n",
+	       $cur, $tgt, $is_target, @syncs[tid], @v_zero[tid]);
+	if ($is_target == 1 && @v_zero[tid] == 1) {
+		@disruptive_writes++;
+	}
+	@in_write[tid] = 0;
+}
+
+END
+{
+	printf("SUMMARY disruptive_writes=%d\n", @disruptive_writes);
+	clear(@entry_ptr);
+	clear(@in_write);
+	clear(@syncs);
+	clear(@v_zero);
+	clear(@cur_cfg);
+	clear(@tgt_cfg);
+}
