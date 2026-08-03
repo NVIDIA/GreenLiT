@@ -7,6 +7,7 @@ from src.common.pci_utils import (
     ASPEED_AST1150_DEVICE_ID,
     ASPEED_VENDOR_ID,
     EXT_CAP_ACS,
+    EXT_CAP_ATS,
     PCI_CLASS_USB_HOST,
     block_device_physical_leaves,
     default_route_ifaces,
@@ -16,6 +17,7 @@ from src.common.pci_utils import (
     get_pci_class,
     iface_pci_bdfs,
     mounted_block_devices,
+    unsafe_pci_bdfs,
 )
 
 LSPCI_OUTPUT_TWO_DEVICES = """\
@@ -47,6 +49,18 @@ LSPCI_OUTPUT_MULTIPLE_ACS = """\
 
 0000:00:03.0 PCI bridge: NVIDIA Corporation Device 0003 (rev a1)
 \tCapabilities: [2b0 v1] Access Control Services
+"""
+
+LSPCI_OUTPUT_ATS = """\
+0000:00:01.0 PCI bridge: NVIDIA Corporation Device 0001 (rev a1)
+\tCapabilities: [40] Express Root Port (Slot+), MSI 00
+\tCapabilities: [2b0 v1] Access Control Services
+
+0000:01:00.0 3D controller: NVIDIA Corporation Device 0002 (rev a1)
+\tCapabilities: [78] Express Endpoint, MSI 00
+\tCapabilities: [148 v1] Address Translation Service (ATS)
+\t\tATSCap: Invalidate Queue Depth: 00
+\t\tATSCtl: Enable+, Smallest Translation Unit: 00
 """
 
 LSPCI_OUTPUT_AST1150 = """\
@@ -119,6 +133,15 @@ class TestPciUtils(GLTTestBase):
         ):
             result = get_bdfs_with_ext_cap(EXT_CAP_ACS)
         self.assertEqual(result, ["0000:00:01.0", "0000:00:03.0"])
+
+    def test_get_bdfs_with_ext_cap_ats(self):
+        """Returns only endpoints advertising Address Translation Service."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.subprocess.run",
+            return_value=self._mock_lspci(stdout=LSPCI_OUTPUT_ATS),
+        ):
+            result = get_bdfs_with_ext_cap(EXT_CAP_ATS)
+        self.assertEqual(result, ["0000:01:00.0"])
 
     def test_get_bdfs_with_ext_cap_lspci_failure(self):
         """Returns empty list when lspci exits with non-zero."""
@@ -441,6 +464,80 @@ class TestPciUtilsNetAndBlock(GLTTestBase):
         ):
             result = block_device_physical_leaves("dm-0")
         self.assertEqual(result, set())
+
+    def test_unsafe_pci_bdfs_collects_nic_ancestors_and_storage(self):
+        """Management NIC path BDFs and mounted-storage leaf BDF are excluded."""
+        realpaths = {
+            "/sys/class/net/eth0/device":
+                "/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.0",
+            "/sys/class/block/nvme0n1":
+                "/sys/devices/pci0000:00/0000:00:02.0/0000:02:00.0/nvme/nvme0/nvme0n1",
+        }
+
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.default_route_ifaces",
+            return_value={"eth0"},
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.iface_pci_bdfs",
+            return_value={"0000:01:00.0"},
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.mounted_block_devices",
+            return_value={"nvme0n1p1"},
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.block_device_physical_leaves",
+            return_value={"nvme0n1"},
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.exists",
+            return_value=True,
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            side_effect=lambda path: realpaths.get(path, path),
+        ):
+            result = unsafe_pci_bdfs()
+
+        self.assertEqual(
+            result,
+            {"0000:00:01.0", "0000:01:00.0", "0000:02:00.0"},
+        )
+
+    def test_unsafe_pci_bdfs_propagates_oserror(self):
+        """Unreadable route tables raise so callers can fail closed."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.default_route_ifaces",
+            side_effect=OSError("no route tables"),
+        ):
+            with self.assertRaises(OSError):
+                unsafe_pci_bdfs()
+
+    def test_unsafe_pci_bdfs_propagates_mounted_block_oserror(self):
+        """Unreadable /proc/mounts discards any partial NIC unsafe set."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.default_route_ifaces",
+            return_value={"eth0"},
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.iface_pci_bdfs",
+            return_value={"0000:01:00.0"},
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.exists",
+            return_value=False,
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.mounted_block_devices",
+            side_effect=OSError("no /proc/mounts"),
+        ):
+            with self.assertRaises(OSError):
+                unsafe_pci_bdfs()
+
+    def test_iface_pci_bdfs_propagates_permission_error(self):
+        """Permission errors resolving net sysfs must not look like 'no NIC'."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.path.realpath",
+            return_value="/sys/class/net/eth0/device",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.os.listdir",
+            side_effect=PermissionError("denied"),
+        ):
+            with self.assertRaises(PermissionError):
+                iface_pci_bdfs("eth0")
 
 
 if __name__ == "__main__":

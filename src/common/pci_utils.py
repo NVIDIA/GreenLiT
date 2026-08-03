@@ -26,6 +26,7 @@ from common import glt_utils
 
 # Extended Capability names as printed by lspci.
 EXT_CAP_ACS = "Access Control Services"
+EXT_CAP_ATS = "Address Translation Service (ATS)"
 
 # Known PCI vendor / device IDs.
 ASPEED_VENDOR_ID = "1a03"
@@ -227,7 +228,7 @@ def iface_pci_bdfs(iface, _seen=None) -> set:
     lowers = []
     try:
         entries = os.listdir(f"/sys/class/net/{iface}")
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         entries = []
     for entry in entries:
         if entry.startswith("lower_"):
@@ -235,6 +236,8 @@ def iface_pci_bdfs(iface, _seen=None) -> set:
     try:
         lowers.extend(glt_utils.read_sysfs_value(
             f"/sys/class/net/{iface}/bonding/slaves").split())
+    except PermissionError:
+        raise
     except OSError:
         pass
 
@@ -292,7 +295,7 @@ def block_device_physical_leaves(dev, _seen=None) -> set:
     _seen.add(dev)
     try:
         slaves = os.listdir(f"/sys/class/block/{dev}/slaves")
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         slaves = []
     if not slaves:
         return {dev}
@@ -300,3 +303,50 @@ def block_device_physical_leaves(dev, _seen=None) -> set:
     for slave in slaves:
         leaves |= block_device_physical_leaves(slave, _seen)
     return leaves
+
+
+def _pci_path_bdfs(sysfs_path: str) -> set:
+    """Collect domain-prefixed PCI BDF path components from a sysfs path."""
+    return {
+        part.lower()
+        for part in sysfs_path.split(os.sep)
+        if _BDF_BARE_RE.match(part)
+    }
+
+
+def unsafe_pci_bdfs() -> set:
+    """BDFs that must never be unbound for destructive PCI rebinds.
+
+    Computes:
+
+    - For each default-route interface: the PCI BDF(s) from
+      ``iface_pci_bdfs``; plus, when ``/sys/class/net/<iface>/device``
+      exists, every PCI BDF component on that sysfs path (ancestors of a
+      directly PCI-backed iface). Bond/bridge/VLAN tops without a
+      ``device`` link contribute only the lower physical BDFs from
+      ``iface_pci_bdfs`` (no ancestor walk of each slave).
+    - For each mounted block device: the **leaf** PCI BDF behind the
+      physical backing disk only (bridge/root-port ancestors are not
+      included).
+
+    Raises:
+        OSError: if default-route tables or /proc/mounts are unreadable,
+        or if sysfs resolution hits a non-absence error (e.g.
+        ``PermissionError``). Callers that gate destructive PCI
+        operations must treat this as fail-closed — an empty set must
+        not be confused with "nothing to protect".
+    """
+    unsafe = set()
+    for iface in default_route_ifaces():
+        unsafe |= {b.lower() for b in iface_pci_bdfs(iface)}
+        device_link = f"/sys/class/net/{iface}/device"
+        if os.path.exists(device_link):
+            unsafe |= _pci_path_bdfs(os.path.realpath(device_link))
+    for dev in mounted_block_devices():
+        for leaf in block_device_physical_leaves(dev):
+            resolved = os.path.realpath(f"/sys/class/block/{leaf}")
+            bdfs = [b.lower() for b in resolved.split(os.sep)
+                    if _BDF_BARE_RE.match(b)]
+            if bdfs:
+                unsafe.add(bdfs[-1])
+    return unsafe
