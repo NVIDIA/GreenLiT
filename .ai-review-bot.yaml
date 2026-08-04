@@ -23,49 +23,89 @@ lenses:
   convention:
     model: composer-2.5
     instructions: |
-      Review every changed artifact for compliance with conventions evidenced
-      by GreenLiT and with the established idioms of its language.
+      Review every changed artifact for GreenLiT conventions and language
+      idioms. Discover rules from, in descending authority: repo docs and tool
+      config; neighboring code/tests in the same subsystem; repeated
+      project-wide patterns; relevant git history; then language idioms when
+      GreenLiT has no contrary pattern.
 
-      Discover conventions from, in descending order of authority: repository
-      documentation and tool configuration; neighboring code and tests in the
-      same subsystem; repeated project-wide patterns; relevant git history; and
-      conventional language idioms when GreenLiT has no contrary pattern.
+      Out of scope for this lens (do not duplicate findings):
+      - kernel fix discrimination, vacuity, and observer design → `discriminator`
+      - helper duplication, carve-outs into `src/common/`, fail-closed probes,
+        shared API/`_` surface, version resolvers, session/resume contracts →
+        `common-helper-contracts`
+      - CLI category discovery, config scoping, scheduler resume → `discovery`
 
-      Check all applicable aspects, including file placement and naming;
-      license, copyright, and SPDX headers; registration in manifests, test
-      plans, decorators, package metadata, or documentation; reuse of existing
-      GreenLiT helpers and abstractions; project-idiomatic dependency use,
-      result handling, post hooks, public API compatibility, and lifecycle
-      (cleanup, timeouts); test fixtures, assertions, and non-vacuity;
-      language-specific typing, ownership, quoting, subprocess, resource, and
-      concurrency idioms; and consistency between duplicated or parallel
-      implementations.
+      Owned checks:
 
-      Check the merge request title and every commit summary line against
-      GreenLiT's commit conventions (CONTRIBUTING.md). Verify the type matches
-      the change: a commit whose primary purpose is adding a new test is
-      `feat:`, and one that only fixes an existing test is `fix:`, whether the
-      test is a live-kernel discriminator under src/modules/ or
-      external_tests/ or a unit test under tests/. An optional parenthesized
-      scope (e.g. `feat(hwtracing): ...`) is permitted; do not flag it. Report
-      a mismatched type only when the project history for comparable commits
-      clearly supports the corrected type.
+      Placement and packaging: file location and naming; SPDX/copyright
+      headers; registration in manifests, test plans, decorators, package
+      metadata, or docs. Native C helpers and Makefiles belong under
+      `src/modules/<category>/<native-helper>/`, not loose under
+      `external_tests/`, unless genuinely third-party. Examples must be
+      copy-paste runnable; agent-facing MUST/MUST NOT instructions belong in
+      AGENTS.md; version bumps update VERSION and pyproject.toml. Flag drive-by
+      refactors and unrelated CI/doc churn bundled with feature work.
 
-      Inspect relevant documentation, neighboring files, tests, call sites, and
-      history before concluding that a convention exists. For new files,
-      explicitly verify the expected header, location, registration, tests, and
-      nearby structural pattern. For modified files, report a pre-existing
-      convention violation only when the change expands or materially depends
-      on it.
+      Commits: match the MR title and every commit summary to CONTRIBUTING.md.
+      New runtime tests under `src/modules/` or `external_tests/` are `feat:`;
+      unit-test-only commits under `tests/` are `test:`; fixes to existing
+      runtime or framework behavior are `fix:`. Optional parenthesized scope
+      is allowed—do not flag it. Prefer
+      `feat: [DGX-#####] ...` without inventing a scope when recent siblings
+      omit one. Report a type mismatch only when comparable history clearly
+      supports the correction. Require `Changelog:` and `Signed-off-by:` on
+      releasable commits; flag summaries that claim hardware/kernel behavior
+      the diff does not exercise; flag mixed independent changes that should
+      be split or squash-described.
 
-      Report a finding only when the rule is explicit or supported by multiple
-      relevant project examples. Cite representative project evidence and
-      explain the smallest compliant change. Do not infer a rule from one
-      unrelated file, impose personal preferences, request broad refactoring,
-      or repeat generic correctness and security review. Anchor every finding
-      to a changed GreenLiT line, except a commit-message convention finding,
-      which anchors to the offending commit summary line or merge request
-      title.
+      Result semantics: `skip()` for absent optional sysfs/resctrl/arch/
+      tracefs/compiler/platform features; `warn()` for non-conclusive observer
+      gaps; `fail()` only for definitive regressions. Call `fail()`/`skip()`
+      only from `@GLTCore.GLTTestAttr()`-decorated functions. Topology/HW match
+      helpers must distinguish match, unsupported (skip), and inspection
+      failure (fail)—never collapse infra errors into bare false/skip. Do not
+      put `DGX-xxxx` in customer-visible fail/skip messages, docstrings, or
+      constant names.
+
+      Lifecycle and process idioms: prefer `sys.executable` over bare
+      `python3`; keep `make clean`, tempdirs, and device restore in `finally`
+      that runs even when skip/fail raises; do not replace GreenLiT's global
+      signal handlers in one test; do not add redundant root/capability
+      checks (`glt-test-suite` already requires root). Do not add single-use
+      or unittest-only wrappers that only forward to another helper—inline or
+      test the underlying function.
+
+      Import-time and UAPI: `src/modules/**` must not raise for ABI size,
+      endianness, or similar static checks at import (suite discovery
+      `exec_module`s every test module)—prefer runtime skip or unit-test size
+      guards. When porting kernel UAPI, prefer `struct.Struct` for fixed
+      layouts unless ctypes field access is required; mirror kernel
+      `GENMASK`/`FIELD_PREP` bitfield style when neighbors do.
+
+      Tags and unit coverage: tag new functional tests with `sanity`,
+      `standard`, and `stress` when safe; omit sanity for long-running,
+      disruptive, or heavy-tooling cases but still add standard/stress when
+      appropriate. Prefer `tests/modules/` for hardware-independent parsing
+      and multi-candidate selection; expect `tests/greenlit/` for
+      deterministic `src/greenlit/**` logic. New control-flow branches need
+      unit assertions for those branches—not only mocked success paths.
+
+      Also flag clear deviations in typing, ownership, quoting, subprocess,
+      resource, concurrency, post hooks, public API compatibility, and
+      consistency between duplicated parallel implementations—only when
+      project evidence supports the rule.
+
+      Inspect docs, neighbors, tests, call sites, and history before asserting
+      a convention. For new files, verify header, location, registration,
+      tests, and nearby structure. For modified files, report a pre-existing
+      violation only when the change expands or materially depends on it.
+      Report only rules that are explicit or backed by multiple relevant
+      examples; cite evidence and the smallest compliant change. Do not infer
+      from one unrelated file, impose personal taste, request broad
+      refactoring, or repeat generic correctness/security review. Anchor every
+      finding to a changed GreenLiT line, except commit-message findings,
+      which anchor to the offending summary line or MR title.
   discriminator:
     model: grok-4.5
     applies_to: [src/modules/**, external_tests/**]
@@ -78,7 +118,40 @@ lenses:
       boundary, but do not require the test structure to mirror the patch series
       or internal implementation. Translate the complete fix into the smallest
       externally observable invariant or state transition that is true only
-      when the fix is present.
+      when the fix is present. State explicitly whether the test covers the
+      full series, a userspace ABI surface, or a single commit, and align fail
+      messages, comments, and Makefile notes to the same upstream hashes. When
+      the claimed fix spans multiple causal commits, ensure relevant
+      partial-fix kernels still fail.
+
+      Before accepting a behavioral trigger as proof, verify the kernel path
+      under test actually executed (e.g. a runtime-resume callback ran—not
+      merely `pm_runtime_get_sync()` on an already-active device). When
+      discrimination depends on device state, read the relevant sysfs state
+      (e.g. `power/runtime_status`) before triggering; warn or skip when the
+      state cannot guarantee the callback. Select affinity-bound hardware
+      (PMU, CPU) as a joint usable (device, CPU) pair, not the first device
+      then a failing CPU pick. Reuse existing `_validate_*_prerequisites()`
+      helpers rather than inlining CONFIG/HW gates.
+
+      When discrimination depends on kernel log shape (function names, lockdep
+      splats), require the needed `CONFIG_*` options and return warn or skip
+      when they are missing—a clean log with incomplete observer configuration
+      is non-conclusive and must not PASS. Fail fast when the running kconfig
+      cannot be parsed for a log-matching test. Scope log windows to the
+      attempt; do not search the entire boot log for prior-run contamination.
+      Do not swallow subprocess timeouts or ignore workload exit codes when
+      parsing output.
+
+      Require an explicit non-vacuity check that the trigger path ran (counter
+      increment, expected exit code, target transition count, tracepoint hit)
+      before asserting PASS. Flag silent error swallowing or skipped sync that
+      can reduce exercised work to zero while still allowing PASS. Flag probes
+      that use out-of-scope triggers relative to the claimed fix (e.g. wrong
+      memslot path when the fix is in-slot). Also flag environment or feature
+      interactions that make a fully patched kernel look unfixed (e.g. ATS
+      stall/S2S masking the expected hitless outcome)—prefer skip or warn with
+      a clear reason over false FAIL.
 
       Consider multiple observations, preferring a direct stable kernel state
       or ABI; then a direct behavioral trigger and outcome; then an existing
@@ -89,11 +162,10 @@ lenses:
       Compare the proposed test with the strongest simpler candidate. A valid
       approach must fail on the unfixed kernel and pass on the fully fixed
       kernel; distinguish relevant partial-fix states when the claimed fix spans
-      multiple causal commits; prove through a non-vacuity check that its trigger
-      occurred; avoid unsupported hardware, configuration, timing, logging, or
-      implementation assumptions; work in GreenLiT's supported execution
-      environment; and minimize dependencies, setup, cleanup, privileges, and
-      race windows.
+      multiple causal commits; prove non-vacuity; avoid unsupported hardware,
+      configuration, timing, logging, or implementation assumptions; work in
+      GreenLiT's supported execution environment; and minimize dependencies,
+      setup, cleanup, privileges, and race windows.
 
       For tests contributed to GreenLiT, prefer a native Python test case under
       src/modules/ over an external_tests/ wrapper when the logic can use the
@@ -110,3 +182,82 @@ lenses:
       than inventing one. Anchor every actionable finding to a changed GreenLiT
       line.
     references: [linux-mainline]
+  common-helper-contracts:
+    model: composer-2.5
+    applies_to: [src/**, tests/**]
+    instructions: |
+      Review shared-helper safety, API contracts, and carve-outs across
+      `src/**` and `tests/**`—including module-local helpers that belong in
+      `src/common/`.
+
+      Carve-outs: when a change introduces or expands a general-purpose helper
+      (sysfs/log/`setpci`/CPU-list parsing, route/mount isolation probes, etc.)
+      that already exists in `glt_utils`/`pci_utils`/`perf_utils` or that a
+      second module already duplicates, recommend moving or reusing the shared
+      helper. Do not demand extraction for one-caller, test-contract-specific
+      logic. Prefer promoting to `src/common/` when a second real caller appears
+      or when PCI/CXL copies have already drifted.
+
+      Fail-closed probes: helpers that feed destructive or isolation-sensitive
+      operations (FLR, vfio bind, kexec, firmware reset, DPC blast-radius
+      checks)—whether defined in `src/common/` or inlined in a test module—
+      must not treat I/O failure as an empty success set. Return a distinct
+      error/`None` (or raise) so callers refuse or skip; mirror
+      `default_route_ifaces()` / `mounted_block_devices()` and the fail-closed
+      pattern in `glt_test_pci._resolve_and_validate_target()`. Document
+      whether unreadable `/proc` or sysfs means "no data" versus "cannot
+      validate". Propagate non-absence errors such as `PermissionError`; do
+      not swallow them as empty results.
+
+      API surface (especially `src/common/**`): prefix with `_` unless there is
+      a real external caller or an explicit project-wide entry point docstring.
+      Prefer domain-specific names (`read_sysfs_value`) over premature generic
+      file helpers. Prefer official CLIs (`virsh`) over thin Python wrappers
+      unless a libvirt-python-only capability is required. Remove zero-caller
+      public methods and unused members in the same change unless documented as
+      intentional future API.
+
+      Version resolvers (`perf_utils`, `glt_utils`): prefer exact `uname -r`
+      match before compatible fallback; prioritize "no binary for running
+      kernel" over stale adjacent-version mismatch; strip package revision
+      suffixes before comparison. Do not flag NVIDIA `linux-tools-*`
+      directory-name matching or `kernel_release` layouts as bugs without
+      layout evidence from the MR or `tests/common/`.
+
+      Session/resume (`glt_core`): use the same Summary detection as
+      `parse_session_summary()` (`isinstance(..., dict)`); catch
+      `OSError`/`JSONDecodeError` on progress/session I/O; avoid half-mutated
+      scheduler state on error—apply transactionally or document and unit-test
+      the partial-mutation contract.
+
+      `tests/common/` covers shared helper units with mocked I/O only—no live
+      KVM/libvirt/kselftest integration. Assert helper contracts, not third-party
+      stack behavior. Preserve skip/fail semantics when extracting helpers
+      (`cxl_utils`, etc.). Subprocess and boot-path mutations need explicit
+      timeouts when they can block on bad disks.
+
+      Anchor every finding to a changed GreenLiT line. Do not impose generic
+      style preferences already owned by pylint.
+  discovery:
+    model: composer-2.5
+    applies_to: [src/greenlit/**, tests/greenlit/**]
+    instructions: |
+      Review GreenLiT CLI scheduling, category/test-case discovery, resume, and
+      YAML config application.
+
+      Category discovery must not import `src/modules/**` test modules before
+      the intended phase. Flag new import-time registration or decorators with
+      side effects during filesystem enumeration. (Module-local ABI/endian
+      import raises are owned by the `convention` lens.)
+
+      When `--test-case` or category selection pulls prerequisite tests from
+      another category, ensure `apply_glt_configs()` and scheduler filtering
+      scope YAML rules and runnable sets to exact test IDs—not whole
+      prerequisite categories.
+
+      Require `tests/greenlit/` unit coverage for hardware-independent changes
+      to discovery, plan/category/test-case interaction, validation, exit codes,
+      and resume/session resolution.
+
+      Anchor every finding to a changed GreenLiT line. Report insufficient
+      evidence rather than inventing scheduler semantics.
