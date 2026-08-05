@@ -233,7 +233,12 @@ def _get_qemu_emulator_path() -> str:
 
 
 def _get_gicv4_log_failure_reason() -> str:
-    if not any(glt_utils.check_kernel_log(message) for message in GICV4_IRQ_LOG_MESSAGES):
+    try:
+        kernel_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        return f"Failed to collect kernel logs: {error}"
+
+    if not any(message in kernel_log for message in GICV4_IRQ_LOG_MESSAGES):
         return "GICv4 support is not enabled in current boot logs."
 
     return ""

@@ -67,7 +67,14 @@ def test_arm64_erratum_4118414(_, logger):
 
     logger.info("Required erratum configs are enabled: %s", ", ".join(REQUIRED_CONFIGS))
 
-    if not glt_utils.check_kernel_log(RUNTIME_MSG):
+    try:
+        runtime_msg_found = glt_utils.check_kernel_log(RUNTIME_MSG)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve ARM64 erratum 4118414 kernel log: {error}"
+        )
+
+    if not runtime_msg_found:
         GLTCore.GLTTestResult.fail(
             f"Runtime erratum print not found: '{RUNTIME_MSG}'; {PATCH_CONTEXT}"
         )

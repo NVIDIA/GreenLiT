@@ -115,7 +115,12 @@ def test_tegra241_gpio_break_graceful_shutdown(_, __):
     PATCH: https://git.kernel.org/torvalds/c/d806f474a9a7993648a2c70
     """
     check_kernel_msg = "tegra186-gpio NVDA0508:00: Failed to request GPIO for pin 0x0046, err -22"
-    if glt_utils.check_kernel_log(check_kernel_msg):
+    try:
+        shutdown_error_found = glt_utils.check_kernel_log(check_kernel_msg)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    if shutdown_error_found:
         GLTCore.GLTTestResult.fail("Can't break graceful shutdown. " +
                                    "Include kernel commit d806f474a9a7 to fix it.")
 
@@ -154,7 +159,12 @@ def test_tegra410_gpio_name_collision(_, logger):
 
 
     collision_msg = "Detected name collision for GPIO name"
-    if glt_utils.check_kernel_log(collision_msg):
+    try:
+        collision_found = glt_utils.check_kernel_log(collision_msg)
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+
+    if collision_found:
         GLTCore.GLTTestResult.fail(
             "Found GPIO name collision in kernel log. "
             "Backport commit 67f9b828d4e5e to fix it, "

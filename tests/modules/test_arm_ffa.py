@@ -53,8 +53,9 @@ class TestArmFfaAvailability(GLTTestBase):
         self.addCleanup(patcher.stop)
         return patcher.start()
 
-    def _kernel_log_result(self, pattern):
+    def _kernel_log_result(self, pattern, checkpoint=None):
         """Return configured results for the two kernel-log probes."""
+        del checkpoint
         if pattern == arm_ffa.ARM_FFA_RXTX_MAP_FAILURE_PATTERN:
             return self.rxtx_failure
         if pattern == arm_ffa.ARM_FFA_DMESG_PATTERN:

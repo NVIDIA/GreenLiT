@@ -106,9 +106,17 @@ def _validate_ffa_partition_attrs(partitions):
     return True, ""
 
 
-def _validate_ffa_runtime():
+def _validate_ffa_runtime(checkpoint=None):  # pylint: disable=too-many-return-statements
     """Return discovered partitions and any FF-A runtime failure reason."""
-    if glt_utils.check_kernel_log(ARM_FFA_RXTX_MAP_FAILURE_PATTERN):
+    try:
+        rxtx_map_failed = glt_utils.check_kernel_log(
+            ARM_FFA_RXTX_MAP_FAILURE_PATTERN,
+            checkpoint=checkpoint,
+        )
+    except RuntimeError as error:
+        return [], f"Failed to retrieve ARM FF-A kernel log: {error}"
+
+    if rxtx_map_failed:
         return [], (
             "ARM FF-A RXTX_MAP registration failed. Verify the kernel includes "
             "'firmware: arm_ffa: Respect firmware advertised RX/TX buffer size "
@@ -179,6 +187,7 @@ def _read_ffa_partition(device_path):
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
+# pylint: disable=too-many-branches
 def test_arm_ffa_availability(_, logger):
     """
     Verify ARM FF-A transport is externally usable without internal diags.
@@ -225,11 +234,18 @@ def test_arm_ffa_availability(_, logger):
     logger.info("ARM FF-A module resolved: name=%s, builtin=%s",
                 module_name, is_builtin)
 
+    checkpoint = None
     if transport == "y" or is_builtin:
         logger.info("ARM FF-A transport mode: builtin")
     else:
         logger.info("ARM FF-A transport mode: module")
 
+        try:
+            checkpoint = glt_utils.capture_kernel_log_checkpoint()
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to capture ARM FF-A kernel log checkpoint: {error}"
+            )
         result = subprocess.run(
             ["modprobe", module_name],
             check=False,
@@ -264,14 +280,24 @@ def test_arm_ffa_availability(_, logger):
                 f"{module_name} did not appear in lsmod after modprobe"
             )
 
-    partitions, reason = _validate_ffa_runtime()
+    partitions, reason = _validate_ffa_runtime(checkpoint)
     if reason:
         GLTCore.GLTTestResult.fail(reason)
 
     logger.info("ARM FF-A bus registered with %d partition(s): %s",
                 len(partitions), ", ".join(partitions))
 
-    if not glt_utils.check_kernel_log(ARM_FFA_DMESG_PATTERN):
+    try:
+        has_ffa_log = glt_utils.check_kernel_log(
+            ARM_FFA_DMESG_PATTERN,
+            checkpoint=checkpoint,
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve ARM FF-A kernel log: {error}"
+        )
+
+    if not has_ffa_log:
         logger.warning(
             "ARM FF-A initialization message not found in kernel log: %s "
             "(kernel log may have rotated)",

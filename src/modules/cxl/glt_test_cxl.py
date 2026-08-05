@@ -131,7 +131,7 @@ def _pci_rescan() -> bool:
     return result.returncode == 0
 
 
-def _postsuccess_restore_link(_scheduler, attr, logger):
+def _post_restore_link(_scheduler, attr, logger):
     """Restore the root port to its pre-test state.    """
     state = getattr(attr, "cleanup_state", None)
     if state is None:
@@ -175,20 +175,29 @@ _link_down_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
     lambda: True,
 )
 
+
+def _restore_or_reboot_hook(scheduler, attr, logger):
+    """Reboot after link-down, otherwise restore UnmaskLinkDisable."""
+    if scheduler.progress_check(attr.name, "LinkDisabled"):
+        _link_down_reboot_hook(scheduler, attr, logger)
+        return
+    _post_restore_link(scheduler, attr, logger)
+
+
 # Progress marker: set once before the link-disable attempt so a post-crash
 # resume skips re-running this test (see test_cxl_link_disable_fwctl_registration).
 _FWCTL_LINK_DISABLE_ARMED = "FwctlLinkDisableArmed"
 
 
 def _restore_link_and_disable_resume(scheduler, attr, logger):
-    _postsuccess_restore_link(scheduler, attr, logger)
+    _post_restore_link(scheduler, attr, logger)
     glt_utils.systemd_enable(enable=False)
 
 
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
-# pylint: disable=too-many-branches
+# pylint: disable=too-many-branches,too-many-statements
 def test_cxl_link_disable_led_error(sd, logger):
     """
     Verifies that a CXL root port can issue Link Disable without the kernel
@@ -281,6 +290,13 @@ def test_cxl_link_disable_led_error(sd, logger):
         )
 
     logger.info("Issuing Link Disable on %s", rp_bdf)
+    try:
+        checkpoint = glt_utils.capture_kernel_log_checkpoint()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to capture kernel log checkpoint before CXL link disable: {error}"
+        )
+
     sd.progress_record_time(test_cxl_link_disable_led_error.__name__, "LinkDisabled")
     if not _setpci_write_byte(rp_bdf, "CAP_EXP+0x10", 0x10, mask=0x10):
         GLTCore.GLTTestResult.skip(
@@ -289,7 +305,17 @@ def test_cxl_link_disable_led_error(sd, logger):
 
     time.sleep(5)
 
-    if glt_utils.check_kernel_log("Setting an LED's brightness failed (-19)"):
+    try:
+        led_error_found = glt_utils.check_kernel_log(
+            "Setting an LED's brightness failed (-19)",
+            checkpoint=checkpoint,
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve kernel log after CXL link disable: {error}"
+        )
+
+    if led_error_found:
         GLTCore.GLTTestResult.fail(
             "Kernel log contains LED brightness failure after CXL link disable."
             " Consider backporting commit 16d021c8"
@@ -297,10 +323,10 @@ def test_cxl_link_disable_led_error(sd, logger):
 
 
 test_cxl_link_disable_led_error.attr.post_hooks = GLTCore.PostHooks.create(
-    postsuccess=_postsuccess_restore_link,
-    postskip=_postsuccess_restore_link,
-    postfail=_link_down_reboot_hook,
-    postafail=_link_down_reboot_hook,
+    postsuccess=_post_restore_link,
+    postskip=_post_restore_link,
+    postfail=_restore_or_reboot_hook,
+    postafail=_restore_or_reboot_hook,
 )
 
 
@@ -905,7 +931,16 @@ def test_cxl_zero_size_committed_decoder(_, __):
         )
 
     zero_size_warning = "Committed with zero size"
-    if glt_utils.check_kernel_log(zero_size_warning):
+    try:
+        zero_size_warning_found = glt_utils.check_kernel_log(
+            zero_size_warning
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve kernel log for zero-size decoder check: {error}"
+        )
+
+    if zero_size_warning_found:
         GLTCore.GLTTestResult.fail(
             "Kernel rejected a committed zero-size HDM decoder "
             "and aborted port enumeration. "

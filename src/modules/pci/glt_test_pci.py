@@ -628,10 +628,17 @@ def test_aspeed_ast1150_bridge_alias_quirk(_, logger):
             "No devices found behind AST1150; expected child devices on NVIDIA platforms."
         )
 
+    try:
+        kernel_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to retrieve kernel log for ASPEED alias check: {error}"
+        )
+
     aliasing_bdfs = []
     usb_controllers: list[tuple[str, str]] = []  # (bridge_bdf, usb_bdf)
     for bridge_bdf, child_bdf in all_children:
-        if glt_utils.check_kernel_log(f"pci {child_bdf}: Aliasing StreamID"):
+        if f"pci {child_bdf}: Aliasing StreamID" in kernel_log:
             aliasing_bdfs.append(child_bdf)
             logger.error(
                 "Device %s behind AST1150 %s: kernel log shows 'Aliasing StreamID' — "
@@ -740,15 +747,22 @@ def test_pci_acs_configurability(sd, logger):
     except (FileNotFoundError, PermissionError) as e:
         GLTCore.GLTTestResult.fail(f"Cannot read kernel cmdline: {e}")
 
+    try:
+        kernel_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to collect kernel logs: {error}"
+        )
+
     # Check if the kernel supports ACS configurability
-    if glt_utils.check_kernel_log("PCI: Unknown option `config_acs"):
+    if "PCI: Unknown option `config_acs" in kernel_log:
         GLTCore.GLTTestResult.fail(
             "PCI ACS configurability is not supported in the kernel." +
             " Consider backporting commit 47c8846 to fix it."
         )
 
     # Check if the kernel has config_acs fixed
-    if glt_utils.check_kernel_log(parse_err):
+    if parse_err in kernel_log:
         GLTCore.GLTTestResult.fail(
             f"Kernel log contains '{parse_err}'. "
             "Backport patch 9cf8a95 (PCI/ACS: Fix 'pci=config_acs=' parameter)."
@@ -765,8 +779,8 @@ def test_pci_acs_configurability(sd, logger):
         logger.error(f"Cannot read kernel config: {kconfig_path}")
         return
 
-    has_acs_control = glt_utils.check_kernel_log(acs_control_msg)
-    has_acs_fw_ctrl = glt_utils.check_kernel_log(acs_fw_ctrl_msg)
+    has_acs_control = acs_control_msg in kernel_log
+    has_acs_fw_ctrl = acs_fw_ctrl_msg in kernel_log
 
     missing = []
     if not has_acs_control:
@@ -955,7 +969,7 @@ def test_msix_mem_restore_no_ur(sd, logger):
     pci_command_memory = 0x2
     # Kernel-log fragments that identify the UR / RP PIO / DPC / AER signature
     # of the unpatched MSI-X restore path. Each is checked for as a substring
-    # of the current-boot kernel log via glt_utils.check_kernel_log().
+    # of the post-FLR kernel log window via glt_utils.get_kernel_log().
     fault_signatures = (
         "DPC: containment event",
         "RP PIO",
@@ -1074,10 +1088,19 @@ def test_msix_mem_restore_no_ur(sd, logger):
             table.group(1) if table else "?",
             table.group(2) if table else "?")
 
+        try:
+            checkpoint = glt_utils.capture_kernel_log_checkpoint()
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to capture kernel log checkpoint before FLR on "
+                f"{bdf}: {error}"
+            )
+
         command = _setpci_read_word(bdf, pci_command_offset)
         if command is None:
             GLTCore.GLTTestResult.skip(
                 f"could not read COMMAND on {bdf} via setpci")
+
         if not _setpci_write_word(bdf, pci_command_offset,
                                   command & ~pci_command_memory):
             GLTCore.GLTTestResult.skip(f"failed to clear COMMAND.Memory on {bdf}")
@@ -1114,8 +1137,15 @@ def test_msix_mem_restore_no_ur(sd, logger):
         except OSError:
             healthy = False
 
+        try:
+            kernel_log = glt_utils.get_kernel_log(checkpoint)
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to retrieve kernel log after FLR on {bdf}: {error}"
+            )
+
         for signature in fault_signatures:
-            if glt_utils.check_kernel_log(signature):
+            if signature in kernel_log:
                 logger.error("fault signature in kernel log: %s", signature)
                 GLTCore.GLTTestResult.fail(patch_fail_msg)
 

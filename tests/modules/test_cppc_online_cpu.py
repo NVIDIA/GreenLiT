@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from tests.test_base import GLTTestBase
+from common import glt_core as GLTCore
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
@@ -737,6 +738,38 @@ class TestCppcOnlineCpuHelpers(GLTTestBase):
 
         self.assertFalse(ok)
         self.assertIn("expected cppc_cpufreq", reason)
+
+    def test_cppc_online_cpu_coverage_prefers_first_matching_signature(self):
+        """Stop at the first matching CPPC signature instead of checking the rest."""
+        self.mock_sd.progress_check.return_value = False
+
+        with self.mock.patch.object(
+            cppc_online, "_finish_restore_reboot_if_needed", return_value=(False, "")
+        ), self.mock.patch.object(
+            cppc_online.platform, "machine", return_value="aarch64"
+        ), self.mock.patch.object(
+            cppc_online, "_read_cpu_mask", side_effect=[{0, 1, 2, 3}, {0, 1}]
+        ), self.mock.patch.object(
+            cppc_online, "_read_file", return_value="maxcpus=2"
+        ), self.mock.patch.object(
+            cppc_online, "_prepare_maxcpus_boot_parameter", return_value=(True, "")
+        ), self.mock.patch.object(
+            cppc_online, "_validate_cppc_observability", return_value=(True, "")
+        ), self.mock.patch.object(
+            cppc_online.glt_utils,
+            "check_kernel_log",
+            side_effect=[True, RuntimeError("journal lost")],
+        ) as check_log, self.mock.patch.object(
+            cppc_online, "_restore_maxcpus_boot_parameter", return_value=(True, "")
+        ):
+            with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+                cppc_online.test_cppc_online_cpu_coverage(
+                    self.mock_sd, self.mock_logger
+                )
+
+        self.assertIn("cppc_allow_fast_switch", str(ctx.exception))
+        self.assertNotIn("Failed to collect kernel logs", str(ctx.exception))
+        check_log.assert_called_once_with("cppc_allow_fast_switch")
 
 
 if __name__ == "__main__":

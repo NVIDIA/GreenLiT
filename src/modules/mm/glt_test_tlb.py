@@ -87,14 +87,15 @@ def test_hotplug_tlb_flush_storm(_, __):  # pylint: disable=too-many-branches
             subprocess.run(["make"], check=True, shell=False)
 
             uvm_was_loaded = os.path.exists("/sys/module/nvidia_uvm")
+            uvm_removed = False
             try:
-                subprocess.run(["modprobe", "nvidia_uvm"],
-                               check=True, timeout=threshold_s)
-            except subprocess.TimeoutExpired:
-                GLTCore.GLTTestResult.fail(
-                    f"modprobe nvidia_uvm timed out after {threshold_s}s")
+                try:
+                    subprocess.run(["modprobe", "nvidia_uvm"],
+                                   check=True, timeout=threshold_s)
+                except subprocess.TimeoutExpired:
+                    GLTCore.GLTTestResult.fail(
+                        f"modprobe nvidia_uvm timed out after {threshold_s}s")
 
-            try:
                 # Register all GPUs and fill ~90% of each GPU's HBM as UVM
                 # coherent devmem so the hot-added region to tear down is large.
                 try:
@@ -114,6 +115,13 @@ def test_hotplug_tlb_flush_storm(_, __):  # pylint: disable=too-many-branches
                         f"({min_resident_mb} required, rc={fill.returncode}); "
                         "cannot exercise the teardown.")
 
+                try:
+                    checkpoint = glt_utils.capture_kernel_log_checkpoint()
+                except RuntimeError as error:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to capture kernel log checkpoint before "
+                        f"nvidia_uvm teardown: {error}"
+                    )
                 t0 = time.monotonic()
                 try:
                     subprocess.run(["rmmod", "nvidia_uvm"], check=True,
@@ -132,14 +140,24 @@ def test_hotplug_tlb_flush_storm(_, __):  # pylint: disable=too-many-branches
                         f"after {elapsed:.1f}s")
                 else:
                     elapsed = time.monotonic() - t0
+                    uvm_removed = True
 
                 # A pre-fix kernel soft-locks up in unmap_hotplug_range during the
                 # teardown; the fixed kernel does not. Timing is the primary
                 # signal. This corroborates it against the kernel log.
-                lockup = (
-                    (glt_utils.check_kernel_log("soft lockup")
-                     or glt_utils.check_kernel_log("detected stall"))
-                    and glt_utils.check_kernel_log("unmap_hotplug_range"))
+                try:
+                    lockup = (
+                        (glt_utils.check_kernel_log(
+                            "soft lockup", checkpoint=checkpoint)
+                         or glt_utils.check_kernel_log(
+                             "detected stall", checkpoint=checkpoint))
+                        and glt_utils.check_kernel_log(
+                            "unmap_hotplug_range", checkpoint=checkpoint))
+                except RuntimeError as error:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to retrieve kernel log after nvidia_uvm "
+                        f"teardown: {error}"
+                    )
             finally:
                 if uvm_was_loaded:
                     try:
@@ -149,6 +167,15 @@ def test_hotplug_tlb_flush_storm(_, __):  # pylint: disable=too-many-branches
                             subprocess.CalledProcessError) as e:
                         GLTCore.GLTTestResult.fail(
                             f"modprobe nvidia_uvm restore failed: {e}")
+                elif not uvm_removed and os.path.exists(
+                        "/sys/module/nvidia_uvm"):
+                    try:
+                        subprocess.run(["rmmod", "nvidia_uvm"],
+                                       check=True, timeout=threshold_s)
+                    except (subprocess.TimeoutExpired,
+                            subprocess.CalledProcessError) as e:
+                        GLTCore.GLTTestResult.fail(
+                            f"rmmod nvidia_uvm cleanup failed: {e}")
 
             if lockup or elapsed > threshold_s:
                 GLTCore.GLTTestResult.fail(

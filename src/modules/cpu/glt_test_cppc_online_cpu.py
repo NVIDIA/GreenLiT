@@ -378,9 +378,23 @@ def test_cppc_online_cpu_coverage(sd, logger):
 
     failure_reason = ""
     for signature in ("cppc_allow_fast_switch", "cppc_perf_ctrs_in_pcc"):
-        if glt_utils.check_kernel_log(signature):
-            failure_reason = f"Kernel log contains CPPC failure signature: {signature}"
-            break
+        try:
+            signature_found = glt_utils.check_kernel_log(signature)
+            if signature_found:
+                failure_reason = (
+                    f"Kernel log contains CPPC failure signature: {signature}"
+                )
+                break
+        except RuntimeError as error:
+            log_error = f"Failed to collect kernel logs: {error}"
+            restore_ok, restore_reason = _restore_maxcpus_boot_parameter(
+                test_name, sd, logger, log_error,
+            )
+            if restore_ok:
+                GLTCore.GLTTestResult.fail(log_error)
+            GLTCore.GLTTestResult.fail(
+                f"{log_error}; additionally, {restore_reason}"
+            )
     if failure_reason:
         restore_ok, restore_reason = _restore_maxcpus_boot_parameter(
             test_name, sd, logger, failure_reason
