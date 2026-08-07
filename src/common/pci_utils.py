@@ -111,6 +111,23 @@ def get_bdfs_by_pci_id(vendor_id: str, device_id: Optional[str] = None) -> list[
     ]
 
 
+def get_iommu_group_type(bdf: str) -> Optional[str]:
+    """Return the active IOMMU domain type for ``bdf``.
+
+    The per-group sysfs ``type`` reports the domain actually attached to the
+    device, including ``identity`` for untranslated DMA and ``DMA`` or
+    ``DMA-FQ`` for translated DMA.
+
+    Returns None when the device has no IOMMU group or its group type cannot
+    be read. Both cases mean callers cannot validate the active domain.
+    """
+    group_type_path = f"/sys/bus/pci/devices/{bdf}/iommu_group/type"
+    try:
+        return glt_utils.read_sysfs_value(group_type_path)
+    except OSError:
+        return None
+
+
 def get_pci_children(parent_bdf: str) -> list[str]:
     """Return BDFs of PCI devices directly behind ``parent_bdf``.
 
@@ -245,6 +262,41 @@ def iface_pci_bdfs(iface, _seen=None) -> set:
     for lower in lowers:
         bdfs |= iface_pci_bdfs(lower, _seen)
     return bdfs
+
+
+def is_ats_enabled(bdf: str) -> Optional[bool]:
+    """Return whether ``bdf`` conclusively shows ATS enabled.
+
+    Args:
+        bdf: Domain-prefixed BDF of the device.
+
+    Returns:
+        True or False when the Address Translation Service capability block
+        reports ``ATSCtl: Enable+`` or ``Enable-``. Returns None when lspci is
+        unavailable, fails, or does not expose a conclusive ``ATSCtl`` value.
+    """
+    try:
+        result = subprocess.run(
+            ["lspci", "-vvv", "-s", bdf],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+    in_ats_capability = False
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Capabilities:"):
+            in_ats_capability = EXT_CAP_ATS in stripped
+            continue
+        if in_ats_capability and stripped.startswith("ATSCtl:"):
+            if "Enable+" in stripped:
+                return True
+            if "Enable-" in stripped:
+                return False
+            return None
+
+    return None
 
 
 def mounted_block_devices() -> set:
