@@ -17,6 +17,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
   - [Naming and Formatting Rules](#naming-and-formatting-rules)
   - [Using GLTTestAttr](#using-glttestattr)
   - [Leveraging GreenLiT Utilities](#leveraging-greenlit-utilities)
+  - [Running CLI Commands with `run_command`](#running-cli-commands-with-run_command)
   - [Using GLTLibvirt for Virtualization Tests](#using-gltlibvirt-for-virtualization-tests)
   - [Test Results: FAILED, SKIPPED, or WARNING](#test-results-failed-skipped-or-warning)
   - [Managing Test Case Dependencies](#managing-test-case-dependencies)
@@ -288,6 +289,33 @@ Apply the same rule to helper code and adapters. Before adding a local wrapper,
 launcher, parser, or setup helper inside a test file, check `src/common/` and
 nearby module utilities first. Keep helper logic local only when it is specific
 to that one test and unlikely to be reused.
+
+### Running CLI Commands with `run_command`
+
+Use `glt_utils.run_command()` for the common CLI case: an argv list whose text
+stdout is needed, a non-zero exit is a failure, and one domain-specific
+message is enough for the caller. The helper always uses `shell=False`,
+captures text output, checks the return code, and applies a 30s timeout unless
+`timeout` is overridden.
+
+Timeout, non-zero exit, and decode failures raise
+`RuntimeError(failure_message)`. An executable that cannot start raises
+`RuntimeError(f"Failed to run {command[0]}")`. Test cases typically catch
+`RuntimeError` and pass `str(error)` to `GLTCore.GLTTestResult.fail()`:
+
+```python
+try:
+    result = glt_utils.run_command(
+        ["lspci", "-Dv"],
+        "Failed to enumerate PCI devices with 'lspci'",
+    )
+except RuntimeError as error:
+    GLTCore.GLTTestResult.fail(str(error))
+```
+
+Keep a direct `subprocess.run()` call when the caller needs a non-zero return
+code, redirected or binary output, stdin, unbounded runtime, or the
+original subprocess exception rather than a `RuntimeError`.
 
 ### Using GLTLibvirt for Virtualization Tests
 

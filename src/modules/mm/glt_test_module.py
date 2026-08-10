@@ -78,8 +78,13 @@ def test_module_allocation(_, logger) -> bool:
         logger.info("KASLR is " + "disabled" if
                                       non_plt_page_count else "enabled")
 
-        # Use shell=False to prevent command injection (CWE-78)
-        output = subprocess.run(["getconf", "PAGE_SIZE"], capture_output=True, shell=False, text=True, check=True)
+        try:
+            output = glt_utils.run_command(
+                ["getconf", "PAGE_SIZE"],
+                "Failed to retrieve the system page size",
+            )
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(str(error))
 
         page_size = int(output.stdout) if output.stdout else 64 << 10
 

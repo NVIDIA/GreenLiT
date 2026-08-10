@@ -17,7 +17,6 @@
 Python script to test KASLR.
 """
 import platform
-import subprocess
 from common import glt_core as GLTCore
 from common import glt_utils
 
@@ -57,9 +56,13 @@ def test_kaslr_offset(_, __):
     # [1] arch/arm64/include/asm/boot.h
     size_2m = 0x00200000
     base_addr = 0xffff800080000000
-    # Use shell=False to prevent command injection (CWE-78)
-    result = subprocess.run(["grep", " _text$", "/proc/kallsyms"],
-                            capture_output=True, text=True, shell=False, check=True)
+    try:
+        result = glt_utils.run_command(
+            ["grep", " _text$", "/proc/kallsyms"],
+            "Failed to read the kernel text address from /proc/kallsyms",
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
     kernel_addr = int(result.stdout.split()[0], 16)  # Extract first field (address)
 
     if kernel_addr - base_addr < size_2m:

@@ -65,14 +65,12 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
 
     # Check that /dev/tpm0 is on the tegra QSPI controller (NVDA1513) via udev DEVPATH
     try:
-        udev = subprocess.run(
+        udev = glt_utils.run_command(
             ["udevadm", "info", "/dev/tpm0"],
-            capture_output=True,
-            text=True,
-            check=True,
+            "udevadm info /dev/tpm0 failed unexpectedly",
         )
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"udevadm info /dev/tpm0 failed unexpectedly: {e}")
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
     devpath = ""
     for line in udev.stdout.splitlines():
         if "DEVPATH=" in line:
@@ -192,14 +190,12 @@ def test_tegra_qspi_xfer_kasan_oob(_, __):
         GLTCore.GLTTestResult.skip("udevadm is not available.")
 
     try:
-        udev = subprocess.run(
+        udev = glt_utils.run_command(
             ["udevadm", "info", "/dev/tpm0"],
-            capture_output=True,
-            text=True,
-            check=True,
+            "udevadm info /dev/tpm0 failed unexpectedly",
         )
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"udevadm info /dev/tpm0 failed unexpectedly: {e}")
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
     devpath = ""
     for line in udev.stdout.splitlines():
         if "DEVPATH=" in line:

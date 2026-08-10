@@ -218,14 +218,12 @@ def test_tegra410_gpio_numa_prefix(_, logger):
 
     # Discover tegra410 controllers by label
     try:
-        detect = subprocess.run(
-            ["gpiodetect"], capture_output=True, shell=False, text=True, check=True,
+        detect = glt_utils.run_command(
+            ["gpiodetect"],
+            "gpiodetect failed to enumerate GPIO controllers",
         )
-    except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logger.warning("gpiodetect failed: %s", e)
-        GLTCore.GLTTestResult.fail(
-            f"gpiodetect failed to enumerate GPIO controllers: {e}."
-        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
 
     chips = []
     for line in detect.stdout.splitlines():
@@ -244,15 +242,12 @@ def test_tegra410_gpio_numa_prefix(_, logger):
     gpio_names = []
     for chip_name in chips:
         try:
-            info = subprocess.run(
+            info = glt_utils.run_command(
                 ["gpioinfo", chip_name],
-                capture_output=True, shell=False, text=True, check=True,
+                f"Failed to enumerate GPIO line names on {chip_name}",
             )
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            logger.warning("gpioinfo %s failed: %s", chip_name, e)
-            GLTCore.GLTTestResult.fail(
-                f"Failed to enumerate GPIO line names via 'gpioinfo {chip_name}': {e}."
-            )
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(str(error))
         gpio_names.extend(
             mm.group("name")
             for mm in (gpioinfo_line_re.match(ln) for ln in info.stdout.splitlines())

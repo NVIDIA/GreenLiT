@@ -261,16 +261,12 @@ def test_arm_ffa_availability(_, logger):
             )
 
         try:
-            result = subprocess.run(
+            result = glt_utils.run_command(
                 ["lsmod"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                shell=False,
+                "Failed to inspect loaded modules",
             )
-        except subprocess.CalledProcessError as err:
-            GLTCore.GLTTestResult.fail(f"Failed to inspect loaded modules: {err}")
+        except RuntimeError as error:
+            GLTCore.GLTTestResult.fail(str(error))
 
         if not any(
             line.split()[0] == module_name
