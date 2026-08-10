@@ -38,7 +38,7 @@ def test_system_state_is_running(_, __):
 
     try:
         result = subprocess.run(
-            ["systemctl", "is-system-running"],
+            ["systemctl", "is-system-running", "--wait"],
             capture_output=True,
             text=True,
             check=False,
