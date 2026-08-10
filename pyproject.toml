@@ -24,6 +24,7 @@ include = [
     "confs/greenlit.timer",
     "external_tests/**/*",
     "src/modules/i2c/kretprobes/*",
+    "src/modules/iommu/cmdqv_hyp_own/*",
     "src/modules/iommu/sva_invalidate/*",
     "src/modules/mm/bingo/*",
     "src/modules/mm/hotplug_tlb/*",

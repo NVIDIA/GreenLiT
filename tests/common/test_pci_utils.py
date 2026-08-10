@@ -6,9 +6,11 @@ from tests.test_base import GLTTestBase
 from src.common.pci_utils import (
     ASPEED_AST1150_DEVICE_ID,
     ASPEED_VENDOR_ID,
+    BDF_STRICT_RE,
     EXT_CAP_ACS,
     EXT_CAP_ATS,
     PCI_CLASS_USB_HOST,
+    bdf_in_translated_domain,
     block_device_physical_leaves,
     default_route_ifaces,
     get_bdfs_by_pci_id,
@@ -17,7 +19,9 @@ from src.common.pci_utils import (
     get_pci_class,
     iface_pci_bdfs,
     mounted_block_devices,
+    pci_bdfs_backing_mount,
     unsafe_pci_bdfs,
+    sysfs_path_to_pci_bdf,
 )
 
 LSPCI_OUTPUT_TWO_DEVICES = """\
@@ -538,6 +542,132 @@ class TestPciUtilsNetAndBlock(GLTTestBase):
         ):
             with self.assertRaises(PermissionError):
                 iface_pci_bdfs("eth0")
+
+
+class TestBdfStrictRe(GLTTestBase):
+    """Strict BDF form used by callers that splice input into sysfs paths."""
+
+    def test_accepts_canonical_bdf(self):
+        """A domain-qualified lowercase BDF is accepted."""
+        self.assertIsNotNone(BDF_STRICT_RE.fullmatch("0000:01:00.0"))
+
+    def test_rejects_path_traversal(self):
+        """Path-like input cannot escape the PCI sysfs directory."""
+        self.assertIsNone(BDF_STRICT_RE.fullmatch("../../etc/passwd"))
+
+    def test_rejects_invalid_pci_function(self):
+        """PCI function numbers are 0-7; .8/.9 must not match."""
+        self.assertIsNone(BDF_STRICT_RE.fullmatch("0000:01:00.8"))
+        self.assertIsNone(BDF_STRICT_RE.fullmatch("0000:01:00.9"))
+
+
+class TestSysfsPathToPciBdf(GLTTestBase):
+    """Resolve PCI BDF from sysfs device paths."""
+
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.exists")
+    def test_finds_bdf_at_varying_depths(self, mock_exists):
+        """Valid BDF segments are found at shallow and deep sysfs paths."""
+        mock_exists.return_value = True
+        cases = [
+            ("/sys/bus/pci/devices/0000:01:00.0", "0000:01:00.0"),
+            (
+                "/sys/devices/pci0000:00/0000:00:01.0/0000:01:00.0/nvme/nvme0/nvme0n1",
+                "0000:01:00.0",
+            ),
+        ]
+        for path, expected in cases:
+            with self.subTest(path=path):
+                self.assertEqual(sysfs_path_to_pci_bdf(path), expected)
+
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.exists")
+    def test_returns_none_when_no_match(self, mock_exists):
+        """Paths without a present PCI device return None."""
+        mock_exists.return_value = False
+        self.assertIsNone(sysfs_path_to_pci_bdf("/sys/class/block/nvme0n1/device"))
+
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.exists")
+    def test_rejects_malformed_bdf(self, mock_exists):
+        """Malformed BDF basename segments are rejected."""
+        mock_exists.return_value = True
+        self.assertIsNone(
+            sysfs_path_to_pci_bdf("/sys/bus/pci/devices/not-a-bdf")
+        )
+
+
+class TestBdfInTranslatedDomain(GLTTestBase):
+    """Detect DMA/DMA-FQ IOMMU group membership for a PCI BDF."""
+
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.exists")
+    def test_returns_false_when_no_iommu_group(self, mock_exists):
+        """Devices without an iommu_group symlink are not translated."""
+        mock_exists.return_value = False
+        self.assertFalse(bdf_in_translated_domain("0000:01:00.0"))
+
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.exists")
+    def test_rejects_malformed_bdf_before_touching_sysfs(self, mock_exists):
+        """A malformed BDF returns False without building a sysfs path."""
+        self.assertFalse(bdf_in_translated_domain("../../etc/passwd"))
+        mock_exists.assert_not_called()
+
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.open")
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.realpath")
+    @GLTTestBase.unittest.mock.patch("src.common.pci_utils.os.path.exists")
+    def test_returns_true_for_dma_group_type(
+        self, mock_exists, mock_realpath, mock_open
+    ):
+        """A DMA-typed iommu_group is reported as translated."""
+        mock_exists.return_value = True
+        mock_realpath.return_value = "/sys/kernel/iommu_groups/5"
+        mock_open.return_value.__enter__.return_value.read.return_value = "DMA\n"
+        self.assertTrue(bdf_in_translated_domain("0000:01:00.0"))
+
+
+class TestPciBdfsBackingMount(GLTTestBase):
+    """Mount-point resolution follows stacked storage to physical PCI leaves."""
+
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.sysfs_path_to_pci_bdf",
+        return_value="0000:01:00.0",
+    )
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.block_device_physical_leaves",
+        return_value=["nvme0n1"],
+    )
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.mounted_block_devices",
+        return_value={"dm-0"},
+    )
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.os.path.realpath",
+        side_effect=["/dev/dm-0", "/sys/devices/pci0000:00/0000:01:00.0/nvme/nvme0"],
+    )
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.open",
+        new_callable=GLTTestBase.unittest.mock.mock_open,
+        read_data="/dev/mapper/vg-root / ext4 rw 0 0\n",
+    )
+    def test_resolves_mapper_root_to_physical_pci_device(
+        self, _open, _realpath, _mounted, mock_leaves, mock_bdf
+    ):
+        """A dm/LVM root resolves to the physical disk's PCI device."""
+        self.assertEqual(pci_bdfs_backing_mount("/"), {"0000:01:00.0"})
+        mock_leaves.assert_called_once_with("dm-0")
+        mock_bdf.assert_called_once_with(
+            "/sys/devices/pci0000:00/0000:01:00.0/nvme/nvme0"
+        )
+
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.mounted_block_devices",
+        return_value={"nvme0n1p2"},
+    )
+    @GLTTestBase.unittest.mock.patch(
+        "src.common.pci_utils.open",
+        new_callable=GLTTestBase.unittest.mock.mock_open,
+        read_data="tmpfs /run tmpfs rw 0 0\n",
+    )
+    def test_returns_empty_when_mount_has_no_dev_source(self, _open, _mounted):
+        """A mount point with no /dev/* source yields no BDFs."""
+        self.assertEqual(pci_bdfs_backing_mount("/run"), set())
 
 
 if __name__ == "__main__":

@@ -200,6 +200,7 @@ install_prerequisites() {
     apt install -y gpiod # gpiodetect
     apt install -y freeipmi # bmc-info
     apt install -y ipmitool linux-tools-common
+    apt install -y bpftrace || echo "WARNING: bpftrace unavailable; CMDQV tests will not run"
     apt install -y stress-ng # TPM QSPI interrupt timeout test and other stress tests
     apt install -y kexec-tools
     apt install -y libvirt-clients libvirt-daemon-system qemu-system-arm qemu-utils # virsh/libvirt tests
@@ -218,17 +219,20 @@ install_prerequisites() {
     echo "Red Hat/Fedora-based system detected"
     echo "Installing required system packages..."
     dnf install -y python3-pip tar ipmitool perf freeipmi kernel-devel kernel-headers libgpiod-utils stress-ng kexec-tools
+    dnf install -y bpftrace || echo "WARNING: bpftrace unavailable; CMDQV tests will not run"
     dnf install -y libvirt-client libvirt-daemon libvirt-daemon-driver-qemu qemu-kvm qemu-img
   elif check_network && check_command zypper; then
     echo "openSUSE/SLES system detected"
     echo "Installing required system packages..."
     zypper --non-interactive refresh
     zypper --non-interactive install python3-pip tar ipmitool perf freeipmi kernel-default-devel linux-glibc-devel libgpiod stress-ng kexec-tools
+    zypper --non-interactive install bpftrace || echo "WARNING: bpftrace unavailable; CMDQV tests will not run"
     zypper --non-interactive install libvirt-client libvirt-daemon libvirt-daemon-qemu qemu-arm qemu-tools
   elif check_network && check_command yum; then
     echo "Older Red Hat-based system detected"
     echo "Installing required system packages..."
     yum install -y python3-pip tar ipmitool perf freeipmi libgpiod-utils stress-ng kexec-tools
+    yum install -y bpftrace || echo "WARNING: bpftrace unavailable; CMDQV tests will not run"
     yum install -y libvirt-client libvirt-daemon libvirt-daemon-driver-qemu qemu-kvm qemu-img
   else
     echo "WARNING: Unable to detect package manager or network unavailable."
@@ -241,6 +245,7 @@ install_prerequisites() {
     echo "  - freeipmi"
     echo "  - stress-ng"
     echo "  - kexec-tools"
+    echo "  - bpftrace"
     echo "  - virsh/libvirt and qemu-system-aarch64 or qemu-kvm support"
     echo "  - Linux kernel headers (matching your running kernel)"
   fi
