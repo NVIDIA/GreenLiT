@@ -48,14 +48,6 @@ _BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
 
 
 @dataclass(frozen=True)
-class _DmesgKernelLogCheckpoint:
-    """Opaque checkpoint for the current dmesg buffer."""
-
-    boot_id: str
-    baseline: str
-
-
-@dataclass(frozen=True)
 class _JournalKernelLogCheckpoint:
     """Opaque checkpoint for a current-boot journal record."""
 
@@ -63,10 +55,7 @@ class _JournalKernelLogCheckpoint:
     cursor: str
 
 
-_KernelLogCheckpoint: TypeAlias = (
-    _DmesgKernelLogCheckpoint | _JournalKernelLogCheckpoint
-)
-KernelLogCheckpoint: TypeAlias = _KernelLogCheckpoint
+KernelLogCheckpoint: TypeAlias = _JournalKernelLogCheckpoint
 
 
 def is_secure_boot_enabled():
@@ -333,68 +322,28 @@ def _run_command(
         raise RuntimeError(f"Failed to run {command[0]}") from None
 
 
-def _read_dmesg() -> str:
-    """Return deterministic dmesg output with timestamps and no color."""
-    result = _run_command(
-        ["dmesg", "--color=never"],
-        "Failed to retrieve the kernel log with dmesg",
-    )
-    return result.stdout
-
-
-def _dmesg_log_after_checkpoint(baseline: str, current: str) -> str:
-    """Return dmesg text after a checkpoint, allowing ring-buffer wrap."""
-    if current.startswith(baseline):
-        return current[len(baseline):]
-
-    baseline_lines = baseline.splitlines(keepends=True)
-    current_lines = current.splitlines(keepends=True)
-    max_overlap = min(len(baseline_lines), len(current_lines))
-    for overlap in range(max_overlap, 0, -1):
-        if baseline_lines[-overlap:] == current_lines[:overlap]:
-            return "".join(current_lines[overlap:])
-
-    raise RuntimeError("The dmesg checkpoint is no longer continuous")
-
-
 def capture_kernel_log_checkpoint() -> KernelLogCheckpoint:
     """Capture an opaque checkpoint for subsequent kernel-log retrieval.
 
-    The checkpoint records the current boot and remains bound to the selected
-    journal or dmesg backend. RuntimeError is raised when no backend can
-    produce a valid checkpoint.
+    The checkpoint records the current boot and journal cursor. RuntimeError
+    is raised when journalctl cannot produce a valid checkpoint.
     """
     boot_id = _read_boot_id()
-
-    if is_cli_available("journalctl"):
-        try:
-            result = _run_command(
-                [
-                    "journalctl",
-                    "--no-pager",
-                    "-b0",
-                    "-k",
-                    "-n1",
-                    "-o",
-                    "json",
-                ],
-                "Failed to capture a journal checkpoint",
-            )
-            cursor = _parse_journal_cursor(result.stdout)
-        except RuntimeError:
-            cursor = None
-        if cursor is not None:
-            return _JournalKernelLogCheckpoint(
-                boot_id=boot_id,
-                cursor=cursor,
-            )
-
-    baseline = _read_dmesg()
-    if not baseline:
-        raise RuntimeError("Cannot capture an empty dmesg checkpoint")
-    return _DmesgKernelLogCheckpoint(
+    result = _run_command(
+        [
+            "journalctl",
+            "--no-pager",
+            "-b0",
+            "-k",
+            "-n1",
+            "-o",
+            "json",
+        ],
+        "Failed to capture a journal checkpoint",
+    )
+    return _JournalKernelLogCheckpoint(
         boot_id=boot_id,
-        baseline=baseline,
+        cursor=_parse_journal_cursor(result.stdout),
     )
 
 
@@ -423,51 +372,44 @@ def check_kernel_log(
 ) -> bool:
     """Return whether a literal message occurs in the selected kernel log.
 
-    With no checkpoint, search the available current-boot log. With a
-    checkpoint, search only records appended after that checkpoint. Retrieval
-    and checkpoint continuity failures propagate as RuntimeError.
+    With no checkpoint, search the whole current-boot log. With a checkpoint,
+    search only records appended after that checkpoint. Retrieval, empty
+    current-boot log, and checkpoint continuity failures propagate as
+    RuntimeError rather than being reported as a no-match result.
     """
     return msg in get_kernel_log(checkpoint)
 
 
-# pylint: disable=too-many-branches
 def get_kernel_log(
     checkpoint: KernelLogCheckpoint | None = None,
 ) -> str:
     """Return current-boot kernel-log text or text after a checkpoint.
 
-    A checkpoint remains bound to the backend that created it. RuntimeError is
-    raised when retrieval fails, the checkpoint belongs to another boot, or
-    checkpoint continuity cannot be proven. A successful query with no new
-    records returns ``""``.
+    RuntimeError is raised when journalctl retrieval fails, the checkpoint
+    belongs to another boot, or checkpoint continuity cannot be proven. Only a
+    checkpointed query returns ``""``, meaning no new records; a booted kernel
+    always logs, so an empty current-boot read means journald is not serving
+    kmsg and is reported as a failure instead of a defect-free log.
     """
     if checkpoint is None:
-        if is_cli_available("journalctl"):
-            try:
-                result = _run_command(
-                    [
-                        "journalctl",
-                        "--no-pager",
-                        "-b0",
-                        "-k",
-                        "-o",
-                        "cat",
-                    ],
-                    "Failed to retrieve the kernel log with journalctl",
-                )
-            except RuntimeError:
-                result = None
-            # journalctl can exit 0 with no kernel records while dmesg still
-            # has the current-boot log; treat empty output as unusable.
-            if result is not None and result.stdout:
-                return result.stdout
+        result = _run_command(
+            [
+                "journalctl",
+                "--no-pager",
+                "-b0",
+                "-k",
+                "-o",
+                "cat",
+            ],
+            "Failed to retrieve the kernel log with journalctl",
+        )
+        if not result.stdout:
+            raise RuntimeError(
+                "journalctl returned no current-boot kernel records"
+            )
+        return result.stdout
 
-        return _read_dmesg()
-
-    if not isinstance(
-        checkpoint,
-        (_DmesgKernelLogCheckpoint, _JournalKernelLogCheckpoint),
-    ):
+    if not isinstance(checkpoint, _JournalKernelLogCheckpoint):
         raise RuntimeError(
             "Kernel-log checkpoint has unexpected type "
             f"{type(checkpoint).__name__}"
@@ -481,27 +423,16 @@ def get_kernel_log(
     if not checkpoint.boot_id:
         raise RuntimeError("Kernel-log checkpoint boot_id is empty")
 
-    if isinstance(checkpoint, _DmesgKernelLogCheckpoint):
-        if not isinstance(checkpoint.baseline, str):
-            raise RuntimeError(
-                "Dmesg checkpoint baseline must be a string, "
-                f"got {type(checkpoint.baseline).__name__}"
-            )
-        if not checkpoint.baseline:
-            raise RuntimeError("Dmesg checkpoint baseline is empty")
-    elif not isinstance(checkpoint.cursor, str):
+    if not isinstance(checkpoint.cursor, str):
         raise RuntimeError(
             "Journal checkpoint cursor must be a string, "
             f"got {type(checkpoint.cursor).__name__}"
         )
-    elif not checkpoint.cursor:
+    if not checkpoint.cursor:
         raise RuntimeError("Journal checkpoint cursor is empty")
 
     if _read_boot_id() != checkpoint.boot_id:
         raise RuntimeError("Kernel-log checkpoint belongs to another boot")
-
-    if isinstance(checkpoint, _DmesgKernelLogCheckpoint):
-        return _dmesg_log_after_checkpoint(checkpoint.baseline, _read_dmesg())
 
     _validate_journal_cursor(checkpoint.cursor)
 
