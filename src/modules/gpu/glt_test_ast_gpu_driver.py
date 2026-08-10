@@ -58,10 +58,26 @@ def test_ast_gpu_driver(sd, _):
         if process.poll() is None:
             time.sleep(5)
             if process.poll() is None:
-                glt_utils.reboot_with_reisub(test_ast_gpu_driver.__name__, sd)
+                ok, reason = glt_utils.reboot_with_reisub(
+                    test_ast_gpu_driver.__name__, sd
+                )
+                if not ok:
+                    GLTCore.GLTTestResult.fail(
+                        "AST module operation timed out. Include kernel commit "
+                        "4327a6137ed4 to fix it. Failed to trigger the recovery "
+                        f"reboot: {reason}"
+                    )
 
     with subprocess.Popen(['sudo', 'modprobe', 'ast']) as process:
         if process.poll() is None:
             time.sleep(5)
             if process.poll() is None:
-                glt_utils.reboot_with_reisub(test_ast_gpu_driver.__name__, sd)
+                ok, reason = glt_utils.reboot_with_reisub(
+                    test_ast_gpu_driver.__name__, sd
+                )
+                if not ok:
+                    GLTCore.GLTTestResult.fail(
+                        "AST module operation timed out. Include kernel commit "
+                        "4327a6137ed4 to fix it. Failed to trigger the recovery "
+                        f"reboot: {reason}"
+                    )

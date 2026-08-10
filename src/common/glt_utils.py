@@ -886,14 +886,16 @@ def remove_kernel_parameter(parameter, test_case_name=None, session_dir=None) ->
 
 def reboot(testcase, sd):
     """Reboot system with saving status"""
-    sd.progress_record_time(testcase, "TriggerReboot")
-    if systemd_enable():
-        os.system("reboot")
-        os._exit(0)
-    else:
-        # If systemd unavailable, guess in development mode,
-        # Send SIGTERM to self to emulate system off.
+    if not is_systemd_running():
         os.kill(os.getpid(), signal.SIGTERM)
+        return False
+    if systemd_enable():
+        sd.progress_record_time(testcase, "TriggerReboot")
+        status = os.system("reboot")
+        if status != 0:
+            sd.progress_delete_time(testcase, "TriggerReboot")
+            return False
+        os._exit(0)
     return False
 
 
@@ -991,6 +993,32 @@ def _load_kernel_for_kexec(
                 pass
 
 
+def _unload_kernel_for_kexec() -> tuple[bool, str]:
+    """Unload a kernel staged by kexec."""
+    try:
+        subprocess.run(
+            ["kexec", "-u"],
+            shell=False,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return True, ""
+    except subprocess.CalledProcessError as e:
+        reason = (e.stderr or e.stdout or "").strip()
+        return False, reason or str(e)
+    except OSError as e:
+        return False, str(e)
+
+
+def _kexec_failure_after_load(reason: str) -> tuple[bool, str]:
+    """Unload a staged kernel and preserve the original failure reason."""
+    unloaded, unload_reason = _unload_kernel_for_kexec()
+    if not unloaded:
+        reason += f"; failed to unload the staged kexec kernel: {unload_reason}"
+    return False, reason
+
+
 # pylint: disable=too-many-return-statements,too-many-branches
 def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | None]:
     """
@@ -1014,6 +1042,7 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
     if custom_cmdline is not None and any(c in custom_cmdline for c in "\n\r\0"):
         return False
 
+    kernel_loaded = False
     try:
         kernel_version = platform.release()
         initrd_path = None
@@ -1049,34 +1078,59 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
         )
         if not loaded:
             return False, reason
+        kernel_loaded = True
 
         kexec_loaded_path = "/sys/kernel/kexec_loaded"
         try:
             with open(kexec_loaded_path, "r", encoding="utf-8") as f:
                 if f.read().strip() != "1":
-                    return (False, "Kernel not loaded for kexec after load attempt")
+                    return _kexec_failure_after_load(
+                        "Kernel not loaded for kexec after load attempt"
+                    )
         except FileNotFoundError:
-            return (False, "kexec_loaded sysfs not available")
+            return _kexec_failure_after_load(
+                "kexec_loaded sysfs not available"
+            )
 
-        # Record the reboot marker only after a kernel is confirmed loaded.
-        # Extraction or load failures must not look like a reboot attempt.
-        sd.progress_record_time(testcase, "TriggerKexec")
-
+        if not is_systemd_running():
+            unloaded, reason = _unload_kernel_for_kexec()
+            if not unloaded:
+                return (
+                    False,
+                    "systemd is not running and the staged kexec kernel "
+                    f"could not be unloaded: {reason}",
+                )
+            kernel_loaded = False
+            os.kill(os.getpid(), signal.SIGTERM)
+            return (
+                False,
+                "SIGTERM did not terminate the process while emulating shutdown",
+            )
         if systemd_enable():
-            os.system("systemctl kexec")
+            # Record only after all preconditions pass and immediately before
+            # requesting the kexec reboot.
+            sd.progress_record_time(testcase, "TriggerKexec")
+            status = os.system("systemctl kexec")
+            if status != 0:
+                sd.progress_delete_time(testcase, "TriggerKexec")
+                return _kexec_failure_after_load(
+                    f"systemctl kexec failed with status {status}"
+                )
             # systemctl kexec will ask systemd to perform a kexec reboot,
             # The request returns as soon as it's sent. The actual reboot
             # happens later. Use os._exit(0) to prevent the function from
             # returning so the caller test won't be marked as Completed
             os._exit(0)
         else:
-            # If systemd unavailable, guess in development mode,
-            # Send SIGTERM to self to emulate system off.
-            # TODO: Do not silently kill the process.
-            # Consider passing logger to record the error.
-            os.kill(os.getpid(), signal.SIGTERM)
+            return _kexec_failure_after_load(
+                "Could not enable greenlit.service, so the test cannot "
+                "resume after the kexec boot. Check whether the unit is "
+                "masked or missing: systemctl status greenlit.service"
+            )
 
     except OSError as e:
+        if kernel_loaded:
+            return _kexec_failure_after_load(str(e))
         return (False, f"{e}")
 
     return (True, None)
@@ -1116,30 +1170,43 @@ def handle_kexec_flow(test_name, sd, logger, custom_cmdline=None):
     return (True, None)
 
 
-def reboot_with_reisub(testcase, sd):
+def reboot_with_reisub(testcase, sd) -> tuple[bool, str | None]:
     """
     Magic reboot system with saving status
     Useful when there's kernel process lockup
+
+    Returns:
+        (False, reason): If the reboot could not be triggered.
+        (True, None): If the REISUB reboot was scheduled. Normally the
+            process exits through its SIGINT handler before this is returned.
     """
-    sd.progress_record_time(testcase, "REISUB")
-    if systemd_enable():
-        # Not using 'e' (SIGTERM) or 'i' (SIGKILL) so the REISUB process stays
-        # alive. 5 seconds delay to let glt-test-suite dump the stack
-        # shell=True required for sh -c with multiple commands; command is hardcoded with no user input
-        subprocess.Popen(r"""sh -c 'sleep 5; \
-                         echo s > /proc/sysrq-trigger; \
-                         echo u > /proc/sysrq-trigger; \
-                         echo b > /proc/sysrq-trigger'""",
-                         start_new_session=True, restore_signals=False, shell=True)
-
-        # Use shell=False to prevent command injection (CWE-78)
-        subprocess.run(["pkill", "-INT", "glt-test-suite"], shell=False, check=False)
-    else:
-        # If systemd unavailable, guess in development mode,
-        # Send SIGTERM to self to emulate system off.
+    if not is_systemd_running():
         os.kill(os.getpid(), signal.SIGTERM)
+        return (
+            False,
+            "SIGTERM did not terminate the process while emulating shutdown",
+        )
+    if not systemd_enable():
+        return (False, "Could not enable greenlit.service, so the test "
+                "cannot resume after the REISUB reboot. Check whether the "
+                "unit is masked or missing: "
+                "systemctl status greenlit.service")
 
-    return False
+    sd.progress_record_time(testcase, "REISUB")
+
+    # Not using 'e' (SIGTERM) or 'i' (SIGKILL) so the REISUB process stays
+    # alive. 5 seconds delay to let glt-test-suite dump the stack
+    # shell=True required for sh -c with multiple commands; command is hardcoded with no user input
+    subprocess.Popen(r"""sh -c 'sleep 5; \
+                     echo s > /proc/sysrq-trigger; \
+                     echo u > /proc/sysrq-trigger; \
+                     echo b > /proc/sysrq-trigger'""",
+                     start_new_session=True, restore_signals=False, shell=True)
+
+    # Use shell=False to prevent command injection (CWE-78)
+    subprocess.run(["pkill", "-INT", "glt-test-suite"], shell=False, check=False)
+
+    return (True, None)
 
 
 def start_systemd_timer(timer="greenlit", start=True):
