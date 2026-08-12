@@ -41,7 +41,7 @@ If you prefer to install prerequisites manually:
 
 ```bash
 sudo apt update
-sudo apt install build-essential python3-pip python3-setuptools tar ipmitool linux-tools-common freeipmi-tools
+sudo apt install build-essential python3-pip python3-setuptools tar ipmitool linux-tools-common bpftrace freeipmi-tools
 sudo apt install libvirt-clients libvirt-daemon-system qemu-system-arm qemu-utils
 # Install kernel headers (may require specific handling for custom kernels)
 sudo apt install linux-headers-$(uname -r)
@@ -60,6 +60,10 @@ sudo dnf install python3-pip python3-setuptools tar ipmitool perf freeipmi kerne
 sudo dnf install libvirt-client libvirt-daemon libvirt-daemon-driver-qemu qemu-kvm qemu-img
 ```
 
+The CMDQV IOMMU tests additionally require `bpftrace`. On RHEL/CentOS, enable a
+repository that provides it (for example, the appropriate EPEL/CRB combination)
+before installing the package.
+
 **SUSE**:
 
 ```bash
@@ -67,6 +71,8 @@ sudo zypper --non-interactive refresh
 sudo zypper --non-interactive install python3-pip python3-setuptools tar ipmitool perf freeipmi kernel-default-devel linux-glibc-devel
 sudo zypper --non-interactive install libvirt-client libvirt-daemon libvirt-daemon-qemu qemu-arm qemu-tools
 ```
+
+The CMDQV IOMMU tests additionally require the optional `bpftrace` package.
 
 If libvirt is not socket-activated by the package installation, start it before running virtualization tests:
 

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 """
-Utilities for inspecting PCI device capabilities via lspci.
+Utilities for inspecting PCI device capabilities via lspci and sysfs.
 """
 
 import os
@@ -37,6 +37,12 @@ PCI_CLASS_USB_HOST = "0x0c03"
 
 _BDF_RE = re.compile(r"^([0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F])\s")
 _BDF_BARE_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$")
+
+# Stricter BDF form (lowercase hex, single-digit function) for callers that
+# splice untrusted input into a sysfs path and must reject path-traversal
+# payloads such as "../../etc/passwd". Prefer _BDF_BARE_RE for general
+# matching; use this variant when path safety matters.
+BDF_STRICT_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 
 
 def get_bdfs_with_ext_cap(cap_name: str) -> list[str]:
@@ -350,3 +356,88 @@ def unsafe_pci_bdfs() -> set:
             if bdfs:
                 unsafe.add(bdfs[-1])
     return unsafe
+def sysfs_path_to_pci_bdf(path: str) -> Optional[str]:
+    """Walk a sysfs path upward and return the first valid PCI BDF segment.
+
+    Args:
+        path: A sysfs path (e.g. a resolved device symlink target).
+
+    Returns:
+        The first path segment, walking from the leaf upward, that is a
+        well-formed BDF (per ``BDF_STRICT_RE``) present under
+        ``/sys/bus/pci/devices``, or ``None`` if no such segment exists.
+    """
+    while path and path != "/":
+        base = os.path.basename(path)
+        if BDF_STRICT_RE.fullmatch(base) and os.path.exists(f"/sys/bus/pci/devices/{base}"):
+            return base
+        path = os.path.dirname(path)
+    return None
+
+
+def bdf_in_translated_domain(bdf: str) -> bool:
+    """Return whether ``bdf`` sits in a translating DMA or DMA-FQ IOMMU group.
+
+    Args:
+        bdf: Domain-prefixed BDF of the device.
+
+    Returns:
+        ``True`` when the device's ``iommu_group/type`` sysfs attribute is
+        ``DMA`` or ``DMA-FQ``, ``False`` otherwise (including when ``bdf`` is
+        malformed, or the device or its IOMMU group is not present).
+    """
+    if not BDF_STRICT_RE.fullmatch(bdf):
+        return False
+    group_link = f"/sys/bus/pci/devices/{bdf}/iommu_group"
+    if not os.path.exists(group_link):
+        return False
+    try:
+        group = os.path.realpath(group_link)
+        with open(os.path.join(group, "type"), encoding="utf-8") as handle:
+            group_type = handle.read().strip()
+    except OSError:
+        return False
+    return group_type in ("DMA", "DMA-FQ")
+
+
+def pci_bdfs_backing_mount(mountpoint: str = "/") -> set:
+    """Return the PCI BDFs of the physical devices backing ``mountpoint``.
+
+    Resolves the mount source through ``mounted_block_devices`` and
+    ``block_device_physical_leaves``, so stacked devices (LVM/dm, MD) reduce to
+    the physical disks underneath, then maps each leaf to the PCI device it
+    hangs off.
+
+    Args:
+        mountpoint: Mount point to resolve, e.g. ``"/"``.
+
+    Returns:
+        set: Domain-prefixed BDFs, empty when ``mountpoint`` is not backed by a
+        ``/dev/*`` source or has no PCI device beneath it. An empty set does
+        not distinguish "nothing found" from "could not look"; callers gating
+        destructive operations must check readability themselves rather than
+        treating this as fail-closed.
+
+    Raises:
+        OSError: if /proc/mounts is unreadable.
+    """
+    mounted = mounted_block_devices()
+    source_dev = None
+    with open("/proc/mounts", "r", encoding="utf-8") as handle:
+        for line in handle:
+            fields = line.split()
+            if (len(fields) >= 2 and fields[1] == mountpoint
+                    and fields[0].startswith("/dev/")):
+                source_dev = os.path.basename(os.path.realpath(fields[0]))
+                break
+    if source_dev is None or source_dev not in mounted:
+        return set()
+
+    bdfs = set()
+    for leaf in block_device_physical_leaves(source_dev):
+        bdf = sysfs_path_to_pci_bdf(
+            os.path.realpath(f"/sys/class/block/{leaf}/device")
+        )
+        if bdf:
+            bdfs.add(bdf)
+    return bdfs

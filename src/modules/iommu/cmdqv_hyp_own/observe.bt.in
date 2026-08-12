@@ -1,0 +1,156 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * tegra241-cmdqv host VINTF0 supports_cmd regression observer (803e41f36d22).
+ *
+ * Scoped to trigger device's SMMU: @@TARGET_SMMU@@
+ *
+ * DUAL-FUNCTION-PROBE COUNT discriminator (not a single-shot struct-field
+ * read): count calls into two functions over a host-activity window instead
+ * of dereferencing ((struct arm_smmu_cmdq *)retval)->supports_cmd.
+ *
+ * WHY: scoped live measurement on Vera (MGX VERA CX / NVDA200C,
+ * iommu.passthrough=0, O_DIRECT NVMe DMA) with /@in_scope[tid]/:
+ *   unfixed 3b793983834e: get_cmdq_calls=248 get_cmdq_nonnull=0
+ *                         guest_supports_cmd=246 -> FAIL
+ *   fixed   803e41f36d22: get_cmdq_calls=261 get_cmdq_nonnull=258
+ *                         guest_supports_cmd=0   -> PASS
+ * guest_supports_cmd <= get_cmdq_calls on the unfixed run.
+ * A scoping miss fails closed as liveness SKIP, not a false PASS.
+ *
+ * In other words, on an unfixed kernel there is nothing for a
+ * kretprobe on tegra241_cmdqv_get_cmdq() to read: host-issued DMA commands
+ * are rejected by the (wrongly-installed) guest supports_cmd callback and
+ * routed to the main SMMU cmdq instead, so retval is NULL for essentially
+ * all host traffic. The old one-shot "read supports_cmd off a non-NULL
+ * retval" design depended on an event that measurably does not happen.
+ *
+ * The reliable signal is the opposite one: whether
+ * tegra241_guest_vcmdq_supports_cmd() gets CALLED at all for host commands.
+ * Per drivers/iommu/arm/arm-smmu-v3/tegra241-cmdqv.c and arm-smmu-v3.h:
+ *
+ *   FIXED:   host VINTF0's cmdq.supports_cmd == NULL. arm_smmu_cmdq_supports_cmd()
+ *            (arm-smmu-v3.h) returns true WITHOUT calling any function pointer,
+ *            so tegra241_guest_vcmdq_supports_cmd() is NEVER called for host
+ *            commands, and tegra241_cmdqv_get_cmdq() returns non-NULL for them
+ *            (the host VCMDQ path is live).
+ *   UNFIXED: host VINTF0's cmdq.supports_cmd == tegra241_guest_vcmdq_supports_cmd.
+ *            It IS called for every host command (fires constantly), and
+ *            tegra241_cmdqv_get_cmdq() only returns non-NULL for the 3
+ *            invalidation commands that function allows (TLBI_NH_ASID,
+ *            TLBI_NH_VA, ATC_INV) -- which host O_DIRECT DMA does not
+ *            reliably issue, so in practice it's ~0.
+ *
+ * So the two counts are anti-correlated between measured kernel states: fixed
+ * produces (get_cmdq_nonnull > 0, guest_supports_cmd == 0); unfixed produces
+ * (get_cmdq_nonnull ~= 0, guest_supports_cmd > 0). Some invalidation commands
+ * can still make get_cmdq_nonnull non-zero on an unfixed kernel, so the runner
+ * (cmdqv_hyp_own_runner.py) FAILs on any scoped guest_supports_cmd > 0. It
+ * excludes guests before observation, where the guest callback is legitimate.
+ * get_cmdq_nonnull > 0 with guest_supports_cmd == 0 is PASS.
+ *
+ * No struct FIELDS are read beyond arm_smmu_device->dev->kobj.name, which is
+ * used only to scope tegra241_cmdqv_get_cmdq() to the trigger device's SMMU
+ * and resolves in BTF because arm_smmu_device is embedded by value in
+ * tegra241_cmdqv (not because it is a core/non-driver type). In particular,
+ * this observer does not read struct tegra241_vintf/tegra241_cmdqv/
+ * arm_smmu_cmdq fields: struct tegra241_vintf is a driver-private type that
+ * ends up incomplete in the running kernel's BTF (a BTF-dedup gap for
+ * structs only ever referenced by pointer), so e.g. $vintf->hyp_own is not
+ * readable on the real SUT, and struct arm_smmu_cmdq's ->supports_cmd
+ * pointer is the field the old one-shot design depended on and is no longer
+ * read at all.
+ *
+ * tegra241_guest_vcmdq_supports_cmd(struct arm_smmu_cmd *cmd) takes only a
+ * cmd argument -- no SMMU pointer in its signature. Upstream nonetheless
+ * invokes it from inside tegra241_cmdqv_get_cmdq() via the static inline
+ * arm_smmu_cmdq_supports_cmd(), on the same thread, between the scoped
+ * kprobe that sets @in_scope[tid] and the matching kretprobe that clears
+ * it. Filtering the guest-callback probe with /@in_scope[tid]/ therefore
+ * counts only calls correlated with the trigger SMMU's get_cmdq path
+ * (DISP-005), so a co-resident guest VM or another SMMU cannot poison the
+ * FAIL signal. The runner still SKIPs when *this* kernel is itself a guest
+ * (HYP_OWN=0 is correct post-fix state there).
+ *
+ * Verdict (applied by the runner, see evaluate_result()):
+ *   guest_supports_cmd > 0                          -> FAIL (unfixed host)
+ *   guest_supports_cmd == 0 && get_cmdq_nonnull > 0 -> PASS (fixed host)
+ *   both == 0                                      -> liveness not met (retry)
+ *
+ * PROBE_READY (DISP-003): printed from a POST-ATTACH one-shot guard, not
+ * from BEGIN{}. bpftrace runs BEGIN{} as soon as BEGIN itself is attached,
+ * which can race ahead of the kprobes below still being attached -- a
+ * BEGIN-based PROBE_READY could let the runner start the DMA trigger
+ * window before every probe is actually live (false-liveness risk). An
+ * interval:s:1 probe cannot fire until bpftrace has finished its startup
+ * attach phase for every probe (attachment happens synchronously before
+ * any probe, including the first interval tick, is processed), so it is
+ * used here as a readiness signal that cannot fire early. The @ready guard
+ * makes it print exactly once.
+ */
+
+interval:s:1
+/!@ready/
+{
+	@ready = 1;
+	printf("PROBE_READY\n");
+}
+
+kprobe:tegra241_cmdqv_get_cmdq
+/arg0 != 0 &&
+ str(((struct arm_smmu_device *)arg0)->dev->kobj.name) == "@@TARGET_SMMU@@"/
+{
+	@in_scope[tid] = 1;
+	@get_cmdq_calls++;
+}
+
+kretprobe:tegra241_cmdqv_get_cmdq
+/@in_scope[tid]/
+{
+	if (retval != 0) {
+		@get_cmdq_nonnull++;
+	}
+	delete(@in_scope[tid]);
+}
+
+kprobe:tegra241_guest_vcmdq_supports_cmd
+/@in_scope[tid]/
+{
+	@guest_supports_cmd++;
+}
+
+/*
+ * Print exactly once, at window end: the runner's run_observed_trigger()
+ * drives this observer for a bounded RESULT_TIMEOUT_SEC window after the
+ * O_DIRECT DMA trigger completes, then SIGINTs bpftrace, which runs END{}
+ * before exiting. Using "++" (plain arithmetic increment, not the count()
+ * aggregate builtin) on each of these scalar maps means every map below
+ * reads back as a valid 0 in this final printf even if its probe never
+ * fired during the window (e.g. guest_supports_cmd stays 0 on a fixed
+ * kernel) -- unlike count(), plain-integer maps have no assign-type
+ * ambiguity and default cleanly to 0 when never written.
+ *
+ * get_cmdq_calls (total scoped tegra241_cmdqv_get_cmdq() calls, before the
+ * non-NULL filter) is diagnostic only: it helps distinguish "the trigger
+ * never reached the scoped SMMU at all" from "it reached it but retval was
+ * always NULL" in the both-zero liveness case. It plays no part in the
+ * verdict above.
+ *
+ * bpftrace auto-prints any non-empty global map/variable at exit, so every
+ * @-prefixed value used above is explicitly cleared after the printf --
+ * without this, bpftrace would otherwise re-print @get_cmdq_calls,
+ * @get_cmdq_nonnull, @guest_supports_cmd, @in_scope, and @ready a second
+ * time, duplicating (and, for @in_scope/@ready, adding noise to) the
+ * single CMDQV_COUNTS line the runner's parser expects.
+ */
+END
+{
+	printf("CMDQV_COUNTS get_cmdq_calls=%d get_cmdq_nonnull=%d guest_supports_cmd=%d\n",
+	    @get_cmdq_calls, @get_cmdq_nonnull, @guest_supports_cmd);
+	clear(@get_cmdq_calls);
+	clear(@get_cmdq_nonnull);
+	clear(@guest_supports_cmd);
+	clear(@in_scope);
+	clear(@ready);
+}

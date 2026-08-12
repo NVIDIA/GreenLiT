@@ -25,6 +25,7 @@ import subprocess
 from common import glt_core as GLTCore
 from common import glt_utils
 from common.nv_device import NvDev
+from modules.iommu import cmdqv_hyp_own_runner as runner
 
 
 @GLTCore.GLTTestAttr()
@@ -318,3 +319,41 @@ def test_sva_invalidate_range_size(_, __):  # pylint: disable=too-many-branches
         GLTCore.GLTTestResult.fail(
             f"arm_smmu SVA invalidation size {hex(sz)} is not page-aligned. "
             "Consider backporting commit 95a5885")
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cmdqv_hyp_own_supports_cmd(_, logger):
+    """Test Tegra241 CMDQV host VINTF0 supports_cmd fix.
+
+    JIRA: DGX-17036
+    Patch: https://git.kernel.org/torvalds/c/803e41f36d22
+    Discriminator: dual-function-probe COUNT over a host-activity window
+        (no struct field reads beyond the SMMU-scoping arm_smmu_device->
+        dev->kobj.name) -- counts tegra241_cmdqv_get_cmdq() returning
+        non-NULL vs. tegra241_guest_vcmdq_supports_cmd() called while that
+        scoped get_cmdq is in flight. On this bare-metal-only test, any
+        guest_supports_cmd > 0 means an unpatched host, regardless of
+        get_cmdq_nonnull; get_cmdq_nonnull > 0 with guest_supports_cmd == 0
+        means a patched host. The test SKIPs before observation when this
+        kernel is itself a guest via running_as_guest(). See
+        src/modules/iommu/cmdqv_hyp_own/observe.bt.in and
+        cmdqv_hyp_own_runner.evaluate_result() for the full rationale and
+        the live-hardware measurement backing this design.
+    """
+    # The runner raises the shared GLTTestSkip/GLTTestFail, but only
+    # GLTTestResult.skip()/fail() -- which must be called from an
+    # @GLTTestAttr-decorated function -- record the reason on this test's attr
+    # for the session report. Hence the re-raise through them here.
+    try:
+        runner.run_cmdqv_hyp_own_test(logger)
+    except GLTCore.GLTTestSkip as exc:
+        GLTCore.GLTTestResult.skip(str(exc))
+    except GLTCore.GLTTestFail as exc:
+        GLTCore.GLTTestResult.fail(str(exc))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        GLTCore.GLTTestResult.fail(
+            f"unexpected infrastructure error ({type(exc).__name__}): {exc}"
+        )
