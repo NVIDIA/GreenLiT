@@ -72,42 +72,8 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         )
         self.assertFalse(result)
 
-    def test_capture_kernel_log_checkpoint_rejects_bad_dmesg_baseline(self):
-        """Reject a failed dmesg checkpoint read."""
-        failed_error = _command_failure(["dmesg"], "dmesg error")
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=failed_error
-        ):
-            with self.assertRaises(RuntimeError):
-                glt_utils_module.capture_kernel_log_checkpoint()
-
-    def test_capture_kernel_log_checkpoint_rejects_empty_dmesg_baseline(self):
-        """Reject a successful dmesg checkpoint read with no baseline text."""
-        empty_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", return_value=empty_result
-        ):
-            with self.assertRaises(RuntimeError):
-                glt_utils_module.capture_kernel_log_checkpoint()
-
-    def test_capture_kernel_log_checkpoint_falls_back_on_bad_journal_record(self):
-        """Fall back to dmesg when journal checkpoint capture is unusable."""
+    def test_capture_kernel_log_checkpoint_rejects_bad_journal_record(self):
+        """Reject a checkpoint when journalctl cannot provide a valid cursor."""
         bad_results = [
             _command_failure(["journalctl"], "journal error"),
             subprocess.CompletedProcess(
@@ -123,42 +89,40 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                 ["journalctl"], 0, stdout='{"MESSAGE": "missing cursor"}', stderr=""
             ),
         ]
-        dmesg_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old line\n", stderr=""
-        )
 
         for bad_result in bad_results:
             with self.subTest(result=bad_result), GLTTestBase.unittest.mock.patch(
-                "src.common.glt_utils.is_cli_available", return_value=True
-            ), GLTTestBase.unittest.mock.patch(
                 "builtins.open",
                 GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
             ), GLTTestBase.unittest.mock.patch(
-                "subprocess.run", side_effect=[bad_result, dmesg_result]
+                "subprocess.run", side_effect=[bad_result]
             ):
-                checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
+                with self.assertRaises(RuntimeError):
+                    glt_utils_module.capture_kernel_log_checkpoint()
 
-            self.assertIsInstance(
-                checkpoint,
-                getattr(glt_utils_module, "_DmesgKernelLogCheckpoint"),
-            )
-            self.assertEqual(checkpoint.baseline, "old line\n")
-
-    def test_capture_kernel_log_checkpoint_rejects_when_backends_fail(self):
-        """Reject checkpoint capture when journal and dmesg both fail."""
-        journal_error = _command_failure(["journalctl"], "journal error")
-        dmesg_error = _command_failure(["dmesg"], "dmesg error")
+    def test_capture_kernel_log_checkpoint_raises_when_journalctl_is_missing(self):
+        """Reject a checkpoint when journalctl is not installed."""
+        missing_error = FileNotFoundError(
+            2, "No such file or directory", "journalctl"
+        )
 
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=True
-        ), GLTTestBase.unittest.mock.patch(
             "builtins.open",
             GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
         ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[journal_error, dmesg_error]
-        ):
-            with self.assertRaises(RuntimeError):
+            "subprocess.run", side_effect=missing_error
+        ) as mock_run:
+            with self.assertRaises(RuntimeError) as context:
                 glt_utils_module.capture_kernel_log_checkpoint()
+
+        self.assertIn("Failed to run journalctl", str(context.exception))
+        mock_run.assert_called_once_with(
+            ["journalctl", "--no-pager", "-b0", "-k", "-n1", "-o", "json"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30.0,
+        )
 
     def test_capture_kernel_log_checkpoint_uses_last_journal_cursor(self):
         """Capture and reuse the exact last current-boot journal cursor."""
@@ -179,8 +143,6 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         )
 
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=True
-        ) as mock_is_cli, GLTTestBase.unittest.mock.patch(
             "builtins.open",
             GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
         ), GLTTestBase.unittest.mock.patch(
@@ -195,7 +157,6 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             result = glt_utils_module.get_kernel_log(checkpoint)
 
         self.assertEqual(result, "new one\nnew two\n")
-        mock_is_cli.assert_called_once_with("journalctl")
         self.assertEqual(
             mock_run.call_args_list,
             [
@@ -507,216 +468,6 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             )
             mock_makedirs.assert_called_once_with(cache_dir, exist_ok=True)
 
-    def test_get_kernel_log_after_dmesg_checkpoint_rejects_boot_change(self):
-        """Reject a dmesg checkpoint captured before the current boot."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old line\n", stderr=""
-        )
-        boot_file = GLTTestBase.unittest.mock.mock_open()
-        boot_file.return_value.read.side_effect = [
-            "boot-1\n",
-            "boot-2\n",
-        ]
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open", boot_file
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", return_value=baseline_result
-        ) as mock_run:
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            with self.assertRaises(RuntimeError):
-                glt_utils_module.get_kernel_log(checkpoint)
-
-        self.assertEqual(mock_run.call_count, 1)
-
-    def test_get_kernel_log_after_dmesg_checkpoint_rejects_lost_boundary(self):
-        """Reject a cleared or reformatted dmesg buffer with no shared boundary."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old line\n", stderr=""
-        )
-        changed_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="different line\n", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[baseline_result, changed_result]
-        ):
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            with self.assertRaises(RuntimeError) as context:
-                glt_utils_module.get_kernel_log(checkpoint)
-        self.assertIn("no longer continuous", str(context.exception))
-
-    def test_get_kernel_log_after_dmesg_checkpoint_returns_appended_suffix(self):
-        """Return the exact appended dmesg suffix with duplicates in order."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old one\nold two\n", stderr=""
-        )
-        current_result = subprocess.CompletedProcess(
-            ["dmesg"],
-            0,
-            stdout="old one\nold two\nnew duplicate\nnew duplicate\n",
-            stderr="",
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ) as mock_is_cli, GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[baseline_result, current_result]
-        ) as mock_run:
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            result = glt_utils_module.get_kernel_log(checkpoint)
-
-        self.assertEqual(result, "new duplicate\nnew duplicate\n")
-        self.assertEqual(
-            mock_is_cli.call_args_list,
-            [
-                GLTTestBase.unittest.mock.call("journalctl"),
-            ],
-        )
-        expected_call = GLTTestBase.unittest.mock.call(
-            ["dmesg", "--color=never"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=30.0,
-        )
-        self.assertEqual(mock_run.call_args_list, [expected_call, expected_call])
-
-    def test_get_kernel_log_after_dmesg_checkpoint_allows_ring_wrap(self):
-        """Return post-checkpoint lines when the ring drops pre-checkpoint prefix."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old one\nold two\nold three\n", stderr=""
-        )
-        wrapped_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old two\nold three\nnew line\n", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[baseline_result, wrapped_result]
-        ):
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            result = glt_utils_module.get_kernel_log(checkpoint)
-
-        self.assertEqual(result, "new line\n")
-
-    def test_get_kernel_log_after_dmesg_checkpoint_wrap_without_new_lines(self):
-        """Return empty when wrap drops only pre-checkpoint lines."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old one\nold two\nold three\n", stderr=""
-        )
-        wrapped_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old two\nold three\n", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[baseline_result, wrapped_result]
-        ):
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            result = glt_utils_module.get_kernel_log(checkpoint)
-
-        self.assertEqual(result, "")
-
-    def test_get_kernel_log_after_dmesg_checkpoint_rejects_wrap_past_boundary(self):
-        """Reject when ring wrap evicts the checkpoint boundary itself."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old one\nold two\nold three\n", stderr=""
-        )
-        wrapped_past_boundary = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="new one\nnew two\n", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run",
-            side_effect=[baseline_result, wrapped_past_boundary],
-        ):
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            with self.assertRaises(RuntimeError) as context:
-                glt_utils_module.get_kernel_log(checkpoint)
-        self.assertIn("no longer continuous", str(context.exception))
-
-    def test_dmesg_log_after_checkpoint_prefers_longest_overlap(self):
-        """Disambiguate repeated boundary lines by taking the longest overlap."""
-        after_checkpoint = (
-            glt_utils_module._dmesg_log_after_checkpoint  # pylint: disable=protected-access
-        )
-        baseline = "x\nx\nx\n"
-        current = "x\nx\ny\n"
-
-        self.assertEqual(after_checkpoint(baseline, current), "y\n")
-
-    def test_get_kernel_log_after_dmesg_checkpoint_returns_empty(self):
-        """Return an empty string when the dmesg buffer is unchanged."""
-        unchanged_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old line\n", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ), GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", return_value=unchanged_result
-        ):
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            result = glt_utils_module.get_kernel_log(checkpoint)
-
-        self.assertEqual(result, "")
-
-    def test_get_kernel_log_after_dmesg_checkpoint_raises_on_query_failure(self):
-        """Raise when the dmesg buffer cannot be read after checkpointing."""
-        baseline_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="old line\n", stderr=""
-        )
-        failed_error = _command_failure(["dmesg"], "dmesg error")
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ) as mock_is_cli, GLTTestBase.unittest.mock.patch(
-            "builtins.open",
-            GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[baseline_result, failed_error]
-        ):
-            checkpoint = glt_utils_module.capture_kernel_log_checkpoint()
-            with self.assertRaises(RuntimeError):
-                glt_utils_module.get_kernel_log(checkpoint)
-
-        mock_is_cli.assert_called_once_with("journalctl")
-
     def test_get_kernel_log_after_journal_checkpoint_rejects_boot_change(self):
         """Reject a journal checkpoint captured before the current boot."""
         capture_result = subprocess.CompletedProcess(
@@ -889,8 +640,6 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         failed_error = _command_failure(["journalctl"], "journal error")
 
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=True
-        ) as mock_is_cli, GLTTestBase.unittest.mock.patch(
             "builtins.open",
             GLTTestBase.unittest.mock.mock_open(read_data="boot-1\n"),
         ), GLTTestBase.unittest.mock.patch(
@@ -901,66 +650,29 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             with self.assertRaises(RuntimeError):
                 glt_utils_module.get_kernel_log(checkpoint)
 
-        mock_is_cli.assert_called_once_with("journalctl")
-
     def test_get_kernel_log_rejects_malformed_boot_id(self):
         """Reject empty or wrongly typed boot IDs before reading the system boot."""
-        checkpoint_types = [
-            (
-                getattr(glt_utils_module, "_DmesgKernelLogCheckpoint"),
-                {"baseline": "old line\n"},
-            ),
-            (
-                getattr(glt_utils_module, "_JournalKernelLogCheckpoint"),
-                {"cursor": "cursor-1"},
-            ),
-        ]
+        checkpoint_type = getattr(
+            glt_utils_module, "_JournalKernelLogCheckpoint"
+        )
         cases = (
             ("", "boot_id is empty"),
             (1, "boot_id must be a string"),
         )
 
-        for checkpoint_type, fields in checkpoint_types:
-            for boot_id, expected_message in cases:
-                checkpoint = checkpoint_type(boot_id=boot_id, **fields)
-                with self.subTest(
-                    checkpoint_type=checkpoint_type,
-                    boot_id=boot_id,
-                ), GLTTestBase.unittest.mock.patch(
-                    "src.common.glt_utils._read_boot_id",
-                    return_value="boot-1",
-                ) as mock_read_boot_id:
-                    with self.assertRaises(RuntimeError) as context:
-                        glt_utils_module.get_kernel_log(checkpoint)
-                self.assertIn(expected_message, str(context.exception))
-                mock_read_boot_id.assert_not_called()
-
-    def test_get_kernel_log_rejects_malformed_dmesg_checkpoint_data(self):
-        """Reject empty or wrongly typed dmesg baselines as malformed."""
-        checkpoint_type = getattr(
-            glt_utils_module, "_DmesgKernelLogCheckpoint"
-        )
-        cases = (
-            ("", "baseline is empty"),
-            (1, "baseline must be a string"),
-        )
-
-        for baseline, expected_message in cases:
+        for boot_id, expected_message in cases:
             checkpoint = checkpoint_type(
-                boot_id="boot-1",
-                baseline=baseline,
+                boot_id=boot_id,
+                cursor="cursor-1",
             )
-            with self.subTest(baseline=baseline), GLTTestBase.unittest.mock.patch(
+            with self.subTest(boot_id=boot_id), GLTTestBase.unittest.mock.patch(
                 "src.common.glt_utils._read_boot_id",
                 return_value="boot-1",
-            ), GLTTestBase.unittest.mock.patch(
-                "src.common.glt_utils._read_dmesg",
-                return_value="current log\n",
-            ) as mock_read_dmesg:
+            ) as mock_read_boot_id:
                 with self.assertRaises(RuntimeError) as context:
                     glt_utils_module.get_kernel_log(checkpoint)
             self.assertIn(expected_message, str(context.exception))
-            mock_read_dmesg.assert_not_called()
+            mock_read_boot_id.assert_not_called()
 
     def test_get_kernel_log_rejects_malformed_journal_checkpoint_data(self):
         """Reject empty or wrongly typed cursors before constructing a command."""
@@ -988,150 +700,78 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             self.assertIn(expected_message, str(context.exception))
             mock_run.assert_not_called()
 
-    def test_get_kernel_log_falls_back_when_journal_command_fails(self):
-        """Use dmesg when journalctl exists but cannot return a log."""
+    def test_get_kernel_log_raises_when_journal_command_fails(self):
+        """Propagate journalctl failure without trying another backend."""
         journal_error = _command_failure(["journalctl"], "journal error")
-        dmesg_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="dmesg message\n", stderr=""
-        )
 
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=True
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[journal_error, dmesg_result]
+            "subprocess.run", side_effect=journal_error
         ) as mock_run:
-            result = glt_utils_module.get_kernel_log()
+            with self.assertRaises(RuntimeError) as context:
+                glt_utils_module.get_kernel_log()
 
-        self.assertEqual(result, "dmesg message\n")
-        self.assertEqual(
-            mock_run.call_args_list,
-            [
-                GLTTestBase.unittest.mock.call(
-                    [
-                        "journalctl",
-                        "--no-pager",
-                        "-b0",
-                        "-k",
-                        "-o",
-                        "cat",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=30.0,
-                ),
-                GLTTestBase.unittest.mock.call(
-                    ["dmesg", "--color=never"],
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=30.0,
-                ),
-            ],
-        )
-
-    def test_get_kernel_log_falls_back_when_journal_stdout_is_empty(self):
-        """Fall through to dmesg when journalctl exits 0 with no records."""
-        empty_journal = subprocess.CompletedProcess(
-            ["journalctl"], 0, stdout="", stderr=""
-        )
-        dmesg_result = subprocess.CompletedProcess(
-            ["dmesg"],
-            0,
-            stdout="prefix searched signature suffix\n",
-            stderr="",
-        )
-
-        def run_side_effect(command, **_kwargs):
-            if command[0] == "journalctl":
-                return empty_journal
-            return dmesg_result
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=True
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=run_side_effect
-        ) as mock_run:
-            result = glt_utils_module.get_kernel_log()
-            found = check_kernel_log("searched signature")
-
-        self.assertEqual(result, "prefix searched signature suffix\n")
-        self.assertTrue(found)
-        self.assertEqual(
-            [call.args[0][0] for call in mock_run.call_args_list],
-            ["journalctl", "dmesg", "journalctl", "dmesg"],
-        )
-
-    def test_get_kernel_log_falls_back_when_journalctl_is_unavailable(self):
-        """Use deterministic dmesg output when journalctl is unavailable."""
-        dmesg_result = subprocess.CompletedProcess(
-            ["dmesg"], 0, stdout="dmesg message\n", stderr=""
-        )
-
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available",
-            return_value=False,
-        ) as mock_is_cli, GLTTestBase.unittest.mock.patch(
-            "subprocess.run", return_value=dmesg_result
-        ) as mock_run:
-            result = glt_utils_module.get_kernel_log()
-
-        self.assertEqual(result, "dmesg message\n")
-        mock_is_cli.assert_called_once_with("journalctl")
+        self.assertIn("journalctl", str(context.exception))
         mock_run.assert_called_once_with(
-            ["dmesg", "--color=never"],
+            ["journalctl", "--no-pager", "-b0", "-k", "-o", "cat"],
             capture_output=True,
             text=True,
             check=True,
             timeout=30.0,
         )
 
-    def test_get_kernel_log_raises_when_backends_fail(self):
-        """Report retrieval failure instead of treating it as no match."""
-        journal_error = _command_failure(["journalctl"], "journal error")
-        dmesg_error = _command_failure(["dmesg"], "dmesg error")
-
-        with self.subTest("commands fail"), GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=True
-        ), GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=[journal_error, dmesg_error]
-        ):
-            with self.assertRaises(RuntimeError):
-                glt_utils_module.get_kernel_log()
-
-        with self.subTest("journal unavailable"), GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=False
-        ) as mock_is_cli, GLTTestBase.unittest.mock.patch(
-            "subprocess.run", side_effect=dmesg_error
-        ) as mock_run:
-            with self.assertRaises(RuntimeError):
-                glt_utils_module.get_kernel_log()
-            mock_is_cli.assert_called_once_with("journalctl")
-            mock_run.assert_called_once_with(
-                ["dmesg", "--color=never"],
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=30.0,
-            )
-
-    def test_get_kernel_log_raises_on_command_timeout(self):
-        """Map a stalled kernel-log backend to RuntimeError."""
-        timeout_error = subprocess.TimeoutExpired(
-            ["dmesg", "--color=never"], 30.0
+    def test_get_kernel_log_raises_when_journalctl_is_missing(self):
+        """Report a missing journalctl instead of reading another backend."""
+        missing_error = FileNotFoundError(
+            2, "No such file or directory", "journalctl"
         )
 
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=False
-        ), GLTTestBase.unittest.mock.patch(
+            "subprocess.run", side_effect=missing_error
+        ) as mock_run:
+            with self.assertRaises(RuntimeError) as context:
+                glt_utils_module.get_kernel_log()
+
+        self.assertIn("Failed to run journalctl", str(context.exception))
+        mock_run.assert_called_once_with(
+            ["journalctl", "--no-pager", "-b0", "-k", "-o", "cat"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30.0,
+        )
+
+    def test_get_kernel_log_raises_on_empty_journal(self):
+        """Reject an empty current-boot read instead of reporting no match."""
+        empty_journal = subprocess.CompletedProcess(
+            ["journalctl"], 0, stdout="", stderr=""
+        )
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", return_value=empty_journal
+        ) as mock_run:
+            with self.assertRaises(RuntimeError) as context:
+                glt_utils_module.get_kernel_log()
+            with self.assertRaises(RuntimeError):
+                check_kernel_log("searched signature")
+
+        self.assertIn("no current-boot kernel records", str(context.exception))
+        self.assertEqual(mock_run.call_count, 2)
+
+    def test_get_kernel_log_raises_on_command_timeout(self):
+        """Map a stalled journalctl query to RuntimeError."""
+        timeout_error = subprocess.TimeoutExpired(
+            ["journalctl"], 30.0
+        )
+
+        with GLTTestBase.unittest.mock.patch(
             "subprocess.run", side_effect=timeout_error
         ) as mock_run:
             with self.assertRaises(RuntimeError) as ctx:
                 glt_utils_module.get_kernel_log()
 
-        self.assertIn("dmesg", str(ctx.exception))
+        self.assertIn("journalctl", str(ctx.exception))
         mock_run.assert_called_once_with(
-            ["dmesg", "--color=never"],
+            ["journalctl", "--no-pager", "-b0", "-k", "-o", "cat"],
             capture_output=True,
             text=True,
             check=True,
@@ -1139,22 +779,20 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         )
 
     def test_get_kernel_log_raises_on_decode_failure(self):
-        """Map undecodable kernel-log backend output to RuntimeError."""
+        """Map undecodable journalctl output to RuntimeError."""
         decode_error = UnicodeDecodeError(
             "utf-8", b"\xff", 0, 1, "invalid start byte"
         )
 
         with GLTTestBase.unittest.mock.patch(
-            "src.common.glt_utils.is_cli_available", return_value=False
-        ), GLTTestBase.unittest.mock.patch(
             "subprocess.run", side_effect=decode_error
         ) as mock_run:
             with self.assertRaises(RuntimeError) as ctx:
                 glt_utils_module.get_kernel_log()
 
-        self.assertIn("dmesg", str(ctx.exception))
+        self.assertIn("journalctl", str(ctx.exception))
         mock_run.assert_called_once_with(
-            ["dmesg", "--color=never"],
+            ["journalctl", "--no-pager", "-b0", "-k", "-o", "cat"],
             capture_output=True,
             text=True,
             check=True,
