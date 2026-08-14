@@ -247,19 +247,16 @@ def test_pci_secondary_mabort(_, logger):
     devices = []
     empty_bridges = []
     try:
-        cmd_output = subprocess.run(
+        cmd_output = glt_utils.run_command(
             ["lspci", "-Dv"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            "Failed to enumerate PCI devices with 'lspci'",
         )
 
         if not cmd_output.stdout.strip():
             GLTCore.GLTTestResult.skip("No PCI/PCIe devices found on this machine. PCI enumeration is not valid.")
         device_blocks = cmd_output.stdout.strip().split("\n\n")
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"Failed to enumerate PCI devices with 'lspci': {e}")
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
 
     for block in device_blocks:
         lines = block.splitlines()
@@ -342,12 +339,9 @@ def test_pci_secondary_mabort(_, logger):
 
     # Step 3: Check for MAbort+ flags in secondary status
     try:
-        cmd_output = subprocess.run(
+        cmd_output = glt_utils.run_command(
             ["lspci", "-vv"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            "Failed to run 'lspci -vv'",
         )
         logger.debug("lspci completed: rc=%s", cmd_output.returncode)
 
@@ -369,8 +363,8 @@ def test_pci_secondary_mabort(_, logger):
                 )
             logger.error(fail_msg)
             GLTCore.GLTTestResult.fail(fail_msg)
-    except subprocess.CalledProcessError as e:
-        GLTCore.GLTTestResult.fail(f"Failed to run 'lspci -vv': {e}")
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
 
 
 @GLTCore.GLTTestAttr()

@@ -267,7 +267,7 @@ def _parse_journal_cursor(output: str) -> str:
 
 def _validate_journal_cursor(cursor: str) -> None:
     """Require a journal seek to resolve to the exact saved cursor."""
-    validation = _run_command(
+    validation = run_command(
         [
             "journalctl",
             "--no-pager",
@@ -300,10 +300,20 @@ def _read_boot_id() -> str:
     return boot_id
 
 
-def _run_command(
+def run_command(
     command: list[str], failure_message: str, timeout: float = 30.0
 ) -> subprocess.CompletedProcess:
-    """Run a command without a shell; map failures to RuntimeError."""
+    """Run a checked, shell-free command and capture text output.
+
+    Returns the completed process when the command exits successfully.
+    Converts startup, timeout, non-zero exit, and text-decoding failures
+    to RuntimeError.
+
+    Use subprocess.run() or subprocess.Popen() directly when the caller
+    needs non-zero return-code inspection, detailed subprocess errors,
+    shell/redirection behavior, binary or streaming I/O, or process
+    lifecycle control.
+    """
     try:
         return subprocess.run(
             command,
@@ -329,7 +339,7 @@ def capture_kernel_log_checkpoint() -> KernelLogCheckpoint:
     is raised when journalctl cannot produce a valid checkpoint.
     """
     boot_id = _read_boot_id()
-    result = _run_command(
+    result = run_command(
         [
             "journalctl",
             "--no-pager",
@@ -392,7 +402,7 @@ def get_kernel_log(
     kmsg and is reported as a failure instead of a defect-free log.
     """
     if checkpoint is None:
-        result = _run_command(
+        result = run_command(
             [
                 "journalctl",
                 "--no-pager",
@@ -436,7 +446,7 @@ def get_kernel_log(
 
     _validate_journal_cursor(checkpoint.cursor)
 
-    result = _run_command(
+    result = run_command(
         [
             "journalctl",
             "--no-pager",

@@ -25,6 +25,7 @@ from src.common.glt_utils import (
     reboot_with_kexec,
     reboot_with_reisub,
     remove_kernel_parameter,
+    run_command,
     start_systemd_timer,
     systemd_enable,
 )
@@ -693,7 +694,7 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                 "src.common.glt_utils._read_boot_id",
                 return_value="boot-1",
             ), GLTTestBase.unittest.mock.patch(
-                "src.common.glt_utils._run_command",
+                "src.common.glt_utils.run_command",
             ) as mock_run:
                 with self.assertRaises(RuntimeError) as context:
                     glt_utils_module.get_kernel_log(checkpoint)
@@ -1256,6 +1257,87 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             mock_kill.assert_not_called()
             mock_system.assert_not_called()
             self.assertFalse(result)
+
+    def test_run_command_returns_output_with_checked_text_defaults(self):
+        """Run an argument vector with capture, text, check, and a bounded default."""
+        completed = subprocess.CompletedProcess(
+            ["lspci", "-D"], 0, stdout="0000:00:00.0\n", stderr=""
+        )
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", return_value=completed
+        ) as mock_run:
+            result = run_command(["lspci", "-D"], "Failed to list PCI devices")
+
+        self.assertIs(result, completed)
+        mock_run.assert_called_once_with(
+            ["lspci", "-D"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30.0,
+        )
+
+    def test_run_command_forwards_a_caller_timeout(self):
+        """Let a caller bound a command that is expected to run longer."""
+        completed = subprocess.CompletedProcess(
+            ["grub2-mkconfig"], 0, stdout="", stderr=""
+        )
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", return_value=completed
+        ) as mock_run:
+            run_command(
+                ["grub2-mkconfig"],
+                "Failed to refresh the boot configuration",
+                timeout=120.0,
+            )
+
+        mock_run.assert_called_once_with(
+            ["grub2-mkconfig"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120.0,
+        )
+
+    def test_run_command_maps_command_failures_to_the_caller_message(self):
+        """Report one domain message for timeout, non-zero exit, and decode failures."""
+        failures = (
+            subprocess.TimeoutExpired(["dmesg"], 30.0),
+            _command_failure(["dmesg"], "dmesg error"),
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+        )
+
+        for failure in failures:
+            with self.subTest(
+                failure=type(failure).__name__
+            ), GLTTestBase.unittest.mock.patch(
+                "subprocess.run", side_effect=failure
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    run_command(["dmesg"], "Failed to retrieve the kernel log")
+
+            self.assertEqual(
+                str(context.exception), "Failed to retrieve the kernel log"
+            )
+            # Callers surface these messages in test results, so the raw
+            # subprocess failure must stay suppressed rather than chained.
+            self.assertTrue(context.exception.__suppress_context__)
+
+    def test_run_command_names_an_executable_that_cannot_run(self):
+        """Identify the executable when the command never starts."""
+        for failure in (FileNotFoundError(), PermissionError()):
+            with self.subTest(
+                failure=type(failure).__name__
+            ), GLTTestBase.unittest.mock.patch(
+                "subprocess.run", side_effect=failure
+            ):
+                with self.assertRaises(RuntimeError) as context:
+                    run_command(["lspci", "-D"], "Failed to list PCI devices")
+
+            self.assertEqual(str(context.exception), "Failed to run lspci")
+            self.assertTrue(context.exception.__suppress_context__)
 
     @GLTTestBase.unittest.mock.patch("subprocess.run")
     def test_systemd_timer(self, mock_run):
