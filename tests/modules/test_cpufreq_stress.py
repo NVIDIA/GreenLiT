@@ -145,6 +145,20 @@ class TestCpuFreqStress(GLTTestBase):
         self.assertIn(paths[1], reason)
         self.assertIn("other_driver", reason)
 
+    @mock.patch("builtins.open", side_effect=OSError("read failure"))
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._cpu_cpufreq_glob")
+    def test_validate_cppc_prerequisites_reports_scaling_driver_read_error(
+        self, mock_cpufreq_glob, _mock_open
+    ):
+        """An existing but unreadable driver control is not a missing sysfs tree."""
+        driver_path = "/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver"
+        mock_cpufreq_glob.return_value = [driver_path]
+
+        ok, reason = cpufreq_stress._validate_cppc_prerequisites()
+
+        self.assertFalse(ok)
+        self.assertEqual(reason, f"Cannot read {driver_path}: read failure")
+
     def test_parse_cpu_mask_handles_ranges_and_lists(self):
         """CPU masks are the data structure behind hotplug and policy checks."""
         self.assertEqual(
@@ -564,3 +578,157 @@ class TestCpuFreqStress(GLTTestBase):
 
             self.assertIn("Cannot hotplug CPU1", str(ctx.exception))
             self.assertIn("offline failed", str(ctx.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.write_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_perf_limited_control_clears_supported_status_bits(
+        self, mock_prerequisites, mock_policy_dir, mock_read, mock_write
+    ):
+        """The public control must accept 0x3 and clear both supported bits."""
+        policy_dir = "/sys/devices/system/cpu/cpu0/cpufreq"
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = (policy_dir, None)
+        mock_read.side_effect = ["3", "0"]
+
+        cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        mock_write.assert_called_once_with(
+            f"{policy_dir}/perf_limited", cpufreq_stress.CPPC_PERF_LIMITED_CLEAR_MASK
+        )
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.write_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_perf_limited_control_reports_concurrent_platform_reset(
+        self, mock_prerequisites, mock_policy_dir, mock_read, _mock_write
+    ):
+        """A bit re-set by the platform after clear is inconclusive, not a failure."""
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = ("/sys/devices/system/cpu/cpu0/cpufreq", None)
+        mock_read.side_effect = ["0", "1"]
+
+        with self.assertRaises(GLTCore.GLTTestWarn) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("set again", str(context.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_skips_when_cppc_driver_is_inactive(self, mock_prerequisites):
+        """The control is only applicable when cppc_cpufreq owns the policies."""
+        mock_prerequisites.return_value = (
+            False,
+            "cppc_cpufreq not active for all cpufreq policies (policy0: acpi-cpufreq).",
+        )
+
+        with self.assertRaises(GLTCore.GLTTestSkip) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("cppc_cpufreq not active", str(context.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_skips_when_cpufreq_sysfs_is_unavailable(
+        self, mock_prerequisites
+    ):
+        """Missing cpufreq sysfs means this control cannot apply to the host."""
+        mock_prerequisites.return_value = (
+            False,
+            "cpufreq sysfs not available; cannot read scaling_driver.",
+        )
+
+        with self.assertRaises(GLTCore.GLTTestSkip) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("cpufreq sysfs not available", str(context.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_skips_when_cppc_disappears_after_prerequisite_check(
+        self, mock_prerequisites, mock_policy_dir
+    ):
+        """A policy removed during the test is no longer applicable, not a regression."""
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = (
+            None,
+            "cppc_cpufreq not active (current driver: acpi-cpufreq).",
+        )
+
+        with self.assertRaises(GLTCore.GLTTestSkip) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("cppc_cpufreq not active", str(context.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.write_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_skips_unsupported_firmware(
+        self, mock_prerequisites, mock_policy_dir, mock_read, mock_write
+    ):
+        """The exported ABI skips when firmware lacks the optional CPC register."""
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = ("/sys/devices/system/cpu/cpu0/cpufreq", None)
+        mock_read.return_value = "<unsupported>"
+
+        with self.assertRaises(GLTCore.GLTTestSkip) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("unsupported by platform firmware", str(context.exception))
+        mock_write.assert_not_called()
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_identifies_a_missing_perf_limited_abi(
+        self, mock_prerequisites, mock_policy_dir, mock_read
+    ):
+        """A missing control identifies its ABI patch and recommends the full series."""
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = ("/sys/devices/system/cpu/cpu0/cpufreq", None)
+        mock_read.side_effect = FileNotFoundError("perf_limited missing")
+
+        with self.assertRaises(GLTCore.GLTTestFail) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn(
+            cpufreq_stress.CPPC_PERF_LIMITED_ABI_PATCH, str(context.exception)
+        )
+        self.assertIn("complete upstream patch series", str(context.exception))
+        for patch in cpufreq_stress.CPPC_PERF_CONTROLS_PATCHES:
+            self.assertIn(patch, str(context.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_fails_when_perf_limited_is_unreadable(
+        self, mock_prerequisites, mock_policy_dir, mock_read
+    ):
+        """An active CPPC driver with an unreadable ABI is a hard failure."""
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = ("/sys/devices/system/cpu/cpu0/cpufreq", None)
+        mock_read.side_effect = OSError("permission denied")
+
+        with self.assertRaises(GLTCore.GLTTestFail) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("Cannot validate CPPC perf_limited control", str(context.exception))
+        self.assertIn("permission denied", str(context.exception))
+
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress.glt_utils.read_sysfs_value")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._get_first_cppc_cpufreq_dir")
+    @mock.patch("src.modules.cpu.glt_test_cpufreq_stress._validate_cppc_prerequisites")
+    def test_cppc_perf_controls_fails_when_perf_limited_is_not_an_integer(
+        self, mock_prerequisites, mock_policy_dir, mock_read
+    ):
+        """A malformed perf_limited value cannot prove the ABI is usable."""
+        mock_prerequisites.return_value = (True, None)
+        mock_policy_dir.return_value = ("/sys/devices/system/cpu/cpu0/cpufreq", None)
+        mock_read.return_value = "not-a-number"
+
+        with self.assertRaises(GLTCore.GLTTestFail) as context:
+            cpufreq_stress.test_cppc_perf_controls(None, self.mock_logger)
+
+        self.assertIn("Cannot validate CPPC perf_limited control", str(context.exception))
+        self.assertIn("invalid literal", str(context.exception))

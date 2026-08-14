@@ -62,6 +62,17 @@ HIGH_PERF_CPU_FREQ_MHZ = 1000
 # Applies to platforms using the cppc_cpufreq driver.
 SCALING_FREQ_MIN_PERCENT = 70
 CPPC_PERF_LIMITED_CLEAR_MASK = "0x3"
+CPPC_PERF_LIMITED_SUPPORTED_MASK = 0x3
+CPPC_PERF_LIMITED_ABI_PATCH = "https://git.kernel.org/torvalds/c/13c45a26635f"
+CPPC_PERF_CONTROLS_PATCHES = (
+    "https://git.kernel.org/torvalds/c/658fa7b1c47a",
+    "https://git.kernel.org/torvalds/c/b3e45fb2db9d",
+    "https://git.kernel.org/torvalds/c/38428a680026",
+    "https://git.kernel.org/torvalds/c/24ad4c6c136b",
+    "https://git.kernel.org/torvalds/c/ea3db45ae476",
+    CPPC_PERF_LIMITED_ABI_PATCH,
+    "https://git.kernel.org/torvalds/c/856250ba2e81",
+)
 CPU_SYSFS_ROOT = "/sys/devices/system/cpu"
 CPU_HOTPLUG_OFFLINE_SETTLE_SECS = 2
 CPU_HOTPLUG_ONLINE_TIMEOUT_SECS = 15
@@ -352,6 +363,75 @@ def test_vera_cppc_sysfs_helpers(_, logger):
         GLTCore.GLTTestResult.fail(reason)
 
 
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cppc_perf_controls(_, logger):
+    """
+    Verify CPPC perf_limited control is readable and accepts a clear mask.
+
+    ABI PATCH: https://git.kernel.org/torvalds/c/13c45a26635f
+    RECOMMENDED UPSTREAM SERIES:
+        https://git.kernel.org/torvalds/c/658fa7b1c47a
+        https://git.kernel.org/torvalds/c/b3e45fb2db9d
+        https://git.kernel.org/torvalds/c/38428a680026
+        https://git.kernel.org/torvalds/c/24ad4c6c136b
+        https://git.kernel.org/torvalds/c/ea3db45ae476
+        https://git.kernel.org/torvalds/c/13c45a26635f
+        https://git.kernel.org/torvalds/c/856250ba2e81
+    """
+    ok, reason = _validate_cppc_prerequisites()
+    cpufreq_dir = None
+    if ok:
+        cpufreq_dir, reason = _get_first_cppc_cpufreq_dir()
+    if not ok or cpufreq_dir is None:
+        if _is_cppc_not_applicable(reason):
+            GLTCore.GLTTestResult.skip(reason)
+        GLTCore.GLTTestResult.fail(reason)
+
+    perf_limited_path = os.path.join(cpufreq_dir, "perf_limited")
+    patches_msg = "\n".join(
+        f"  - {patch}" for patch in CPPC_PERF_CONTROLS_PATCHES
+    )
+    try:
+        before_value = glt_utils.read_sysfs_value(perf_limited_path)
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.fail(
+            "CPPC perf_limited sysfs interface is unavailable. This interface is "
+            f"introduced by:\n  - {CPPC_PERF_LIMITED_ABI_PATCH}\n"
+            "To keep the CPPC performance-control implementation aligned with "
+            f"upstream, apply the complete upstream patch series in order:\n{patches_msg}"
+        )
+    except (IOError, OSError) as error:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot validate CPPC perf_limited control: {error}"
+        )
+
+    if before_value == "<unsupported>":
+        GLTCore.GLTTestResult.skip(
+            "CPPC perf_limited is unsupported by platform firmware."
+        )
+
+    try:
+        before = int(before_value, 0)
+        glt_utils.write_sysfs_value(perf_limited_path, CPPC_PERF_LIMITED_CLEAR_MASK)
+        after = int(glt_utils.read_sysfs_value(perf_limited_path), 0)
+    except (IOError, OSError, ValueError) as error:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot validate CPPC perf_limited control: {error}"
+        )
+
+    logger.info(
+        "CPPC perf_limited at %s: before=%#x after=%#x", perf_limited_path, before, after
+    )
+    if after & CPPC_PERF_LIMITED_SUPPORTED_MASK:
+        GLTCore.GLTTestResult.warn(
+            "CPPC perf_limited status bits were set again after clear; "
+            "the platform may have reported a concurrent performance limitation."
+        )
+
+
 def _get_cpu_max_freq_khz():
     """
     Return the highest cpuinfo_max_freq across all CPUs in kHz, or None if unavailable.
@@ -623,8 +703,8 @@ def _validate_cppc_prerequisites(require_stress_ng=False):
                 scaling_driver = f.read().strip()
             if scaling_driver != "cppc_cpufreq":
                 non_cppc_drivers.append(f"{driver_path}: {scaling_driver}")
-    except (IOError, OSError):
-        return False, "cpufreq sysfs not available; cannot read scaling_driver."
+    except (IOError, OSError) as error:
+        return False, f"Cannot read {driver_path}: {error}"
 
     if non_cppc_drivers:
         return False, ("cppc_cpufreq not active for all cpufreq policies "
