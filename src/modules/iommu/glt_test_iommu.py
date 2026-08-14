@@ -226,7 +226,7 @@ def _resolve_tracefs():
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_sva_invalidate_range_size(_, __):  # pylint: disable=too-many-branches
     """Detect reintroduction of the ARM SMMU-v3 SVA invalidate-range off-by-one.

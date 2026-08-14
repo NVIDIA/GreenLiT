@@ -75,7 +75,7 @@ _kexec_conditional_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_efi_runtime_services_mask(sd, logger):
     """

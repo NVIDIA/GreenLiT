@@ -42,7 +42,7 @@ half commit f3c1d372dbb8 fixes. Discovery therefore prefers endpoints where
 pciutils detects ATS but falls back to the remaining endpoints so the CFG half
 still runs.
 
-Plan: standard and stress (binds vfio-pci and runs bpftrace; both decorators
+Plan: disruptive and stress (binds vfio-pci and runs bpftrace; both decorators
 below register it on those two plans).
 
 The companion bpftrace observer ``nested_ste/observe_ste.bt`` is licensed
@@ -453,7 +453,7 @@ def _nested_ste_cleanup(_sd, attr, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_nested_ste_hitless_update(sd, logger):
     # pylint: disable=too-many-branches,too-many-statements,too-many-locals
@@ -465,7 +465,7 @@ def test_nested_ste_hitless_update(sd, logger):
     Unpatched kernels take the disruptive path (missing either the MEV or
     the EATS safe-bit relaxation); fully patched kernels remain hitless.
 
-    Registered on the standard and stress plans: requires vfio-pci bind and
+    Registered on the disruptive and stress plans: requires vfio-pci bind and
     bpftrace, and is intended for IOMMU regression validation.
 
     Patch series: https://git.kernel.org/torvalds/c/2781f2a930ab

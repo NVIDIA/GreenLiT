@@ -308,7 +308,7 @@ def _validate_cppc_observability(online_cpus, policy_dirs=None, read_file=_read_
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-return-statements,too-many-branches
 def test_cppc_online_cpu_coverage(sd, logger):

@@ -138,8 +138,8 @@ sudo rm -rf /usr/local/share/greenlit/linux
 - Default standard tests: `sudo glt-test-suite`
 - Specific categories: `sudo glt-test-suite --tpm --arm64 --ipmi`
 - Running external test scripts: `sudo glt-test-suite --ext_executable`
-- Run one test case by ID: `sudo glt-test-suite --test-case cxl:test_cxl_link_disable_led_error`
-- Run multiple test cases by ID: `sudo glt-test-suite --test-case cxl:test_cxl_link_disable_led_error --test-case pci:test_pci_acs_configurability`
+- Run one test case by ID: `sudo glt-test-suite --disruptive --test-case cxl:test_cxl_link_disable_led_error`
+- Run multiple test cases by ID: `sudo glt-test-suite --disruptive --test-case cxl:test_cxl_link_disable_led_error --test-case pci:test_pci_acs_configurability`
 - Verbose output: `sudo glt-test-suite --verbose`
 - List available tests: `sudo glt-test-suite --list`
 - Display help information: `sudo glt-test-suite --help`
@@ -151,16 +151,22 @@ is printed by `sudo glt-test-suite --list`, used by configuration YAML, and
 accepted by `--test-case`.
 
 The `--test-case` selector can be repeated and combined with plan flags. For
-example, `sudo glt-test-suite --standard --test-case
+example, `sudo glt-test-suite --disruptive --test-case
 cxl:test_cxl_link_disable_led_error` runs the selected test case, and the CLI
-rejects it if it does not belong to the standard plan. Test cases required by
+rejects it if it does not belong to the disruptive plan. Test cases required by
 `@GLTRequires` are added automatically. `glt-test-suite` rejects combining
 `--test-case` with `--list`, `--resume`, or category flags such as `--pci`.
 
 ### Test Plans
 
-- **Standard** (default): `sudo glt-test-suite --standard`
-- **Stress**: `sudo glt-test-suite --stress`
+- **Standard** (default): `sudo glt-test-suite --standard` — comprehensive tests that do
+  not intentionally reboot or kexec and are not reasonably expected to hang or
+  crash the system.
+- **Disruptive**: `sudo glt-test-suite --disruptive` — tests that intentionally
+  reboot or kexec the system, or might hang or crash it only if a required patch
+  is missing. Manual recovery, such as a power cycle, might be required.
+- **Stress**: `sudo glt-test-suite --stress` — extended stress and stability
+  tests; may include disruptive tests.
 
 ### Skipping Tests
 

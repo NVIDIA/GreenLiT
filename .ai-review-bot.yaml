@@ -83,8 +83,11 @@ lenses:
       layouts unless ctypes field access is required; mirror kernel
       `GENMASK`/`FIELD_PREP` bitfield style when neighbors do.
 
-      Tags and unit coverage: tag new functional tests with `standard` and
-      `stress` when safe. Long-running or heavy-tooling tests may be
+      Tags and unit coverage: assign new functional tests to `standard` when
+      they are non-disruptive, or to `disruptive` when they intentionally
+      reboot or kexec, or might hang or crash if a required patch is missing;
+      never assign both. Add `stress` for extended stress or stability
+      coverage when appropriate. Long-running or heavy-tooling tests may be
       `stress`-only. Prefer `tests/modules/` for hardware-independent parsing
       and multi-candidate selection; expect `tests/greenlit/` for
       deterministic `src/greenlit/**` logic. New control-flow branches need

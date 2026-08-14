@@ -150,17 +150,23 @@ class TestGLTCore(GLTTestBase):
         """Test the GLTPlanType enum"""
         # Test enum values
         self.assertEqual(GLTPlanType.STANDARD.value, "standard")
+        self.assertEqual(GLTPlanType.DISRUPTIVE.value, "disruptive")
         self.assertEqual(GLTPlanType.STRESS.value, "stress")
         # Test descriptions
         self.assertIn("(default)", GLTPlanType.STANDARD.description)
-        self.assertIn("Standard test cases", GLTPlanType.STANDARD.description)
-        self.assertIn("Stress system", GLTPlanType.STRESS.description)
         self.assertIn(
-            "may hang and require a power cycle",
+            "reboot or kexec the system", GLTPlanType.DISRUPTIVE.description
+        )
+        self.assertIn(
+            "do not intentionally reboot or kexec",
             GLTPlanType.STANDARD.description,
         )
         self.assertIn(
-            "may hang and require a power cycle",
+            "Manual recovery, such as a power cycle",
+            GLTPlanType.DISRUPTIVE.description,
+        )
+        self.assertIn(
+            "may include disruptive tests",
             GLTPlanType.STRESS.description,
         )
 
@@ -195,6 +201,20 @@ class TestGLTCore(GLTTestBase):
         self.assertEqual(len(multi_plan_func.plans), 2)
         self.assertIn("standard", multi_plan_func.plans)
         self.assertIn("stress", multi_plan_func.plans)
+
+        with self.assertRaisesRegex(
+                ValueError, "cannot belong to both standard and disruptive"):
+            @GLTPlan("standard")
+            @GLTPlan("disruptive")
+            def invalid_standard_outer():
+                return "invalid"
+
+        with self.assertRaisesRegex(
+                ValueError, "cannot belong to both standard and disruptive"):
+            @GLTPlan("disruptive")
+            @GLTPlan("standard")
+            def invalid_disruptive_outer():
+                return "invalid"
 
     def test_test_attr(self):
         """Test the GLTTestAttr class"""
@@ -683,6 +703,8 @@ class TestGLTCore(GLTTestBase):
         """Test the GLTPlanType.get_all_nested method"""
         nested = GLTPlanType.get_all_nested(["standard"])
         assert nested == {"standard", "ext_executable"}
+        nested = GLTPlanType.get_all_nested(["disruptive"])
+        assert nested == {"disruptive"}
         nested = GLTPlanType.get_all_nested(["stress"])
         assert nested == {"stress", "ext_executable"}
         nested = GLTPlanType.get_all_nested(["ext_executable"])

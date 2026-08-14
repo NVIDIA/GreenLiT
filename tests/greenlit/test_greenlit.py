@@ -46,6 +46,17 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
             {"standard", "ext_executable"},
         )
 
+    def test_get_active_plan_tags_selects_disruptive(self):
+        """The disruptive plan does not include nested plan tags."""
+        args = _args([])
+        for plan in GLTCore.GLTPlanType:
+            setattr(args, plan.value, plan.value == "disruptive")
+
+        self.assertEqual(
+            greenlit.get_active_plan_tags(args),
+            {"disruptive"},
+        )
+
     def test_parse_arguments_maps_deprecated_sanity_to_standard(self):
         """The removed sanity plan remains a deprecated CLI alias."""
         with mock.patch.object(

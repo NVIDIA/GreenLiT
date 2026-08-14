@@ -30,7 +30,7 @@ def is_ast_device_present(vdc):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_ast_gpu_driver(sd, _):
     """

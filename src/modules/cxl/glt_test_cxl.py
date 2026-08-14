@@ -195,7 +195,7 @@ def _restore_link_and_disable_resume(scheduler, attr, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches,too-many-statements
 def test_cxl_link_disable_led_error(sd, logger):
@@ -583,7 +583,7 @@ _cxl_bus_reset_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches,too-many-statements,too-many-locals
 def test_cxl_save_restore_across_cxl_bus_reset(sd, logger):
@@ -788,7 +788,7 @@ _cxl_reset_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches,too-many-statements
 def test_cxl_reset_dvsec_sysfs(sd, logger):
@@ -972,7 +972,7 @@ def test_cxl_zero_size_committed_decoder(_, __):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches,too-many-statements
 def test_cxl_link_disable_fwctl_registration(sd, logger):
