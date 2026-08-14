@@ -94,7 +94,7 @@ class TestMpamResctrlInfo(GLTTestBase):
 
     def test_info_unmounts_when_post_mount_check_fails(self):
         """A test-owned mount is cleaned up even when validation fails early."""
-        with self.mock.patch.object(mpam_resctrl.subprocess, "run") as mock_run, \
+        with self.mock.patch.object(mpam_resctrl.glt_utils, "run_command") as mock_run, \
                 self.mock.patch.object(mpam_resctrl.glt_utils, "is_cli_available",
                                        return_value=True), \
                 self.mock.patch.object(mpam_resctrl, "NvDev"), \
