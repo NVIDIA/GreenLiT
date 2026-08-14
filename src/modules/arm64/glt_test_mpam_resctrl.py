@@ -695,6 +695,118 @@ def test_mpam_mbm_assignment_mode(_, logger):
         GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_mbm_assignment_mode")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify MPAM MBM total and available counter information.
+
+    PATCH: https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/
+    """
+    monitor_info = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_MON")
+    counter_paths = {
+        "num_mbm_cntrs": os.path.join(monitor_info, "num_mbm_cntrs"),
+        "available_mbm_cntrs": os.path.join(
+            monitor_info, "available_mbm_cntrs"),
+    }
+
+    cleanup_errors = []
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        counts_by_file = {}
+        for name, path in counter_paths.items():
+            if not os.path.isfile(path):
+                GLTCore.GLTTestResult.fail(
+                    f"MBM counter information file {path} is missing. "
+                    "Check the dependency-complete backport of "
+                    "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
+                    "Assignable Bandwidth Monitoring Counters (ABMC), "
+                    "including commits 8c793336eaf8 and 16ff6b038fb3: "
+                    "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                )
+
+            try:
+                content = glt_utils.read_sysfs_value(path)
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read MBM counter information file {path}: {e}")
+
+            if not content:
+                GLTCore.GLTTestResult.fail(
+                    f"MBM counter information file {path} is empty. "
+                    "Check the dependency-complete backport of "
+                    "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
+                    "Assignable Bandwidth Monitoring Counters (ABMC), "
+                    "including commits 8c793336eaf8 and 16ff6b038fb3: "
+                    "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                )
+
+            counts = {}
+            for entry in content.split(";"):
+                match = re.fullmatch(r"([0-9]+)=([0-9]+)", entry)
+                if match is None:
+                    GLTCore.GLTTestResult.fail(
+                        f"Malformed MBM counter entry {entry!r} in {path}. "
+                        "Check the dependency-complete backport of "
+                        "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
+                        "Assignable Bandwidth Monitoring Counters (ABMC), "
+                        "including commits 8c793336eaf8 and 16ff6b038fb3: "
+                        "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                    )
+                domain = int(match.group(1))
+                if domain in counts:
+                    GLTCore.GLTTestResult.fail(
+                        f"Duplicate MBM domain {domain} in {path}. "
+                        "Check the dependency-complete backport of "
+                        "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
+                        "Assignable Bandwidth Monitoring Counters (ABMC), "
+                        "including commits 8c793336eaf8 and 16ff6b038fb3: "
+                        "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                    )
+                count = int(match.group(2))
+                counts[domain] = count
+            counts_by_file[name] = counts
+
+        total_counts = counts_by_file["num_mbm_cntrs"]
+        available_counts = counts_by_file["available_mbm_cntrs"]
+        if total_counts.keys() != available_counts.keys():
+            GLTCore.GLTTestResult.fail(
+                f"MBM counter domain mismatch: num_mbm_cntrs has "
+                f"{list(total_counts)}, available_mbm_cntrs has "
+                f"{list(available_counts)}. "
+                "Check the dependency-complete backport of "
+                "[PATCH v18 00/33] x86,fs/resctrl: Support AMD Assignable "
+                "Bandwidth Monitoring Counters (ABMC), including commits "
+                "8c793336eaf8 and 16ff6b038fb3: "
+                "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+            )
+
+        for domain, total in total_counts.items():
+            available = available_counts[domain]
+            if available > total:
+                GLTCore.GLTTestResult.fail(
+                    f"MBM domain {domain} reports {available} available "
+                    f"counters but only {total} total counters. "
+                    "Check the dependency-complete backport of "
+                    "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
+                    "Assignable Bandwidth Monitoring Counters (ABMC), "
+                    "including commits 8c793336eaf8 and 16ff6b038fb3: "
+                    "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                )
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
+
+
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
