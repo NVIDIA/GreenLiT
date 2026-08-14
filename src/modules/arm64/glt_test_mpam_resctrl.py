@@ -410,7 +410,7 @@ def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
     schemata_path = RESCTRL_MOUNT_POINT + "/schemata"
     l3_line_re = re.compile(r"^\s*L3:")
     l3_mon_features = RESCTRL_MOUNT_POINT + "/info/L3_MON/mon_features"
-    l3_occupancy_glob = "mon_data/mon_L3_*/llc_occupancy"
+    l3_monitor_glob = "mon_data/mon_L3_*"
     fs_mounted = False
 
     if not _resctrl_is_mounted():
@@ -462,29 +462,37 @@ def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
             GLTCore.GLTTestResult.fail(
                 "L3 occupancy monitoring not advertised.")
 
-        # a concrete L3 occupancy counter file must exist.
-        matches = sorted(glob.glob(
-            os.path.join(RESCTRL_MOUNT_POINT, l3_occupancy_glob)))
-        occupancy_file = matches[0] if matches else None
-        if occupancy_file is None:
+        # Every L3 monitoring domain must expose a readable occupancy counter.
+        monitor_dirs = [
+            path for path in glob.glob(
+                os.path.join(RESCTRL_MOUNT_POINT, l3_monitor_glob))
+            if os.path.isdir(path)
+        ]
+        if not monitor_dirs:
             GLTCore.GLTTestResult.fail(
-                "L3 occupancy advertised but no mon_L3 occupancy file found."
+                "L3 occupancy advertised but no mon_L3 monitor directory found."
             )
 
-        # the counter must read back as a non-negative integer.
-        try:
-            with open(occupancy_file, "r", encoding="utf-8") as f:
-                raw = f.read().strip()
-        except OSError as e:
-            GLTCore.GLTTestResult.fail(
-                f"Failed to read L3 occupancy file {occupancy_file}: {e}"
-            )
+        for monitor_dir in monitor_dirs:
+            occupancy_file = os.path.join(monitor_dir, "llc_occupancy")
+            if not os.path.isfile(occupancy_file):
+                GLTCore.GLTTestResult.fail(
+                    f"L3 occupancy file {occupancy_file} is missing."
+                )
 
-        if not raw.isdigit():
-            GLTCore.GLTTestResult.fail(
-                f"L3 occupancy file {occupancy_file} did not contain a "
-                f"non-negative integer (read {raw!r})."
-            )
+            try:
+                with open(occupancy_file, "r", encoding="utf-8") as f:
+                    raw = f.read().strip()
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read L3 occupancy file {occupancy_file}: {e}"
+                )
+
+            if not raw.isdigit():
+                GLTCore.GLTTestResult.fail(
+                    f"L3 occupancy file {occupancy_file} did not contain a "
+                    f"non-negative integer (read {raw!r})."
+                )
     finally:
         if fs_mounted:
             try:
