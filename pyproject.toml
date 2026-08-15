@@ -23,6 +23,7 @@ include = [
     "confs/greenlit.service",
     "confs/greenlit.timer",
     "external_tests/**/*",
+    "src/modules/cpu/cppc_cpc_read_probe/*",
     "src/modules/i2c/kretprobes/*",
     "src/modules/iommu/cmdqv_hyp_own/*",
     "src/modules/iommu/sva_invalidate/*",
