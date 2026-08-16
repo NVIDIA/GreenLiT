@@ -84,13 +84,17 @@ def _resctrl_is_mounted() -> bool:
 
 
 @contextmanager
-def _managed_resctrl_mount(logger):
+def _managed_resctrl_mount(logger, *, cleanup_errors=None):
     """Yield resctrl mount state and clean up only a test-owned mount.
 
     Yields (mount_succeeded, missing_cli). missing_cli is the first of
     mount/umount that is not on PATH when a mount is required, else None.
     Callers skip when missing_cli is set and fail when mount_succeeded is
     False.
+
+    Unmount failures are logged. When cleanup_errors is a list, the failure
+    message is also appended so a decorated caller can fail after a
+    successful body without replacing an earlier skip or fail.
     """
     mounted_by_test = False
     missing_cli = None
@@ -124,8 +128,10 @@ def _managed_resctrl_mount(logger):
                     ["umount", RESCTRL_MOUNT_POINT],
                     "Failed to unmount resctrl.",
                 )
-            except RuntimeError:
+            except RuntimeError as error:
                 logger.warning("Failed to unmount resctrl.")
+                if cleanup_errors is not None:
+                    cleanup_errors.append(str(error))
 
 
 def _cpus_of_node(node) -> list:
@@ -630,6 +636,63 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                     f"MB_MON {MPAM_MON_FEATURES} is missing expected "
                     f"features: {', '.join(missing_features)}."
                 )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_info")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mbm_assignment_mode(_, logger):
+    """
+    Verify the active MPAM MBM counter assignment mode.
+
+    PATCH: https://lore.kernel.org/all/20260707162440.12132-1-ben.horgan@arm.com/
+    """
+    mode_path = os.path.join(
+        RESCTRL_MOUNT_POINT, "info", "MB_MON", "mbm_assign_mode")
+
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip(
+            "This CPU does not expose the supported MBM assignment mode "
+            "interface."
+        )
+
+    cleanup_errors = []
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        if not os.path.isfile(mode_path):
+            GLTCore.GLTTestResult.fail(
+                f"MBM assignment mode file {mode_path} is missing. "
+                "Consider backporting the complete [PATCH v18 00/33] "
+                "x86,fs/resctrl: Support AMD Assignable Bandwidth Monitoring "
+                "Counters (ABMC) series: "
+                "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+            )
+
+        try:
+            modes = glt_utils.read_sysfs_value(mode_path).split()
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read MBM assignment mode file {mode_path}: {e}")
+
+        if "[mbm_event]" not in modes:
+            GLTCore.GLTTestResult.fail(
+                f"MBM event assignment mode is not enabled in {mode_path} "
+                f"(read {modes!r}). "
+                "Consider backporting the complete [PATCH v5 0/5] arm_mpam: "
+                "resctrl: Counter Assignment (ABMC) series: "
+                "https://lore.kernel.org/all/20260707162440.12132-1-ben.horgan@arm.com/"
+            )
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
