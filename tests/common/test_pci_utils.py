@@ -1,5 +1,6 @@
 """Unit test script for common/pci_utils.py"""
 
+import subprocess
 from unittest.mock import MagicMock
 
 from tests.test_base import GLTTestBase
@@ -15,9 +16,11 @@ from src.common.pci_utils import (
     default_route_ifaces,
     get_bdfs_by_pci_id,
     get_bdfs_with_ext_cap,
+    get_iommu_group_type,
     get_pci_children,
     get_pci_class,
     iface_pci_bdfs,
+    is_ats_enabled,
     mounted_block_devices,
     pci_bdfs_backing_mount,
     unsafe_pci_bdfs,
@@ -99,6 +102,54 @@ proc /proc proc rw,nosuid 0 0
 /dev/nvme0n1p1 /boot vfat rw,relatime 0 0
 tmpfs /run tmpfs rw,nosuid 0 0
 """
+
+LSPCI_OUTPUT_ATS_ENABLED = """\
+0000:02:00.0 3D controller [0302]: NVIDIA Corporation Device [10de:0001]
+\tCapabilities: [3a8 v1] Address Translation Service (ATS)
+\t\tATSCap: Invalidate Queue Depth: 00
+\t\tATSCtl: Enable+, Smallest Translation Unit: 00
+"""
+
+LSPCI_OUTPUT_ATS_DISABLED = """\
+0000:02:00.0 3D controller [0302]: NVIDIA Corporation Device [10de:0001]
+\tCapabilities: [3a8 v1] Address Translation Service (ATS)
+\t\tATSCap: Invalidate Queue Depth: 00
+\t\tATSCtl: Enable-, Smallest Translation Unit: 00
+"""
+
+
+class TestPciIommuGroupType(GLTTestBase):
+    """Test the per-device IOMMU group type helper."""
+
+    def test_get_iommu_group_type_returns_runtime_domain(self):
+        """Returns the active per-device IOMMU group domain type."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            return_value="identity",
+        ) as read_mock:
+            result = get_iommu_group_type("0000:02:00.0")
+        self.assertEqual(result, "identity")
+        read_mock.assert_called_once_with(
+            "/sys/bus/pci/devices/0000:02:00.0/iommu_group/type"
+        )
+
+    def test_get_iommu_group_type_unavailable(self):
+        """Returns None when the device IOMMU group type is unavailable."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=FileNotFoundError,
+        ):
+            result = get_iommu_group_type("0000:02:00.0")
+        self.assertIsNone(result)
+
+    def test_get_iommu_group_type_unreadable(self):
+        """Returns None when permissions prevent validating the group type."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=PermissionError,
+        ):
+            result = get_iommu_group_type("0000:02:00.0")
+        self.assertIsNone(result)
 
 
 class TestPciUtils(GLTTestBase):
@@ -264,6 +315,67 @@ class TestPciUtils(GLTTestBase):
     def test_pci_class_usb_host_constant(self):
         """USB host controller class prefix matches the PCI spec."""
         self.assertEqual(PCI_CLASS_USB_HOST, "0x0c03")
+
+
+class TestPciUtilsAts(GLTTestBase):
+    """Test Class for the PCI ATS-state helper."""
+
+    @staticmethod
+    def _mock_lspci(stdout="", returncode=0):
+        """Create a mock subprocess.run result for lspci."""
+        mock_result = MagicMock()
+        mock_result.stdout = stdout
+        mock_result.returncode = returncode
+        return mock_result
+
+    def test_is_ats_enabled_disabled(self):
+        """Returns False when ATSCtl reports ATS disabled."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.subprocess.run",
+            return_value=self._mock_lspci(stdout=LSPCI_OUTPUT_ATS_DISABLED),
+        ):
+            result = is_ats_enabled("0000:02:00.0")
+        self.assertFalse(result)
+
+    def test_is_ats_enabled_lspci_failure(self):
+        """Returns None when lspci exits with non-zero."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["lspci"]),
+        ):
+            result = is_ats_enabled("0000:02:00.0")
+        self.assertIsNone(result)
+
+    def test_is_ats_enabled_lspci_missing(self):
+        """Returns None when lspci is missing."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            result = is_ats_enabled("0000:02:00.0")
+        self.assertIsNone(result)
+
+    def test_is_ats_enabled_missing_capability(self):
+        """Returns None when the device lacks ATS capability output."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.subprocess.run",
+            return_value=self._mock_lspci(stdout=LSPCI_OUTPUT_NO_ACS),
+        ):
+            result = is_ats_enabled("0000:02:00.0")
+        self.assertIsNone(result)
+
+    def test_is_ats_enabled_true(self):
+        """Returns True when ATSCtl reports ATS enabled."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.subprocess.run",
+            return_value=self._mock_lspci(stdout=LSPCI_OUTPUT_ATS_ENABLED),
+        ) as run_mock:
+            result = is_ats_enabled("0000:02:00.0")
+        self.assertTrue(result)
+        run_mock.assert_called_once_with(
+            ["lspci", "-vvv", "-s", "0000:02:00.0"],
+            capture_output=True, text=True, check=True,
+        )
 
 
 class TestPciUtilsNetAndBlock(GLTTestBase):

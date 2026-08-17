@@ -25,6 +25,7 @@ import re
 import subprocess
 import time
 import uuid
+from common import cxl_utils
 from common import glt_core as GLTCore
 from common import glt_utils
 from common import pci_utils
@@ -100,6 +101,27 @@ def _cleanup_aspm_saved_state_probe(module_loaded, policy_changed, original_poli
         subprocess.run(["make", "clean"], check=False, shell=False)
 
 
+def _get_cxl_cache_bdfs(bdfs, logger):
+    """Return BDFs that advertise a readable CXL.cache capability."""
+    cxl_cache_bdfs = []
+    for bdf in bdfs:
+        dvsec_off = cxl_utils.find_cxl_device_dvsec_base(bdf)
+        cap_bits = (
+            cxl_utils.read_cxl_device_dvsec_cap_bits(bdf, dvsec_off)
+            if dvsec_off is not None else None
+        )
+        if cap_bits and cap_bits["cache_capable"]:
+            cxl_cache_bdfs.append(bdf)
+            continue
+        reason = (
+            "CXL Device DVSEC unavailable or unreadable"
+            if cap_bits is None else "CXL.cache capability is clear"
+        )
+        logger.debug("PCI device %s is not an applicable CXL.cache device: %s.",
+                     bdf, reason)
+    return cxl_cache_bdfs
+
+
 def _read_aspm_probe_hits(proc_path=ASPM_PROBE_PROC_PATH):
     """Read ASPM config and saved-state probe counters."""
     values = {}
@@ -125,6 +147,91 @@ def _write_aspm_policy(policy, policy_path=ASPM_POLICY_PATH):
         raise OSError(
             f"PCIe ASPM policy write to {policy} did not take effect; "
             f"current policy is {current_policy or 'unknown'}."
+        )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cxl_cache_ats_always_on(_, logger):
+    """
+    Verifies ATS remains enabled for CXL.cache devices in identity domains.
+
+    PATCH: PCI: Add pci_ats_required() for CXL.cache capable devices
+           (91561e1dc94b)
+    PATCH: iommu/arm-smmu-v3: Allow ATS to be always on (5ff98a0da6b4)
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("Test only applies to Vera-based platforms.")
+
+    if not glt_utils.is_cli_available("lspci"):
+        GLTCore.GLTTestResult.skip("lspci not available; install 'pciutils' to perform the test.")
+
+    try:
+        target_bdfs = sorted(os.listdir("/sys/bus/pci/devices"))
+    except OSError as error:
+        GLTCore.GLTTestResult.skip(f"Unable to enumerate PCI devices: {error}.")
+
+    cxl_cache_bdfs = _get_cxl_cache_bdfs(
+        target_bdfs, logger
+    )
+
+    if not cxl_cache_bdfs:
+        GLTCore.GLTTestResult.skip(
+            "No PCI device with readable CXL.cache capability found; "
+            f"ATS always-on path is not observable after checking "
+            f"{len(target_bdfs)} PCI device(s)."
+        )
+
+    disabled_bdfs = []
+    unvalidated_bdfs = []
+    for bdf in cxl_cache_bdfs:
+        group_type = pci_utils.get_iommu_group_type(bdf)
+        ats_enabled = pci_utils.is_ats_enabled(bdf)
+        if group_type is None:
+            unvalidated_bdfs.append(bdf)
+            logger.warning(
+                "CXL.cache device %s: IOMMU group type is unreadable; cannot "
+                "validate the always-on bypass path.",
+                bdf,
+            )
+            continue
+        if group_type != "identity":
+            unvalidated_bdfs.append(bdf)
+            logger.warning(
+                "CXL.cache device %s is not in an identity IOMMU domain "
+                "(type=%s); its ATS state does not validate the always-on bypass path.",
+                bdf, group_type,
+            )
+            continue
+
+        if ats_enabled is None:
+            unvalidated_bdfs.append(bdf)
+            logger.warning(
+                "Unable to determine ATS state for CXL.cache device %s; lspci "
+                "failed or did not expose a conclusive ATSCtl value.",
+                bdf,
+            )
+            continue
+        if ats_enabled:
+            logger.info("ATS is enabled on CXL.cache device %s.", bdf)
+        else:
+            disabled_bdfs.append(bdf)
+
+    if disabled_bdfs:
+        GLTCore.GLTTestResult.fail(
+            "CXL.cache device(s) expected to use ATS always-on do not show "
+            f"'ATSCtl: Enable+': {', '.join(disabled_bdfs)}. "
+            "Apply the CXL.cache PCI ATS requirement (91561e1dc94b) and "
+            "ARM SMMUv3 ATS always-on support (5ff98a0da6b4)."
+        )
+
+    if unvalidated_bdfs:
+        GLTCore.GLTTestResult.warn(
+            "CXL.cache device(s) did not conclusively exercise the ATS always-on "
+            f"bypass path: {', '.join(unvalidated_bdfs)}. Devices must use "
+            "an identity IOMMU domain and show 'ATSCtl: Enable+'."
         )
 
 
