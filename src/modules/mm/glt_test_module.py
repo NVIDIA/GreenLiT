@@ -27,7 +27,6 @@ from common.nv_device import NvDev
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_module_allocation(_, logger) -> bool:

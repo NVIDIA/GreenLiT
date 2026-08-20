@@ -28,7 +28,6 @@ from scripts import check_kernel_config
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_acpi_hmat_msg(_, __):
@@ -51,7 +50,6 @@ def test_acpi_hmat_msg(_, __):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_no_legacy_tegra_sku_log_on_acpi(_, logger):
@@ -113,7 +111,6 @@ def test_no_legacy_tegra_sku_log_on_acpi(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra_fuse_probe(_, __):

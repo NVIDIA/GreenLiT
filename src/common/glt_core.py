@@ -269,10 +269,9 @@ class GLTRequires:
 class GLTPlanType(Enum):
     """GLT supported test plans"""
 
-    SANITY = ("sanity", "(default) Quick sanity check.", ["ext_executable"])
     STANDARD = (
         "standard",
-        "Standard test cases, reboot will be performed. "
+        "(default) Standard test cases, reboot will be performed. "
         "The system may hang and require a power cycle to recover.",
         ["ext_executable"],
     )

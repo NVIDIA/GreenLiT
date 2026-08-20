@@ -316,13 +316,24 @@ def parse_arguments(supported_categories):
     test_plan = plan_group.add_mutually_exclusive_group(required=False)
     for plan in GLTCore.GLTPlanType:
         test_plan.add_argument(f"--{plan.value}", action="store_true", help=f"{plan.description}")
+    # TODO: Remove the deprecated --sanity alias in the next major release.
+    test_plan.add_argument(
+        "--sanity", action="store_true", help=argparse.SUPPRESS)
 
     # Category options
     category_group = parser.add_argument_group("Supported categories")
     for category in supported_categories:
         category_group.add_argument(f"--{category}", action="store_true", help=f"Perform {category} category cases.")
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.sanity:
+        print(
+            "Warning: --sanity is deprecated and now selects --standard. "
+            "Update automation to use --standard.",
+            file=sys.stderr,
+        )
+        args.standard = True
+    return args
 
 
 # pylint: disable=too-many-branches
@@ -430,7 +441,7 @@ def get_active_plan_tags(args):
             selected_plan = plan.value
             break
     if selected_plan is None:
-        selected_plan = GLTCore.GLTPlanType.SANITY.value
+        selected_plan = GLTCore.GLTPlanType.STANDARD.value
 
     return GLTCore.GLTPlanType.get_all_nested(selected_plan)
 

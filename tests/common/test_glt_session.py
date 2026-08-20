@@ -15,7 +15,7 @@ class TestGLTSession(GLTTestBase):
         """Summary metadata is parsed while per-test progress stays raw."""
         progress = [{
             "Summary": {
-                "TestTags": ["sanity"],
+                "TestTags": ["standard"],
                 "Categories": ["cxl"],
                 "Verbose": True,
             }
@@ -28,7 +28,7 @@ class TestGLTSession(GLTTestBase):
 
         summary = glt_session.parse_session_summary(progress)
 
-        self.assertEqual(summary.test_tags, {"sanity"})
+        self.assertEqual(summary.test_tags, {"standard"})
         self.assertEqual(summary.categories, ["cxl"])
         self.assertEqual(summary.test_cases, ["cxl:test_standard"])
         self.assertTrue(summary.verbose)
@@ -37,7 +37,7 @@ class TestGLTSession(GLTTestBase):
         """Session directories resolve to the cached progress file path."""
         progress = [{
             "Summary": {
-                "TestTags": ["sanity"],
+                "TestTags": ["standard"],
                 "Categories": ["cxl"],
             }
         }, {
@@ -63,7 +63,7 @@ class TestGLTSession(GLTTestBase):
         """A direct progress file read returns raw progress plus parsed metadata."""
         progress = [{
             "Summary": {
-                "TestTags": ["sanity"],
+                "TestTags": ["standard"],
                 "Categories": ["cxl"],
             }
         }, {
@@ -88,7 +88,7 @@ class TestGLTSession(GLTTestBase):
         """A malformed summary is reported before callers use metadata."""
         progress = [{
             "Summary": {
-                "TestTags": ["sanity"],
+                "TestTags": ["standard"],
                 "Categories": ["cxl"],
             }
         }]
@@ -107,7 +107,7 @@ class TestGLTSession(GLTTestBase):
         """A non-array JSON payload is reported instead of crashing resume."""
         progress = {
             "Summary": {
-                "TestTags": ["sanity"],
+                "TestTags": ["standard"],
                 "Categories": ["cxl"],
             }
         }

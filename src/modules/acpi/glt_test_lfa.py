@@ -105,7 +105,6 @@ def check_lfa_component_attributes(component_path, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_lfa_availability(_, logger):

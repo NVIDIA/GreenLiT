@@ -83,10 +83,9 @@ lenses:
       layouts unless ctypes field access is required; mirror kernel
       `GENMASK`/`FIELD_PREP` bitfield style when neighbors do.
 
-      Tags and unit coverage: tag new functional tests with `sanity`,
-      `standard`, and `stress` when safe; omit sanity for long-running,
-      disruptive, or heavy-tooling cases but still add standard/stress when
-      appropriate. Prefer `tests/modules/` for hardware-independent parsing
+      Tags and unit coverage: tag new functional tests with `standard` and
+      `stress` when safe. Long-running or heavy-tooling tests may be
+      `stress`-only. Prefer `tests/modules/` for hardware-independent parsing
       and multi-candidate selection; expect `tests/greenlit/` for
       deterministic `src/greenlit/**` logic. New control-flow branches need
       unit assertions for those branches—not only mocked success paths.

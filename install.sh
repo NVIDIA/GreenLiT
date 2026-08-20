@@ -438,8 +438,8 @@ print_completion() {
   echo "You can now run the GreenLiT test suite with the command: glt-test-suite"
   echo
   echo "Common usage examples:"
-  echo "  List available tests:   sudo glt-test-suite --list --sanity"
-  echo "  Run sanity tests:       sudo glt-test-suite --sanity --arm64"
+  echo "  List available tests:   sudo glt-test-suite --list --standard"
+  echo "  Run standard tests:     sudo glt-test-suite --standard --arm64"
   echo "  Run with verbose mode:  sudo glt-test-suite --verbose --standard --tpm"
   echo
   echo "For more information, refer to the GreenLiT documentation"

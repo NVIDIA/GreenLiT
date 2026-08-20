@@ -184,7 +184,6 @@ def _read_ffa_partition(device_path):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
@@ -303,7 +302,6 @@ def test_arm_ffa_availability(_, logger):
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_arm_ffa_availability")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_arm_ffa_partition_info_descriptors(_, logger):

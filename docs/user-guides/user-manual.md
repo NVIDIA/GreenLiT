@@ -135,7 +135,7 @@ sudo rm -rf /usr/local/share/greenlit/linux
 
 ### Running Tests
 
-- Default sanity tests: `sudo glt-test-suite`
+- Default standard tests: `sudo glt-test-suite`
 - Specific categories: `sudo glt-test-suite --tpm --arm64 --ipmi`
 - Running external test scripts: `sudo glt-test-suite --ext_executable`
 - Run one test case by ID: `sudo glt-test-suite --test-case cxl:test_cxl_link_disable_led_error`
@@ -159,8 +159,7 @@ rejects it if it does not belong to the standard plan. Test cases required by
 
 ### Test Plans
 
-- **Sanity** (default): `sudo glt-test-suite --sanity`
-- **Standard**: `sudo glt-test-suite --standard`
+- **Standard** (default): `sudo glt-test-suite --standard`
 - **Stress**: `sudo glt-test-suite --stress`
 
 ### Skipping Tests
@@ -256,6 +255,11 @@ Test sessions and logs are stored in the `/var/cache/greenlit/` directory with a
 - Resume a specific test session: `sudo glt-test-suite --resume <session-number>`
   - Example: `sudo glt-test-suite --resume -1` (resume the most recent session)
 
+Cached sessions are version-specific. Resume or finish an interrupted session
+before upgrading GreenLiT. Resuming a session created by an earlier GreenLiT
+version is unsupported because test plans and test membership may change
+between releases; start a new session after upgrading.
+
 ## Recommended workflow
 
 On a **Linux** target system, a typical end-to-end run follows this order.
@@ -278,7 +282,7 @@ On a **Linux** target system, a typical end-to-end run follows this order.
 3. **Run tests** — See [Running Tests](#running-tests) and [Test Plans](#test-plans).
 
    ```bash
-   sudo glt-test-suite --sanity
+   sudo glt-test-suite --standard
    ```
 
 4. **Review results** — See [Test Reports](#test-reports). Session logs are under `/var/cache/greenlit/`.

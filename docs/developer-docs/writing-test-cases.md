@@ -140,7 +140,6 @@ from common.nv_device import NvDev
 # ...(other test cases omitted for brevity)
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_pci_device_reset_method(sd, logger):
@@ -194,9 +193,8 @@ When any new "category" (i.e. new directory under `/src/modules`) is introduced,
 
 Decide which test plan(s) your test case should be included into.
 
-Choose from the 3 valid test plans:
+Choose from the 2 valid native test plans:
 
-- `"sanity"` - Quick smoke tests for basic functionality
 - `"standard"` - Comprehensive testing for standard validation
 - `"stress"` - Extended stress and stability testing
 
@@ -206,7 +204,6 @@ Use the decorator `@GLTCore.GLTPlan("<test plan name>")` with your test case to 
 
 ```python
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 def test_my_feature(_, logger):
     """Test description"""
@@ -266,7 +263,7 @@ Use a comment above the line that requires modifying:
 
 ```python
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
 def test_my_feature(_, logger):
     """Test description"""
     pass
@@ -426,7 +423,6 @@ If your test case should only be run when other test case(s) have failed, use th
 ```python
 @GLTCore.GLTRequires.must_pass("hwtracing", "test_perf_coresight")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_perf_events(_, logger):

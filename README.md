@@ -54,10 +54,10 @@ sudo ./install.sh --local-whl ../glt-wheels/
 Once installed, you can run the test suite directly.
 
 ```bash
-# Run default sanity tests
+# Run the default standard test plan
 sudo glt-test-suite
 
-# Run a specific test plan (sanity, standard, or stress)
+# Run a specific test plan (standard or stress)
 sudo glt-test-suite --standard
 
 # Run specific test categories

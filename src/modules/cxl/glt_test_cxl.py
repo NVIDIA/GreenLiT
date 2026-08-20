@@ -331,7 +331,6 @@ test_cxl_link_disable_led_error.attr.post_hooks = GLTCore.PostHooks.create(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cxl_switch_decoder_target_list_complete(_, logger):
@@ -903,7 +902,6 @@ test_cxl_reset_dvsec_sysfs.attr.post_hooks = GLTCore.PostHooks.create(
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cxl_zero_size_committed_decoder(_, __):

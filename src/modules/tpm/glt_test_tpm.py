@@ -37,7 +37,6 @@ def _stop_stress_processes(process1, process2):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_tpm(_, logger):
@@ -46,7 +45,6 @@ def test_nvidia_tpm(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
     """
@@ -171,7 +169,6 @@ def test_tegra_quad_spi(_, logger):  # pylint: disable=too-many-branches
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra_qspi_xfer_kasan_oob(_, __):

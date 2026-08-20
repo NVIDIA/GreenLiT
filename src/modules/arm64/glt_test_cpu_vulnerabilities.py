@@ -53,7 +53,6 @@ def _read_vuln_file(name: str) -> tuple[str, str]:
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_vera_spectre_mitigation(_, logger):

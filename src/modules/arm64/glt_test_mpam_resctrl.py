@@ -374,7 +374,6 @@ def _validate_mpam_init_registers(  # pylint: disable=too-many-branches,too-many
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_mpam_driver_init_registers(  # pylint: disable=too-many-branches,too-many-locals
@@ -504,7 +503,6 @@ def test_mpam_driver_init_registers(  # pylint: disable=too-many-branches,too-ma
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_driver_init_registers")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_mpam_resctrl_mount(_, logger):
@@ -557,7 +555,6 @@ def test_mpam_resctrl_mount(_, logger):
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
@@ -637,7 +634,6 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_mpam_resctrl_schemata(_, logger):
@@ -684,7 +680,6 @@ def test_mpam_resctrl_schemata(_, logger):
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
@@ -1031,7 +1026,6 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_mpam_mba_schemata(_, logger):  # pylint: disable=too-many-branches,too-many-locals

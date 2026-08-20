@@ -23,7 +23,6 @@ from common import glt_core as GLTCore
 from common import perf_utils
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_perf_metric_id(_, logger):

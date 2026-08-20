@@ -35,7 +35,7 @@ class TestGreenlitResumeVerbose(GLTTestBase):
         """Resume remains compatible with sessions saved before Verbose existed."""
         with tempfile.TemporaryDirectory() as session_dir:
             _write_session_progress(session_dir, {
-                "TestTags": [GLTCore.GLTPlanType.SANITY.value],
+                "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
                 "Categories": ["cxl"],
             })
 
@@ -49,7 +49,7 @@ class TestGreenlitResumeVerbose(GLTTestBase):
         """Saved resume metadata records whether the original run was verbose."""
         with tempfile.TemporaryDirectory() as session_dir:
             _write_session_progress(session_dir, {
-                "TestTags": [GLTCore.GLTPlanType.SANITY.value],
+                "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
                 "Categories": ["cxl"],
                 "Verbose": True,
             })
@@ -96,7 +96,7 @@ class TestGreenlitResumeVerbose(GLTTestBase):
 
         with tempfile.TemporaryDirectory() as session_dir:
             _write_session_progress(session_dir, {
-                "TestTags": [GLTCore.GLTPlanType.SANITY.value],
+                "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
                 "Categories": ["cxl"],
                 "Verbose": True,
             })
@@ -114,7 +114,7 @@ class TestGreenlitResumeVerbose(GLTTestBase):
 
         self.assertEqual(error, "")
         self.assertEqual(resume_session_dir, session_dir)
-        self.assertEqual(summary.test_tags, {GLTCore.GLTPlanType.SANITY.value})
+        self.assertEqual(summary.test_tags, {GLTCore.GLTPlanType.STANDARD.value})
         self.assertEqual(summary.categories, ["cxl"])
         self.assertEqual(summary.test_cases, ["cxl:test_standard"])
         self.assertEqual(session_path, session_dir)

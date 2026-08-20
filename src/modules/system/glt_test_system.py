@@ -23,7 +23,6 @@ from common import glt_utils
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_system_state_is_running(_, __):

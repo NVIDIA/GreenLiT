@@ -73,7 +73,6 @@ def _read_kernel_text_symbols(path=KALLSYMS_PATH):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_arm_cca_efi_secret_kernel_config(_, logger):
@@ -127,7 +126,6 @@ def test_arm_cca_efi_secret_kernel_config(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_arm_cca_realm_encrypted_mapping_kernel_fingerprint(_, logger):

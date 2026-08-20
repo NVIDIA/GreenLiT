@@ -29,7 +29,6 @@ from modules.iommu import cmdqv_hyp_own_runner as runner
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_iommu_id_mapping(_, __):
@@ -54,7 +53,6 @@ def test_iommu_id_mapping(_, __):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cmdqv_alignment(_, __):
@@ -322,7 +320,6 @@ def test_sva_invalidate_range_size(_, __):  # pylint: disable=too-many-branches
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cmdqv_hyp_own_supports_cmd(_, logger):

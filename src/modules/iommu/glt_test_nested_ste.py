@@ -42,8 +42,8 @@ half commit f3c1d372dbb8 fixes. Discovery therefore prefers endpoints where
 pciutils detects ATS but falls back to the remaining endpoints so the CFG half
 still runs.
 
-Plan: standard and stress (binds vfio-pci, runs bpftrace; omitted from
-default sanity -- both decorators below register it on those two plans).
+Plan: standard and stress (binds vfio-pci and runs bpftrace; both decorators
+below register it on those two plans).
 
 The companion bpftrace observer ``nested_ste/observe_ste.bt`` is licensed
 GPL-2.0 (bpftrace scripts link the GPL-only kernel BPF ABI); it ships beside
@@ -465,8 +465,8 @@ def test_nested_ste_hitless_update(sd, logger):
     Unpatched kernels take the disruptive path (missing either the MEV or
     the EATS safe-bit relaxation); fully patched kernels remain hitless.
 
-    Registered on the standard and stress plans (not sanity): requires vfio-pci
-    bind and bpftrace, and is intended for IOMMU regression validation.
+    Registered on the standard and stress plans: requires vfio-pci bind and
+    bpftrace, and is intended for IOMMU regression validation.
 
     Patch series: https://git.kernel.org/torvalds/c/2781f2a930ab
     (arm_smmu_get_ste_update_safe) -> https://git.kernel.org/torvalds/c/f3c1d372dbb8

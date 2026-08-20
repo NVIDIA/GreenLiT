@@ -25,7 +25,6 @@ from common.nv_device import NvDev
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra241_gpio_device(_, logger):
@@ -73,7 +72,6 @@ def test_tegra241_gpio_device(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra410_gpio_device(_, logger):
@@ -106,7 +104,6 @@ def test_tegra410_gpio_device(_, logger):
 
 @GLTCore.GLTRequires.must_fail("gpio", "test_tegra241_gpio_device")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra241_gpio_break_graceful_shutdown(_, __):
@@ -126,7 +123,6 @@ def test_tegra241_gpio_break_graceful_shutdown(_, __):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
@@ -174,7 +170,6 @@ def test_tegra410_gpio_name_collision(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
