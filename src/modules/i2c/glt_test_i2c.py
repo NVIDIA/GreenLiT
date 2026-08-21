@@ -22,6 +22,7 @@ Python script to test I2C.
 import os
 import platform
 import subprocess
+import stat
 import time
 from pathlib import Path
 
@@ -41,23 +42,36 @@ _IPMI_TEGRA_TOPOLOGY_NO_MATCH = "no_match"
 
 
 def _tegra_i2c_devices(prefix: str = "NVDA2017:",
-                       drv: Path = Path("/sys/bus/platform/drivers/tegra-i2c")) -> list[str]:
+                       drv: Path = Path("/sys/bus/platform/drivers/tegra-i2c"),
+                       strict_errors: bool = False) -> list[str]:
     """
     Return sorted tegra-i2c platform devices whose names start with prefix.
     """
-    if not drv.is_dir():
-        return []
-
     try:
         entries = list(drv.iterdir())
+    except FileNotFoundError:
+        return []
     except OSError:
+        if strict_errors:
+            raise
         return []
 
-    return sorted(
-        entry.name
-        for entry in entries
-        if entry.name.startswith(prefix) and entry.is_symlink() and entry.exists()
-    )
+    devices = []
+    for entry in entries:
+        if not entry.name.startswith(prefix):
+            continue
+        try:
+            if not stat.S_ISLNK(entry.lstat().st_mode):
+                continue
+            entry.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            if strict_errors:
+                raise
+            continue
+        devices.append(entry.name)
+    return sorted(devices)
 
 
 def _tegra_i2c_kernel_error_messages(dev_name: str) -> list[str]:
@@ -155,9 +169,14 @@ def _ipmi_over_tegra_i2c_acpi_topology(logger) -> tuple[str, str, Path | None]:
             None,
         )
 
-    parent = _tegra_i2c_parent_from_ipmi_devpath(
-        result.stdout, set(_tegra_i2c_devices(prefix="NVDA"))
-    )
+    try:
+        tegra_i2c_devices = set(_tegra_i2c_devices(prefix="NVDA", strict_errors=True))
+    except OSError as exc:
+        reason = f"Cannot inspect tegra-i2c devices while validating /dev/ipmi0 topology: {exc}"
+        logger.error(reason)
+        return (_IPMI_TEGRA_TOPOLOGY_ERROR, reason, None)
+
+    parent = _tegra_i2c_parent_from_ipmi_devpath(result.stdout, tegra_i2c_devices)
     if parent is None:
         return (
             _IPMI_TEGRA_TOPOLOGY_NO_MATCH,
@@ -445,7 +464,12 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
         GLTCore.GLTTestResult.skip(
             "System is not ACPI-booted; this test only runs on ACPI-booted systems.")
 
-    devices = _tegra_i2c_devices()
+    try:
+        devices = _tegra_i2c_devices(strict_errors=True)
+    except OSError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to inspect tegra-i2c devices before rebind: {error}"
+        )
     if not devices:
         GLTCore.GLTTestResult.skip("No tegra-i2c device bound to the platform driver.")
     dev_name = devices[0]
@@ -512,7 +536,12 @@ def test_tegra410_i2c_device(_, logger):
         GLTCore.GLTTestResult.skip(
             "System is not ACPI-booted; Tegra410 I2C ACPI coverage is not applicable.")
 
-    devices = _tegra_i2c_devices()
+    try:
+        devices = _tegra_i2c_devices(strict_errors=True)
+    except OSError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to inspect Tegra410 I2C devices before rebind: {error}"
+        )
     if not devices:
         GLTCore.GLTTestResult.fail(
             "No NVDA2017 Tegra410 I2C device is bound to tegra-i2c. "
@@ -539,7 +568,15 @@ def test_tegra410_i2c_device(_, logger):
                 "Include kernel commits 0c0e440b0c93 and 59717f260183 to fix Tegra410 "
                 "I2C support.")
 
-        if dev_name not in _tegra_i2c_devices():
+        try:
+            rebound_devices = _tegra_i2c_devices(strict_errors=True)
+        except OSError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to inspect tegra-i2c devices after rebinding "
+                f"{dev_name}: {error}"
+            )
+
+        if dev_name not in rebound_devices:
             GLTCore.GLTTestResult.fail(
                 f"{dev_name} is not bound to tegra-i2c after rebind. "
                 "Include kernel commit 59717f260183 to add Tegra410 support.")

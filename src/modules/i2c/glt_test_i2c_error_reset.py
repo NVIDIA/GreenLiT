@@ -101,6 +101,7 @@ _FIELD_GRAMMARS = {
 }
 _RESET_RETURN, _RESET_ASSERT_VALUE, _RESET_DEASSERT_VALUE, _RESET_REGISTER = -2, 1, 0, 0x0A8
 _TRACE_STAT_KEYS = ("overrun", "commit overrun", "dropped events")
+_BIND_RESTORE_POLLS, _BIND_RESTORE_SLEEP_SECONDS = 5, 0.2
 
 
 @dataclass
@@ -127,18 +128,25 @@ def _instance_event_dir(trace_root: Path, event: str) -> Path:
     return _instance_dir(trace_root) / "events" / _TRACE_GROUP / event
 
 
-def _write_text(path: Path, value: str, mode: str = "w") -> None:
-    opener = (lambda path, _flags: os.open(path, os.O_WRONLY | os.O_CLOEXEC)) if mode == "a" else None
-    with open(path, "w", encoding="ascii", opener=opener) as handle:
-        handle.write(value)
-
-
 def _path_present(path: Path) -> bool:
     try:
         path.lstat()
     except FileNotFoundError:
         return False
     return True
+
+
+def _write_text(path: Path, value: str) -> None:
+    with open(path, "w", encoding="ascii") as handle:
+        handle.write(value)
+
+
+def _write_kprobe_command(path: Path, command: str) -> None:
+    file_fd = os.open(path, os.O_WRONLY | os.O_CLOEXEC)
+    try:
+        os.write(file_fd, (command + "\n").encode("ascii"))
+    finally:
+        os.close(file_fd)
 
 
 def _tracefs_root() -> Path | None:
@@ -270,26 +278,42 @@ def _fixed_artifacts(trace_root: Path) -> list[str]:
 def _restore_binding(device: str) -> list[str]:
     if not _valid_device_name(device):
         return [f"Invalid device token for bind restoration: {device!r}"]
-    if device in _tegra_i2c_devices(prefix="NVDA"):
-        return []
+    try:
+        if device in _tegra_i2c_devices(prefix="NVDA", strict_errors=True):
+            return []
+    except OSError as exc:
+        return [f"Cannot inspect tegra-i2c binding before restore for {device}; refusing bind write: {exc}"]
     errors = []
-    polls, sleep_seconds = 5, 0.2
-    for attempt in range(polls):
+    for attempt in range(_BIND_RESTORE_POLLS):
         try:
             _write_text(Path("/sys/bus/platform/drivers/tegra-i2c/bind"), device)
         except OSError as exc:
             errors.append(f"write tegra-i2c bind for {device}: {exc}")
-        if device in _tegra_i2c_devices(prefix="NVDA"):
-            return []
-        if attempt + 1 < polls:
-            time.sleep(sleep_seconds)
+        try:
+            if device in _tegra_i2c_devices(prefix="NVDA", strict_errors=True):
+                return []
+        except OSError as exc:
+            errors.append(
+                f"Cannot inspect tegra-i2c binding after bind restore for {device}; "
+                f"refusing further bind writes: {exc}"
+            )
+            return errors
+        if attempt + 1 < _BIND_RESTORE_POLLS:
+            time.sleep(_BIND_RESTORE_SLEEP_SECONDS)
     return errors or [f"{device} is still absent from the tegra-i2c driver after bind restore"]
 
 
-def _stop_instance_tracing(trace_root: Path) -> str | None:
+def _stop_instance_tracing(trace_root: Path, instance_present: bool | None = None) -> str | None:
+    instance = _instance_dir(trace_root)
+    if instance_present is None:
+        try:
+            instance_present = _path_present(instance)
+        except OSError as exc:
+            return f"Cannot inspect private trace instance before stopping tracing: {exc}"
+    if not instance_present:
+        return None
     try:
-        if _path_present(_instance_dir(trace_root)):
-            _write_text(_instance_dir(trace_root) / "tracing_on", "0")
+        _write_text(instance / "tracing_on", "0")
     except OSError as exc:
         return f"Cannot stop private trace instance: {exc}"
     return None
@@ -297,27 +321,63 @@ def _stop_instance_tracing(trace_root: Path) -> str | None:
 
 def _cleanup_owned_tracefs(trace_root: Path, device: str) -> list[str]:
     errors = _restore_binding(device)
-    stop_error = _stop_instance_tracing(trace_root)
+    if errors:
+        return errors
+
+    instance = _instance_dir(trace_root)
+    try:
+        instance_present = _path_present(instance)
+    except OSError as exc:
+        errors.append(f"Cannot inspect private trace instance {instance} before cleanup: {exc}")
+        return errors
+
+    private_event_presence = []
+    for event in _TRACE_EVENTS:
+        event_dir = _instance_event_dir(trace_root, event)
+        try:
+            private_event_presence.append((event, event_dir, _path_present(event_dir)))
+        except OSError as exc:
+            errors.append(f"Cannot inspect private event {_TRACE_GROUP}/{event} before cleanup: {exc}")
+            return errors
+
+    global_event_presence = []
+    for event in _TRACE_EVENTS:
+        event_dir = _event_dir(trace_root, event)
+        try:
+            global_event_presence.append((event, event_dir, _path_present(event_dir)))
+        except OSError as exc:
+            errors.append(f"Cannot inspect kprobe event {_TRACE_GROUP}/{event} before cleanup: {exc}")
+            return errors
+
+    stop_error = _stop_instance_tracing(trace_root, instance_present)
     if stop_error:
         errors.append(stop_error)
-    for event in _TRACE_EVENTS:
+        return errors
+
+    for event, event_dir, event_present in private_event_presence:
+        if not event_present:
+            continue
         try:
-            if _path_present(_instance_event_dir(trace_root, event)):
-                _write_text(_instance_event_dir(trace_root, event) / "enable", "0")
+            _write_text(event_dir / "enable", "0")
         except OSError as exc:
             errors.append(f"Cannot disable private event {_TRACE_GROUP}/{event}: {exc}")
     try:
-        if _path_present(_instance_dir(trace_root)):
-            _instance_dir(trace_root).rmdir()
+        if instance_present:
+            instance.rmdir()
     except OSError as exc:
-        errors.append(f"Cannot remove private trace instance {_instance_dir(trace_root)}: {exc}")
-    for command, event in zip(_DELETE_KPROBE_COMMANDS, _TRACE_EVENTS):
+        errors.append(f"Cannot remove private trace instance {instance}: {exc}")
+    for command, (event, _event_dir_path, event_present) in zip(_DELETE_KPROBE_COMMANDS, global_event_presence):
+        if not event_present:
+            continue
         try:
-            if _path_present(_event_dir(trace_root, event)):
-                _write_text(trace_root / "kprobe_events", command, "a")
+            _write_kprobe_command(trace_root / "kprobe_events", command)
         except OSError as exc:
             errors.append(f"Cannot delete kprobe event {_TRACE_GROUP}/{event}: {exc}")
-    remaining = _fixed_artifacts(trace_root)
+    try:
+        remaining = _fixed_artifacts(trace_root)
+    except OSError as exc:
+        remaining = []
+        errors.append(f"Cannot inspect fixed tracefs artifacts after cleanup: {exc}")
     if remaining:
         errors.append("Owned tracefs artifacts remain: " + ", ".join(remaining))
     if not errors:
@@ -338,7 +398,11 @@ def _recover_or_refuse_foreign_artifacts(trace_root: Path) -> tuple[str, str]:
     if marker is not None:
         errors = _cleanup_owned_tracefs(trace_root, marker["selected_device"])
         return (_STATUS_FAIL, "Stale cleanup failed: " + "; ".join(errors)) if errors else (_STATUS_OK, "")
-    artifacts = _fixed_artifacts(trace_root)
+    try:
+        artifacts = _fixed_artifacts(trace_root)
+    except OSError as exc:
+        reason = f"Cannot inspect fixed tracefs artifacts: {exc}; "
+        return (_STATUS_FAIL, reason + "refusing to touch fixed tracefs artifacts without same-boot ownership.")
     if artifacts:
         reason = "Fixed tracefs artifacts already exist without a valid same-boot marker: "
         return (_STATUS_FAIL, reason + ", ".join(artifacts))
@@ -394,7 +458,11 @@ def _select_device(logger) -> tuple[tuple[str, str], str | None]:
             return (_inconclusive(
                 f"{reason} is not a supported Grace/Tegra194 ACPI I2C controller", _STATUS_SKIP), None)
         return ((_STATUS_FAIL, f"Unexpected Tegra I2C topology result: {reason}"), None)
-    if reason not in _tegra_i2c_devices(prefix="NVDA"):
+    try:
+        bound_devices = _tegra_i2c_devices(prefix="NVDA", strict_errors=True)
+    except OSError as exc:
+        return ((_STATUS_FAIL, f"Cannot inspect tegra-i2c binding for {reason}: {exc}"), None)
+    if reason not in bound_devices:
         return ((_STATUS_FAIL, f"{reason} is not bound to tegra-i2c."), None)
     return ((_STATUS_OK, ""), reason)
 
@@ -402,7 +470,7 @@ def _select_device(logger) -> tuple[tuple[str, str], str | None]:
 def _setup_tracefs(trace_root: Path) -> tuple[str, str]:
     try:
         for command in _DEVICE_RESET_KPROBE_COMMANDS:
-            _write_text(trace_root / "kprobe_events", command, "a")
+            _write_kprobe_command(trace_root / "kprobe_events", command)
         instance = _instance_dir(trace_root)
         instance.mkdir()
         _write_text(instance / "tracing_on", "0")
@@ -415,7 +483,7 @@ def _setup_tracefs(trace_root: Path) -> tuple[str, str]:
             _write_text(event_dir / "enable", "1")
         _write_text(instance / "tracing_on", "1")
     except OSError as exc:
-        return _inconclusive(f"Cannot configure tracefs proof: {exc}", _STATUS_SKIP)
+        return _inconclusive(f"Cannot configure tracefs proof: {exc}")
     return (_STATUS_OK, "")
 
 
@@ -523,8 +591,7 @@ def _parse_trace_lifecycle(trace_text: str) -> tuple[str, str]:
                 acpi_reset_complete = True
                 continue
             if cycle.reset_writes != [_RESET_ASSERT_VALUE, _RESET_DEASSERT_VALUE]:
-                return (_STATUS_FAIL, "635bf3c8853359a987c5c909d424df92a0d3016a "
-                        "ACPI-without-_RST fallback discriminator: missing reset assert/deassert pair.")
+                return (_STATUS_FAIL, "ACPI reset fallback discriminator: missing reset assert/deassert pair.")
             complete += 1
     if active:
         return _inconclusive("trace ended before tegra_i2c_init returned")
@@ -625,12 +692,23 @@ def _run_tracefs_proof(trace_root: Path, context: dict, logger) -> tuple[str, st
         return (_STATUS_FAIL, f"Failed to capture kernel log checkpoint before rebind: {exc}")
     rebound, rebind_reason = _dev_unbind_bind(device)
     mutation_failure = f"Controlled unbind/bind cycle on {device} failed: {rebind_reason}" if not rebound else None
-    if mutation_failure is None and device not in _tegra_i2c_devices(prefix="NVDA"):
-        mutation_failure = f"{device} is not bound to tegra-i2c after the controlled rebind."
+    if mutation_failure is None:
+        try:
+            bound_devices = _tegra_i2c_devices(prefix="NVDA", strict_errors=True)
+        except OSError as exc:
+            mutation_failure = f"Cannot inspect tegra-i2c binding after controlled rebind for {device}: {exc}"
+        else:
+            if device not in bound_devices:
+                mutation_failure = f"{device} is not bound to tegra-i2c after the controlled rebind."
     if mutation_failure is not None and (restore_errors := _restore_binding(device)):
         return (_STATUS_FAIL, "Binding restore failed after controlled rebind: " + "; ".join(restore_errors))
     stop_error = _stop_instance_tracing(trace_root)
-    pending_stop = _inconclusive(stop_error) if stop_error else None
+    if stop_error:
+        context["tracefs_cleanup_blocked"] = True
+        if mutation_failure is not None:
+            return (_STATUS_FAIL, f"{mutation_failure}; {stop_error}")
+        return _inconclusive(stop_error)
+
     healthy, reason = _run_ipmitool_mc_info(logger)
     if not healthy:
         return (_STATUS_FAIL, reason)
@@ -643,8 +721,8 @@ def _run_tracefs_proof(trace_root: Path, context: dict, logger) -> tuple[str, st
         return (_STATUS_FAIL, "Kernel reported Tegra I2C errors after rebind: " + "; ".join(kernel_errors))
     if warning := _tegra_i2c_init_warning(kernel_log):
         return (_STATUS_FAIL, f"Kernel reported tegra_i2c_init warning after rebind: {warning}")
-    if mutation_failure is not None or pending_stop is not None:
-        return (_STATUS_FAIL, mutation_failure) if mutation_failure is not None else pending_stop
+    if mutation_failure is not None:
+        return (_STATUS_FAIL, mutation_failure)
     stat_errors = _trace_stats_overrun_or_dropped(trace_root)
     if stat_errors:
         return _inconclusive("Private trace instance lost events: " + "; ".join(stat_errors))
@@ -655,6 +733,15 @@ def _run_tracefs_proof(trace_root: Path, context: dict, logger) -> tuple[str, st
 def _cleanup_after_outcome(context: dict) -> list[str]:
     if not context["marker_active"]:
         return []
+    if context["tracefs_cleanup_blocked"]:
+        errors = _restore_binding(context["selected_device"])
+        detail = (
+            "Tracefs cleanup deferred because stopping the private trace instance failed; "
+            "fixed tracefs artifacts and cleanup marker are retained for later same-boot recovery."
+        )
+        if errors:
+            detail += " Binding restore errors: " + "; ".join(errors)
+        return [detail]
     try:
         return _cleanup_owned_tracefs(context["trace_root"], context["selected_device"])
     except Exception as exc:
@@ -672,7 +759,12 @@ def test_tegra_i2c_acpi_error_reset(_, logger):
     PATCH: https://git.kernel.org/torvalds/c/635bf3c8853359a987c5c909d424df92a0d3016a
     """
     lock_fd = None
-    context = {"trace_root": None, "selected_device": None, "marker_active": False}
+    context = {
+        "trace_root": None,
+        "selected_device": None,
+        "marker_active": False,
+        "tracefs_cleanup_blocked": False,
+    }
     outcome = (_STATUS_SKIP, "tracefs is not mounted; device_reset proof is non-conclusive.")
     active_base_exception = None
     try:
