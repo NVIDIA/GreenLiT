@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Helpers for running perf selftests across perf versions."""
+"""Helpers for running perf commands and selftests across perf versions."""
 
+import json
 import platform
 import re
 import subprocess
@@ -25,6 +26,7 @@ from typing import Iterable, Optional
 
 PERF_VERSION_TIMEOUT_SECONDS = 5
 PERF_TEST_TIMEOUT_SECONDS = 120
+PERF_LIST_TIMEOUT_SECONDS = 30
 
 
 class _PerfRejectRank(IntEnum):
@@ -52,6 +54,46 @@ class PerfTestResult:
     status: PerfTestStatus
     reason: str
     test_name: Optional[str] = None
+
+
+def get_perf_list_json(perf_cmd: str, logger) -> list:
+    """Return parsed JSON entries from ``perf list -j``."""
+    try:
+        cmd_output = subprocess.run(
+            [perf_cmd, "list", "-j"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=PERF_LIST_TIMEOUT_SECONDS,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = " ".join((exc.stderr or "").splitlines())
+        logger.error("perf list failed: %s", stderr or exc)
+        raise ValueError(
+            f"perf list failed with return code {exc.returncode}: "
+            f"{stderr or 'no stderr output'}"
+        ) from exc
+    except OSError as exc:
+        logger.error("Failed to execute perf list: %s", exc)
+        raise ValueError(f"Failed to execute perf list: {exc}") from exc
+    except subprocess.TimeoutExpired as exc:
+        logger.error("perf list timed out after %s seconds", exc.timeout)
+        raise ValueError(
+            f"perf list timed out after {exc.timeout} seconds"
+        ) from exc
+
+    try:
+        perf_list_json = json.loads(cmd_output.stdout)
+    except json.JSONDecodeError as exc:
+        logger.error("Failed to parse perf list JSON output: %s", exc)
+        raise ValueError(
+            f"Failed to parse perf list JSON output: {exc}"
+        ) from exc
+
+    if not isinstance(perf_list_json, list):
+        raise ValueError("perf list JSON output is not an array")
+    return perf_list_json
 
 
 def get_perf_version(logger=None) -> str:
