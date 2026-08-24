@@ -327,6 +327,110 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             self.assertIsNone(resolve_perf_command()[0])
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_allow_unmatched_false_keeps_no_fallback(
+        self, mock_run
+    ):
+        """allow_unmatched=False preserves the strict no-fallback contract."""
+        mock_run.return_value = self._completed(stdout="perf version 6.18.0\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.18/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertIsNone(
+                resolve_perf_command(allow_unmatched=False)[0]
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_allow_unmatched_returns_probe_clean_candidate(
+        self, mock_run
+    ):
+        """allow_unmatched=True falls back to the first probe-clean candidate."""
+        mock_run.return_value = self._completed(stdout="perf version 6.18.0\n")
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates",
+            return_value=["/usr/lib/linux-tools/6.18/perf"],
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(allow_unmatched=True)[0],
+                "/usr/lib/linux-tools/6.18/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_allow_unmatched_still_prefers_kernel_match(
+        self, mock_run
+    ):
+        """allow_unmatched=True still returns a kernel-matched candidate first."""
+        candidates = [
+            "/usr/lib/linux-tools/6.18/perf",
+            "/usr/lib/linux-tools/6.17/perf",
+        ]
+        results = {
+            "/usr/lib/linux-tools/6.18/perf": self._completed(
+                stdout="perf version 6.18.0\n"
+            ),
+            "/usr/lib/linux-tools/6.17/perf": self._completed(
+                stdout="perf version 6.17.13\n"
+            ),
+        }
+        mock_run.side_effect = lambda cmd, **_: results[cmd[0]]
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(allow_unmatched=True)[0],
+                "/usr/lib/linux-tools/6.17/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_resolve_perf_command_allow_unmatched_still_prefers_compatible(
+        self, mock_run
+    ):
+        """A kernel-compatible candidate beats the unmatched fallback.
+
+        The unmatched candidate is probed first, so this pins the precedence
+        exact > compatible > unmatched rather than first-probe-clean wins.
+        """
+        candidates = [
+            "/usr/lib/linux-tools/6.18/perf",
+            "/usr/lib/linux-tools/6.17.13-mpam/perf",
+        ]
+        results = {
+            # Different kernel line entirely -> only usable as a fallback.
+            "/usr/lib/linux-tools/6.18/perf": self._completed(
+                stdout="perf version 6.18.0\n"
+            ),
+            # Tool dir shares the kernel base version, so it is compatible,
+            # but neither the perf version nor the dir is an exact match.
+            "/usr/lib/linux-tools/6.17.13-mpam/perf": self._completed(
+                stdout="perf version 6.99.0\n"
+            ),
+        }
+        mock_run.side_effect = lambda cmd, **_: results[cmd[0]]
+
+        with self.mock.patch(
+            "common.perf_utils._get_perf_candidates", return_value=candidates
+        ), self.mock.patch(
+            "common.perf_utils.platform.uname",
+            return_value=self.mock.Mock(release="6.17.13-mpam+"),
+        ):
+            self.assertEqual(
+                resolve_perf_command(allow_unmatched=True)[0],
+                "/usr/lib/linux-tools/6.17.13-mpam/perf",
+            )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_rejects_similar_version_path_prefix(self, mock_run):
         """Do not match linux-tools/6.17.130 when the running kernel is 6.17.13."""
         mock_run.return_value = self._completed(stdout="perf version 6.17.130\n")

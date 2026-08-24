@@ -44,6 +44,8 @@ class PostHooks:
         self.postfail = None
         self.postwarn = None
 
+    # Pylint 3 does not know the Pylint 4 too-many-positional-arguments message.
+    # pylint: disable=unknown-option-value
     # pylint: disable=too-many-arguments,too-many-positional-arguments
     @classmethod
     def create(
@@ -68,6 +70,7 @@ class PostHooks:
         hooks.postwarn = postwarn if postwarn is not None else (lambda _s, _a, _l: None)
         return hooks
     # pylint: enable=too-many-arguments,too-many-positional-arguments
+    # pylint: enable=unknown-option-value
 
     @staticmethod
     def for_conditional_reboot(trigger_key: str, condition_fn: Callable[[], bool]):
