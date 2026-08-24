@@ -13,16 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-Python script to verify the ARM64 MPAM resctrl filesystem can be mounted.
-"""
+"""ARM64 MPAM and resctrl validation tests."""
+# pylint: disable=too-many-lines
 
 from contextlib import contextmanager
 import glob
+import mmap
 import os
 import platform
 import re
 import signal
+import struct
 import subprocess
 import threading
 import time
@@ -33,6 +34,7 @@ from common.nv_device import NvDev
 from scripts import check_kernel_config
 
 
+PROC_IOMEM = "/proc/iomem"
 RESCTRL_FS_TYPE = "resctrl"
 RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
 PROC_FILESYSTEMS = "/proc/filesystems"
@@ -63,19 +65,22 @@ def _resctrl_fs_supported() -> bool:
         return False
 
 
+def _resctrl_mount_points():
+    """Return every mount point currently using the resctrl filesystem."""
+    with open(PROC_MOUNTS, "r", encoding="utf-8") as f:
+        return [
+            fields[1] for line in f
+            if len(fields := line.split()) >= 3
+            and fields[2] == RESCTRL_FS_TYPE
+        ]
+
+
 def _resctrl_is_mounted() -> bool:
-    """Return True if a resctrl filesystem is mounted at RESCTRL_MOUNT_POINT."""
+    """Return True if resctrl is mounted at RESCTRL_MOUNT_POINT."""
     try:
-        with open(PROC_MOUNTS, "r", encoding="utf-8") as f:
-            for line in f:
-                fields = line.split()
-                if (len(fields) >= 3
-                        and fields[1] == RESCTRL_MOUNT_POINT
-                        and fields[2] == RESCTRL_FS_TYPE):
-                    return True
+        return RESCTRL_MOUNT_POINT in _resctrl_mount_points()
     except OSError:
         return False
-    return False
 
 
 @contextmanager
@@ -159,6 +164,345 @@ def _sum_l3_occupancy(occupancy_files) -> int:
     return total
 
 
+def _mpam_msc_regions():
+    """Return MPAM MSC MMIO regions from /proc/iomem."""
+    msc_iomem_re = re.compile(
+        r"^\s*(?P<start>[0-9a-fA-F]+)-(?P<end>[0-9a-fA-F]+)\s+:\s+"
+        r"(?P<name>mpam_msc\.\S+)\s+MPAM:MSC\s*$"
+    )
+    regions = []
+    with open(PROC_IOMEM, "r", encoding="utf-8") as iomem:
+        for line in iomem:
+            match = msc_iomem_re.match(line)
+            if match is None:
+                continue
+            start = int(match.group("start"), 16)
+            end = int(match.group("end"), 16)
+            if start and end >= start:
+                regions.append(
+                    (match.group("name"), start, end - start + 1))
+    return regions
+
+
+def _mpam_read32(registers, offset):
+    """Read a little-endian 32-bit value from an MSC register view."""
+    return struct.unpack_from("<I", registers, offset)[0]
+
+
+def _mpam_read_idr(registers):
+    """Read the complete MPAM feature identification register."""
+    mpamf_idr = 0x0000
+    mpamf_idr_hi = 0x0004
+    idr_ext = 1 << 28
+
+    low = _mpam_read32(registers, mpamf_idr)
+    high = _mpam_read32(registers, mpamf_idr_hi) if low & idr_ext else 0
+    return low | (high << 32)
+
+
+def _mpam_write32(registers, offset, value):
+    """Write a little-endian 32-bit value to an MSC register view."""
+    struct.pack_into("<I", registers, offset, value & 0xFFFFFFFF)
+
+
+def _validate_mpam_init_registers(  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks
+        registers, label):
+    """Validate init-programmed allocation registers for each RIS/PARTID."""
+    mpamf_iidr = 0x0018
+    mpamf_cpor_idr = 0x0030
+    mpamf_ccap_idr = 0x0038
+    mpamf_mbw_idr = 0x0040
+    mpamf_partid_nrw_idr = 0x0050
+    mpamcfg_part_sel = 0x0100
+    mpamcfg_cmax = 0x0108
+    mpamcfg_cmin = 0x0110
+    mpamcfg_mbw_min = 0x0200
+    mpamcfg_mbw_max = 0x0208
+    mpamcfg_cpbm = 0x1000
+
+    idr_has_ccap_part = 1 << 24
+    idr_has_cpor_part = 1 << 25
+    idr_has_mbw_part = 1 << 26
+    idr_has_partid_nrw = 1 << 31
+    idr_has_ris = 1 << 32
+    ccap_idr_has_cmin = 1 << 29
+    ccap_idr_no_cmax = 1 << 30
+    mbw_idr_has_min = 1 << 10
+    mbw_idr_has_max = 1 << 11
+    mbw_max_hardlim = 1 << 31
+    part_sel_internal = 1 << 16
+    t241_msc_iidr = 0x2410036B
+
+    failures = []
+    checks = 0
+
+    original_selector = _mpam_read32(registers, mpamcfg_part_sel)
+    ris_count = 0
+    try:
+        _mpam_write32(registers, mpamcfg_part_sel, 0)
+        initial_idr = _mpam_read_idr(registers)
+        iidr = _mpam_read32(registers, mpamf_iidr)
+        ris_count = (
+            ((initial_idr >> 56) & 0xF) + 1
+            if initial_idr & idr_has_ris else 1
+        )
+        ris_features = []
+
+        for ris in range(ris_count):
+            _mpam_write32(registers, mpamcfg_part_sel, ris << 24)
+            idr = _mpam_read_idr(registers)
+            partid_max = idr & 0xFFFF
+            if idr & idr_has_partid_nrw:
+                partid_max = min(
+                    partid_max,
+                    _mpam_read32(
+                        registers, mpamf_partid_nrw_idr) & 0xFFFF
+                )
+            ccap_idr = (
+                _mpam_read32(registers, mpamf_ccap_idr)
+                if idr & idr_has_ccap_part else 0
+            )
+            cpor_idr = (
+                _mpam_read32(registers, mpamf_cpor_idr)
+                if idr & idr_has_cpor_part else 0
+            )
+            mbw_idr = (
+                _mpam_read32(registers, mpamf_mbw_idr)
+                if idr & idr_has_mbw_part else 0
+            )
+            ris_features.append(
+                (idr, ccap_idr, cpor_idr, mbw_idr, partid_max))
+
+        for ris, features in enumerate(ris_features):
+            idr, ccap_idr, cpor_idr, mbw_idr, partid_max = features
+            for partid in range(min(2, partid_max + 1)):
+                selector = (ris << 24) | partid
+                if idr & idr_has_partid_nrw:
+                    selector |= part_sel_internal
+                _mpam_write32(registers, mpamcfg_part_sel, selector)
+
+                if idr & idr_has_ccap_part:
+                    cmax_width = ccap_idr & 0x3F
+                    if cmax_width and not (
+                            ccap_idr & ccap_idr_no_cmax):
+                        actual = (
+                            _mpam_read32(registers, mpamcfg_cmax) & 0xFFFF)
+                        expected = (
+                            (1 << cmax_width) - 1) << (16 - cmax_width)
+                        checks += 1
+                        if (actual & expected) != expected:
+                            failures.append(
+                                f"{label} RIS {ris} PARTID {partid} CMAX: "
+                                f"expected allowed bits 0x{expected:x}, read "
+                                f"0x{actual:04x}"
+                            )
+
+                    if ccap_idr & ccap_idr_has_cmin:
+                        actual = (
+                            _mpam_read32(registers, mpamcfg_cmin) & 0xFFFF)
+                        checks += 1
+                        if actual != 0:
+                            failures.append(
+                                f"{label} RIS {ris} PARTID {partid} CMIN: "
+                                f"expected 0x0000, read 0x{actual:04x}"
+                            )
+
+                cpbm_width = cpor_idr & 0xFFFF
+                for word in range((cpbm_width + 31) // 32):
+                    implemented = min(32, cpbm_width - word * 32)
+                    expected = (
+                        0xFFFFFFFF
+                        if implemented == 32 else (1 << implemented) - 1
+                    )
+                    actual = _mpam_read32(registers, mpamcfg_cpbm + word * 4)
+                    checks += 1
+                    if actual != expected:
+                        failures.append(
+                            f"{label} RIS {ris} PARTID {partid} CPBM word "
+                            f"{word}: expected "
+                            f"0x{expected:08x}, read 0x{actual:08x}"
+                        )
+
+                bwa_width = min(mbw_idr & 0x3F, 16)
+                significant = ((1 << bwa_width) - 1) << (16 - bwa_width)
+                if bwa_width and mbw_idr & mbw_idr_has_min:
+                    actual = _mpam_read32(registers, mpamcfg_mbw_min) & 0xFFFF
+                    expected = 0
+                    if iidr == t241_msc_iidr:
+                        granule = 1 << (16 - bwa_width)
+                        delta = (5 * 0xFFFF) // 100 - 1
+                        reduced = (
+                            significant - delta
+                            if significant > delta else 0
+                        )
+                        expected = max(reduced, granule)
+                    checks += 1
+                    if (actual & significant) != (expected & significant):
+                        failures.append(
+                            f"{label} RIS {ris} PARTID {partid} MBW_MIN: "
+                            f"expected implemented "
+                            f"bits 0x{expected & significant:04x}, read "
+                            f"0x{actual:04x} (mask 0x{significant:04x})"
+                        )
+
+                if bwa_width and mbw_idr & mbw_idr_has_max:
+                    actual = _mpam_read32(registers, mpamcfg_mbw_max)
+                    checks += 1
+                    if (actual & significant) != significant:
+                        failures.append(
+                            f"{label} RIS {ris} PARTID {partid} MBW_MAX: "
+                            f"expected implemented "
+                            f"bits 0x{significant:04x}, read "
+                            f"0x{actual & 0xFFFF:04x}"
+                        )
+
+                    max_limit = (mbw_idr >> 8) & 0x3
+                    if max_limit != 3:
+                        expected_hardlim = int(max_limit == 2)
+                        actual_hardlim = int(bool(actual & mbw_max_hardlim))
+                        if actual_hardlim != expected_hardlim:
+                            failures.append(
+                                f"{label} RIS {ris} PARTID {partid} MBW_MAX "
+                                f"HARDLIM: expected "
+                                f"{expected_hardlim} for MAX_LIM={max_limit}, "
+                                f"read {actual_hardlim}"
+                            )
+    finally:
+        _mpam_write32(registers, mpamcfg_part_sel, original_selector)
+
+    return checks, ris_count, failures
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_driver_init_registers(  # pylint: disable=too-many-branches,too-many-locals
+        _, __):
+    """Validate allocation defaults programmed during MPAM driver init.
+
+    Skips when CONFIG_ARM64_MPAM is not enabled or none of the target
+    allocation registers is supported. Fails if resctrl is already
+    mounted so driver-init defaults can be observed without changing a
+    caller-owned mount. Checks capability-gated CMAX, CMIN, CPBM, MBW_MIN,
+    and MBW_MAX values for up to the first two supported PARTIDs on every
+    RIS.
+
+    Raw /dev/mem access cannot synchronize PART_SEL with the bound driver or
+    enforce the MSC CPU-accessibility mask. Replace it with a kernel-mediated
+    snapshot interface when one becomes available.
+    """
+    dev_mem = "/dev/mem"
+    platform_device_path = "/sys/bus/platform/devices"
+
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip(
+            "This is not an NVIDIA Vera CPU; test is Vera-specific.")
+
+    mpam_config = "CONFIG_ARM64_MPAM"
+    kconfig_path = "/boot/config-" + platform.uname().release
+    try:
+        kconfig = check_kernel_config.parse_kconfig(kconfig_path)
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.skip(
+            f"Kernel config not found at {kconfig_path}; "
+            f"cannot verify {mpam_config}."
+        )
+    mpam = kconfig.get(mpam_config)
+    if mpam != "y":
+        GLTCore.GLTTestResult.skip(
+            f"{mpam_config} is not enabled (found {mpam!r}); MPAM unavailable."
+        )
+
+    try:
+        resctrl_mounts = _resctrl_mount_points()
+    except OSError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot determine resctrl mount state from {PROC_MOUNTS}: "
+            f"{error}"
+        )
+    if resctrl_mounts:
+        GLTCore.GLTTestResult.fail(
+            "resctrl is mounted at "
+            + ", ".join(resctrl_mounts)
+            + "; unmount it before running this test so MPAM driver-init "
+            "defaults can be observed."
+        )
+
+    regions = []
+    try:
+        regions = _mpam_msc_regions()
+        if not regions:
+            GLTCore.GLTTestResult.fail(
+                "No device-specific MPAM MSC MMIO regions were found.")
+    except OSError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot read MPAM MSC resources from {PROC_IOMEM}: {error}")
+
+    unbound = [
+        name for name, _, _ in regions
+        if not os.path.islink(
+            os.path.join(platform_device_path, name, "driver"))
+    ]
+    if unbound:
+        GLTCore.GLTTestResult.fail(
+            "MPAM MSC driver initialization is not complete for: "
+            + ", ".join(unbound)
+        )
+
+    checked_registers = 0
+    failures = []
+    access_errors = []
+    for name, base, size in regions:
+        page_size = mmap.PAGESIZE
+        map_base = base & ~(page_size - 1)
+        register_base = base - map_base
+        map_length = (
+            register_base + size + page_size - 1) & ~(page_size - 1)
+        descriptor = None
+        try:
+            descriptor = os.open(dev_mem, os.O_RDWR | os.O_SYNC)
+            with mmap.mmap(
+                    descriptor, map_length, flags=mmap.MAP_SHARED,
+                    prot=mmap.PROT_READ | mmap.PROT_WRITE,
+                    offset=map_base) as mapping:
+                with memoryview(mapping)[
+                        register_base:register_base + size] as registers:
+                    checks, _ris_count, register_failures = (
+                        _validate_mpam_init_registers(
+                            registers, f"{name} @ 0x{base:x}")
+                    )
+        except (OSError, ValueError, struct.error) as error:
+            access_errors.append(
+                f"{name} @ 0x{base:x} through {dev_mem}: {error}")
+            continue
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        checked_registers += checks
+        failures.extend(register_failures)
+
+    if failures:
+        GLTCore.GLTTestResult.fail(
+            "MPAM MSC driver-init register validation failed:\n"
+            + "\n".join(f"- {failure}" for failure in failures)
+            + "\nKernel commit 09b89d2 should be backported."
+        )
+    if access_errors:
+        GLTCore.GLTTestResult.fail(
+            "Raw access was unavailable for one or more MPAM MSCs:\n"
+            + "\n".join(f"- {error}" for error in access_errors)
+        )
+    if checked_registers == 0:
+        GLTCore.GLTTestResult.skip(
+            "No discovered MPAM MSC advertises CMAX, CMIN, CPBM, "
+            "MBW_MIN, or MBW_MAX. driver-init register validation is not "
+            "applicable."
+        )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_driver_init_registers")
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
