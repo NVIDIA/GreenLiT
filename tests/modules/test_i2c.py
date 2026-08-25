@@ -52,8 +52,8 @@ class TestI2C(GLTTestBase):
         """Missing tegra-i2c driver sysfs directory means no devices."""
         with TemporaryDirectory() as temp_dir:
             missing = Path(temp_dir) / "missing-i2c-driver"
-
-            self.assertEqual(_tegra_i2c_devices(drv=missing), [])
+            for strict_errors in (False, True):
+                self.assertEqual(_tegra_i2c_devices(drv=missing, strict_errors=strict_errors), [])
 
     def test_tegra_i2c_devices_unreadable_driver_returns_empty(self):
         """Sysfs enumeration errors should make discovery fail closed."""
@@ -63,8 +63,48 @@ class TestI2C(GLTTestBase):
             driver = Path(temp_dir) / "drivers" / "tegra-i2c"
             driver.mkdir(parents=True)
 
-            with mock.patch.object(Path, "iterdir", side_effect=OSError("permission denied")):
+            with mock.patch.object(Path, "iterdir", side_effect=PermissionError("permission denied")):
                 self.assertEqual(_tegra_i2c_devices(drv=driver), [])
+                with self.assertRaises(PermissionError):
+                    _tegra_i2c_devices(drv=driver, strict_errors=True)
+
+            target = Path(temp_dir) / "devices" / "NVDA2017:00"
+            target.mkdir(parents=True)
+            (driver / "NVDA2017:00").symlink_to(target, target_is_directory=True)
+            fake_lstat = SimpleNamespace(st_mode=0o120777)
+            with mock.patch.object(Path, "lstat", return_value=fake_lstat), \
+                 mock.patch.object(Path, "stat", side_effect=OSError("controller EIO")):
+                self.assertEqual(_tegra_i2c_devices(drv=driver), [])
+                with self.assertRaises(OSError):
+                    _tegra_i2c_devices(drv=driver, strict_errors=True)
+
+    def test_tegra_i2c_dma_pio_fallback_fails_when_device_inspection_errors(self):
+        """Device inspection errors must fail before dynamic debug or rebind."""
+        mock = GLTTestBase.unittest.mock
+
+        with mock.patch.object(i2c_tests.Path, "is_dir", return_value=True), \
+             mock.patch.object(
+                 i2c_tests, "_tegra_i2c_devices",
+                 side_effect=PermissionError("sysfs denied"),
+             ) as devices, \
+             mock.patch("builtins.open") as open_mock, \
+             mock.patch.object(i2c_tests, "_dev_unbind_bind") as rebind, \
+             mock.patch.object(
+                 i2c_tests.glt_utils, "capture_kernel_log_checkpoint",
+             ) as capture:
+            with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+                i2c_tests.test_tegra_i2c_dma_pio_fallback(self.mock_sd, self.mock_logger)
+
+        devices.assert_called_once_with(strict_errors=True)
+        self.assertIn(
+            "Failed to inspect tegra-i2c devices before rebind",
+            str(ctx.exception),
+        )
+        self.assertIsNone(i2c_tests.test_tegra_i2c_dma_pio_fallback.attr.picked_device)
+        self.assertFalse(i2c_tests.test_tegra_i2c_dma_pio_fallback.attr.dyndbg_enabled)
+        open_mock.assert_not_called()
+        capture.assert_not_called()
+        rebind.assert_not_called()
 
     def test_tegra_i2c_kernel_error_messages_include_device(self):
         """Kernel log fragments must be specific to the selected device."""
@@ -96,7 +136,7 @@ class TestI2C(GLTTestBase):
                  mock.patch.object(
                      i2c_tests, "_tegra_i2c_devices",
                      return_value=["NVDA2017:00", "NVDA2017:01"],
-                 ), \
+                 ) as devices, \
                  mock.patch.object(i2c_tests, "_dev_unbind_bind", return_value=(True, "")) as rebind, \
                  mock.patch.object(
                      i2c_tests.glt_utils, "capture_kernel_log_checkpoint",
@@ -114,6 +154,14 @@ class TestI2C(GLTTestBase):
                 self.assertEqual(get_log.call_count, 2)
                 get_log.assert_called_with(checkpoint)
                 self.assertEqual(
+                    devices.mock_calls,
+                    [
+                        mock.call(strict_errors=True),
+                        mock.call(strict_errors=True),
+                        mock.call(strict_errors=True),
+                    ],
+                )
+                self.assertEqual(
                     i2c_tests.test_tegra410_i2c_device.attr.rebind_devices,
                     ("NVDA2017:00", "NVDA2017:01"),
                 )
@@ -122,6 +170,34 @@ class TestI2C(GLTTestBase):
                 delattr(i2c_tests.test_tegra410_i2c_device.attr, "rebind_devices")
             else:
                 i2c_tests.test_tegra410_i2c_device.attr.rebind_devices = original_rebind_devices
+
+    def test_tegra410_i2c_device_fails_when_preflight_inspection_errors(self):
+        """Preflight inspection errors must fail before the first destructive rebind."""
+        mock = GLTTestBase.unittest.mock
+
+        i2c_tests.test_tegra410_i2c_device.attr.rebind_devices = ("stale",)
+
+        with mock.patch.object(i2c_tests.NvDev, "is_cpu_type", return_value=True), \
+             mock.patch.object(i2c_tests.Path, "is_dir", return_value=True), \
+             mock.patch.object(
+                 i2c_tests, "_tegra_i2c_devices",
+                 side_effect=PermissionError("sysfs denied"),
+             ) as devices, \
+             mock.patch.object(i2c_tests, "_dev_unbind_bind") as rebind, \
+             mock.patch.object(
+                 i2c_tests.glt_utils, "capture_kernel_log_checkpoint",
+             ) as capture:
+            with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+                i2c_tests.test_tegra410_i2c_device(self.mock_sd, self.mock_logger)
+
+        devices.assert_called_once_with(strict_errors=True)
+        self.assertIn(
+            "Failed to inspect Tegra410 I2C devices before rebind",
+            str(ctx.exception),
+        )
+        self.assertIsNone(i2c_tests.test_tegra410_i2c_device.attr.rebind_devices)
+        capture.assert_not_called()
+        rebind.assert_not_called()
 
     def test_tegra410_i2c_device_fails_when_device_is_not_bound_after_rebind(self):
         """A successful bind write must leave the device visible in the driver directory."""
@@ -142,6 +218,38 @@ class TestI2C(GLTTestBase):
                 i2c_tests.test_tegra410_i2c_device(self.mock_sd, self.mock_logger)
 
         self.assertIn("not bound to tegra-i2c after rebind", str(ctx.exception))
+
+    def test_tegra410_i2c_device_fails_when_post_rebind_inspection_errors(self):
+        """Post-rebind inspection errors must not be treated as clean coverage."""
+        mock = GLTTestBase.unittest.mock
+        checkpoint = object()
+
+        with mock.patch.object(i2c_tests.NvDev, "is_cpu_type", return_value=True), \
+             mock.patch.object(i2c_tests.Path, "is_dir", return_value=True), \
+             mock.patch.object(
+                 i2c_tests, "_tegra_i2c_devices",
+                 side_effect=[["NVDA2017:00"], PermissionError("controller EIO")],
+             ) as devices, \
+             mock.patch.object(i2c_tests, "_dev_unbind_bind", return_value=(True, "")) as rebind, \
+             mock.patch.object(
+                 i2c_tests.glt_utils, "capture_kernel_log_checkpoint",
+                 return_value=checkpoint,
+             ) as capture, \
+             mock.patch.object(i2c_tests.glt_utils, "get_kernel_log") as get_log:
+            with self.assertRaises(GLTCore.GLTTestFail) as ctx:
+                i2c_tests.test_tegra410_i2c_device(self.mock_sd, self.mock_logger)
+
+        self.assertEqual(
+            devices.mock_calls,
+            [mock.call(strict_errors=True), mock.call(strict_errors=True)],
+        )
+        self.assertIn(
+            "Failed to inspect tegra-i2c devices after rebinding NVDA2017:00",
+            str(ctx.exception),
+        )
+        capture.assert_called_once_with()
+        rebind.assert_called_once_with("NVDA2017:00")
+        get_log.assert_not_called()
 
     def test_tegra410_i2c_device_fails_when_checkpoint_capture_fails(self):
         """Checkpoint capture must succeed before the destructive unbind/bind cycle."""
@@ -336,6 +444,7 @@ class TestI2cAcpiRuntimePm(GLTTestBase):
 
     def test_rejects_ipmi_not_under_tegra_i2c(self):
         """IPI0001 alone is not enough without a bound Tegra I2C controller."""
+        mock = GLTTestBase.unittest.mock
         udev_output = (
             "P: /devices/platform/OTHER0001:00/i2c-1/"
             "i2c-IPI0001:00/ipmi/ipmi0\n"
@@ -347,6 +456,16 @@ class TestI2cAcpiRuntimePm(GLTTestBase):
                 {"NVDA2017:01"},
             )
         )
+
+        run_result = mock.Mock(returncode=0, stderr="", stdout=udev_output)
+        with mock.patch.object(i2c_tests.Path, "exists", return_value=True), \
+             mock.patch.object(i2c_tests.subprocess, "run", return_value=run_result), \
+             mock.patch.object(i2c_tests, "_tegra_i2c_devices", side_effect=PermissionError("sysfs denied")):
+            status, reason, path = i2c_tests._ipmi_over_tegra_i2c_acpi_topology(self.mock_logger)
+        self.assertEqual(status, i2c_tests._IPMI_TEGRA_TOPOLOGY_ERROR)
+        self.assertIn("Cannot inspect tegra-i2c devices", reason)
+        self.assertIsNone(path)
+        self.mock_logger.error.assert_called_with(reason)
 
     def test_detects_atomic_sleep_signature_with_mutex_lock(self):
         """Atomic-sleep splat may contain mutex_lock instead of mutex_lock_nested."""
@@ -662,18 +781,17 @@ class TestI2cAcpiErrorReset(GLTTestBase):
     DEVICE = "NVDA0301:00"
     PID = 1234
     ROOT = Path("/tracefs")
-    OK = i2c_error_reset._STATUS_OK
-    SKIP = i2c_error_reset._STATUS_SKIP
-    WARN = i2c_error_reset._STATUS_WARN
-    FAIL = i2c_error_reset._STATUS_FAIL
+    OK, SKIP, WARN, FAIL = "ok", "skip", "warn", "fail"
+    INIT_ENTRY = i2c_error_reset._EVENT_INIT_ENTRY
+    INIT_RETURN = i2c_error_reset._EVENT_INIT_RETURN
+    RESET_ENTRY = i2c_error_reset._EVENT_RESET_ENTRY
+    RESET_RETURN = i2c_error_reset._EVENT_RESET_RETURN
+    WRITEL_ENTRY = i2c_error_reset._EVENT_WRITEL_ENTRY
 
     def setUp(self):
         """Reset persistent GLT result state."""
         super().setUp()
-        i2c_error_reset.test_tegra_i2c_acpi_error_reset.attr.result = (
-            GLTCore.GLTTestResult.NA,
-            "",
-        )
+        i2c_error_reset.test_tegra_i2c_acpi_error_reset.attr.result = (GLTCore.GLTTestResult.NA, "")
 
     @classmethod
     def _line(cls, event, body, pid=PID, site=None):
@@ -708,60 +826,54 @@ class TestI2cAcpiErrorReset(GLTTestBase):
         init_ret="0",
     ):
         """Return the ordered lifecycle observed on the fixed path."""
-        event = i2c_error_reset
-        return "\n".join(
-            (
-                self._line(event._EVENT_INIT_ENTRY, f"i2c={i2c}"),
-                self._line(event._EVENT_RESET_ENTRY, "dev=0x200"),
-                self._line(event._EVENT_RESET_RETURN, f"retval={reset_ret}"),
-                *extra_before_first,
-                self._line(event._EVENT_WRITEL_ENTRY, f"i2c={i2c} value={first} reg={first_reg}"),
-                *extra_between_pair,
-                self._line(event._EVENT_WRITEL_ENTRY, f"i2c={i2c} value={second} reg={second_reg}"),
-                *extra_before_return,
-                self._line(event._EVENT_INIT_RETURN, f"retval={init_ret}"),
-            )
+        return self._trace(
+            self._line(self.INIT_ENTRY, f"i2c={i2c}"),
+            self._line(self.RESET_ENTRY, "dev=0x200"),
+            self._line(self.RESET_RETURN, f"retval={reset_ret}"),
+            *extra_before_first,
+            self._line(self.WRITEL_ENTRY, f"i2c={i2c} value={first} reg={first_reg}"),
+            *extra_between_pair,
+            self._line(self.WRITEL_ENTRY, f"i2c={i2c} value={second} reg={second_reg}"),
+            *extra_before_return,
+            self._line(self.INIT_RETURN, f"retval={init_ret}"),
         )
+
+    @staticmethod
+    def _trace(*rows):
+        return "\n".join(rows)
+
+    def _writel(self, value, reg="0xa8", *, i2c="0x100", pid=PID, site=None):
+        return self._line(self.WRITEL_ENTRY, f"i2c={i2c} value={value} reg={reg}", pid=pid, site=site)
 
     def _marker_payload(self, **overrides):
         """Return a valid marker payload with optional field overrides."""
-        with self.mock.patch.object(
-            i2c_error_reset,
-            "_boot_id",
-            return_value="boot-a",
-        ):
+        with self.mock.patch.object(i2c_error_reset, "_boot_id", return_value="boot-a"):
             payload = i2c_error_reset._marker_payload(self.DEVICE)
-        payload.update(overrides)
-        return payload
+        return {**payload, **overrides}
 
     def _run_decorated(self, outcome=None, cleanup_errors=(), proof_error=None, cleanup_probe=None):
         """Run the decorated test with host state patched out."""
-        root = self.ROOT
         proof_patch = {"side_effect": proof_error} if proof_error is not None else {"return_value": outcome}
         cleanup_mock = cleanup_probe if cleanup_probe is not None else self.mock.Mock(return_value=list(cleanup_errors))
-        with self.mock.patch.object(i2c_error_reset, "_tracefs_root", return_value=root), \
-             self.mock.patch.object(
-                 i2c_error_reset,
-                 "_acquire_lock",
-                 return_value=(77, (self.OK, "")),
-             ), \
-             self.mock.patch.object(i2c_error_reset, "_run_tracefs_proof", **proof_patch), \
-             self.mock.patch.object(i2c_error_reset, "_cleanup_after_outcome", new=cleanup_mock), \
-             self.mock.patch.object(i2c_error_reset, "_release_lock", return_value=None):
+        with self.mock.patch.multiple(
+            i2c_error_reset,
+            _tracefs_root=self.mock.Mock(return_value=self.ROOT),
+            _acquire_lock=self.mock.Mock(return_value=(77, (self.OK, ""))),
+            _run_tracefs_proof=self.mock.Mock(**proof_patch),
+            _cleanup_after_outcome=cleanup_mock,
+            _release_lock=self.mock.Mock(return_value=None),
+        ):
             i2c_error_reset.test_tegra_i2c_acpi_error_reset(None, self.mock_logger)
 
     def _run_proof_case(self, trace_text, options, expected_status, expected_reason, *, context=None):
         """Run one proof case and retain its mocks for caller-specific assertions."""
         if context is None:
-            context = {"trace_root": self.ROOT, "selected_device": None, "marker_active": False}
+            context = {"trace_root": self.ROOT, "selected_device": None, "marker_active": False,
+                       "tracefs_cleanup_blocked": False}
         with self._proof_patches(trace_text, **options) as patches:
             status, reason = i2c_error_reset._run_tracefs_proof(self.ROOT, context, self.mock_logger)
             patches.outcome = (status, reason)
-        self.assertEqual(status, expected_status)
-        if expected_reason:
-            self.assertIn(expected_reason, reason)
-        else:
-            self.assertEqual(reason, "")
+        self._assert_outcome((status, reason), expected_status, expected_reason)
         return patches, context
 
     def _assert_parser_cases(self, cases, expected_status, expected_reason):
@@ -770,12 +882,21 @@ class TestI2cAcpiErrorReset(GLTTestBase):
             name, trace = case[:2]
             reason_needle = case[2] if len(case) == 3 else expected_reason
             with self.subTest(case=name):
-                status, reason = i2c_error_reset._parse_trace_lifecycle(trace)
-                self.assertEqual(status, expected_status)
-                if reason_needle:
-                    self.assertIn(reason_needle, reason)
-                else:
-                    self.assertEqual(reason, "")
+                self._assert_outcome(i2c_error_reset._parse_trace_lifecycle(trace), expected_status, reason_needle)
+
+    def _assert_outcome(self, outcome, expected_status, expected_reason):
+        status, reason = outcome
+        self.assertEqual(status, expected_status)
+        if expected_reason:
+            self.assertIn(expected_reason, reason)
+        else:
+            self.assertEqual(reason, "")
+
+    @staticmethod
+    def _assert_no_trace_tail(patches):
+        patches.stats.assert_not_called()
+        patches.read_trace.assert_not_called()
+        patches.parse.assert_not_called()
 
     def _record_proof_call(self, state, name, result, *, expected, actual):
         self.assertEqual(actual, expected)
@@ -875,19 +996,31 @@ class TestI2cAcpiErrorReset(GLTTestBase):
     def test_setup_tracefs_uses_private_instance_controls_and_pid_filters(self):
         """Setup writes global definitions but traces and filters only inside the instance."""
         tracefs_path = Path("/tracefs/kprobe_events")
-        with self.mock.patch("builtins.open", self.mock.mock_open()) as open_mock, self.mock.patch.object(
-            i2c_error_reset.os, "open", return_value=55
-        ) as os_open:
-            i2c_error_reset._write_text(tracefs_path, "cmd", "a")
-            opener = open_mock.call_args.kwargs["opener"]
-            self.assertEqual(opener(str(tracefs_path), 0), 55)
-        open_mock.assert_called_once_with(tracefs_path, "w", encoding="ascii", opener=opener)
+        with self.mock.patch("builtins.open", self.mock.mock_open()) as open_mock:
+            i2c_error_reset._write_text(tracefs_path, "cmd")
+        open_mock.assert_called_once_with(tracefs_path, "w", encoding="ascii")
+        open_mock.return_value.write.assert_called_once_with("cmd")
+
+        with self.mock.patch.object(i2c_error_reset.os, "open", return_value=55) as os_open, \
+             self.mock.patch.object(i2c_error_reset.os, "write", return_value=4) as os_write, \
+             self.mock.patch.object(i2c_error_reset.os, "close") as os_close:
+            i2c_error_reset._write_kprobe_command(tracefs_path, "cmd")
         os_open.assert_called_once_with(
-            str(tracefs_path),
+            tracefs_path,
             i2c_error_reset.os.O_WRONLY | i2c_error_reset.os.O_CLOEXEC,
         )
+        os_write.assert_called_once_with(55, b"cmd\n")
+        os_close.assert_called_once_with(55)
 
-        writes = []
+        with self.mock.patch.object(i2c_error_reset.os, "open", return_value=55), \
+             self.mock.patch.object(i2c_error_reset.os, "write", side_effect=OSError("EIO")), \
+             self.mock.patch.object(i2c_error_reset.os, "close") as os_close, \
+             self.assertRaises(OSError):
+            i2c_error_reset._write_kprobe_command(tracefs_path, "cmd")
+        os_close.assert_called_once_with(55)
+
+        kprobe_writes = []
+        text_writes = []
         original_mkdir = Path.mkdir
 
         with TemporaryDirectory() as temp_dir:
@@ -905,34 +1038,35 @@ class TestI2cAcpiErrorReset(GLTTestBase):
                             parents=True,
                         )
 
-            with self.mock.patch.object(i2c_error_reset.Path, "mkdir", mkdir_with_events), self.mock.patch.object(
-                i2c_error_reset.os, "getpid", return_value=self.PID
-            ), self.mock.patch.object(
-                i2c_error_reset,
-                "_write_text",
-                side_effect=lambda path, value, mode="w": writes.append((path, value, mode)),
-            ):
+            text_writer = self.mock.Mock(side_effect=lambda path, value: text_writes.append((path, value)))
+            kprobe_writer = self.mock.Mock(side_effect=lambda path, value: kprobe_writes.append((path, value)))
+            with self.mock.patch.object(i2c_error_reset.Path, "mkdir", mkdir_with_events), \
+                 self.mock.patch.object(i2c_error_reset.os, "getpid", return_value=self.PID), \
+                 self.mock.patch.multiple(
+                     i2c_error_reset, _write_text=text_writer, _write_kprobe_command=kprobe_writer
+                 ):
                 self.assertEqual(i2c_error_reset._setup_tracefs(root), (self.OK, ""))
 
         self.assertEqual(
-            [(value, mode) for path, value, mode in writes if path == root / "kprobe_events"],
-            [(command, "a") for command in i2c_error_reset._DEVICE_RESET_KPROBE_COMMANDS],
+            kprobe_writes,
+            [(root / "kprobe_events", command) for command in i2c_error_reset._DEVICE_RESET_KPROBE_COMMANDS],
         )
-        self.assertNotIn((root / "tracing_on", "1", "w"), writes)
+        self.assertFalse(any(path == root / "kprobe_events" for path, _value in text_writes))
+        self.assertNotIn((root / "tracing_on", "1"), text_writes)
         for event in i2c_error_reset._TRACE_EVENTS:
             event_dir = instance / "events" / i2c_error_reset._TRACE_GROUP / event
-            self.assertIn((event_dir / "filter", f"common_pid == {self.PID}", "w"), writes)
-            self.assertIn((event_dir / "enable", "1", "w"), writes)
-        self.assertIn((instance / "trace", "", "w"), writes)
-        self.assertIn((instance / "tracing_on", "1", "w"), writes)
+            self.assertIn((event_dir / "filter", f"common_pid == {self.PID}"), text_writes)
+            self.assertIn((event_dir / "enable", "1"), text_writes)
+        self.assertIn((instance / "trace", ""), text_writes)
+        self.assertIn((instance / "tracing_on", "1"), text_writes)
 
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             (root / "kprobe_events").touch()
             (root / "instances").mkdir()
-            with self.mock.patch.object(i2c_error_reset, "_write_text", side_effect=OSError("kprobe denied")):
+            with self.mock.patch.object(i2c_error_reset, "_write_kprobe_command", side_effect=OSError("kprobe denied")):
                 status, reason = i2c_error_reset._setup_tracefs(root)
-        self.assertEqual(status, self.SKIP)
+        self.assertEqual(status, self.WARN)
         self.assertIn("Cannot configure tracefs proof", reason)
 
     def test_marker_payload_contains_fixed_identities_and_valid_device(self):
@@ -972,26 +1106,26 @@ class TestI2cAcpiErrorReset(GLTTestBase):
             marker_path = Path(temp_dir) / "marker.json"
             with self.mock.patch.object(i2c_error_reset, "_MARKER_PATH", marker_path), \
                  self.mock.patch.object(i2c_error_reset, "_boot_id", return_value="boot-a"):
+
+                def assert_rejected(payload, expected, mode=0o600, stat=None):
+                    marker_path.write_text(json.dumps(payload), encoding="utf-8")
+                    marker_path.chmod(mode)
+                    if stat is None:
+                        marker, reason = i2c_error_reset._read_valid_marker()
+                    else:
+                        with self.mock.patch.object(i2c_error_reset.os, "fstat", return_value=stat):
+                            marker, reason = i2c_error_reset._read_valid_marker()
+                    self.assertIsNone(marker)
+                    self.assertIn(expected, reason)
+
                 for _name, override, expected in variants:
                     with self.subTest(expected=expected):
-                        marker_path.write_text(json.dumps(self._marker_payload(**override)), encoding="utf-8")
-                        marker_path.chmod(0o600)
-                        marker, reason = i2c_error_reset._read_valid_marker()
-                        self.assertIsNone(marker)
-                        self.assertIn(expected, reason)
+                        assert_rejected(self._marker_payload(**override), expected)
                 with self.subTest(expected="0600"):
-                    marker_path.write_text(json.dumps(self._marker_payload()), encoding="utf-8")
-                    marker_path.chmod(0o644)
-                    marker, reason = i2c_error_reset._read_valid_marker()
-                    self.assertIsNone(marker)
-                    self.assertIn("0600", reason)
+                    assert_rejected(self._marker_payload(), "0600", mode=0o644)
                 with self.subTest(expected="owned"):
-                    marker_path.chmod(0o600)
                     fake_stat = self.mock.Mock(st_mode=0o100600, st_uid=i2c_error_reset.os.geteuid() + 1)
-                    with self.mock.patch.object(i2c_error_reset.os, "fstat", return_value=fake_stat):
-                        marker, reason = i2c_error_reset._read_valid_marker()
-                    self.assertIsNone(marker)
-                    self.assertIn("owned", reason)
+                    assert_rejected(self._marker_payload(), "owned", stat=fake_stat)
             with self.mock.patch.object(i2c_error_reset, "_MARKER_PATH", Path(temp_dir)), \
                  self.mock.patch.object(i2c_error_reset, "_boot_id", return_value="boot-a"):
                 marker, reason = i2c_error_reset._read_valid_marker()
@@ -1039,6 +1173,14 @@ class TestI2cAcpiErrorReset(GLTTestBase):
         self.assertEqual(status, self.FAIL)
         self.assertIn("without a valid same-boot marker", reason)
 
+        with self.mock.patch.object(i2c_error_reset, "_read_valid_marker", return_value=(None, "")), \
+             self.mock.patch.object(i2c_error_reset, "_fixed_artifacts", side_effect=PermissionError("denied")):
+            status, reason = i2c_error_reset._recover_or_refuse_foreign_artifacts(self.ROOT)
+
+        self.assertEqual(status, self.FAIL)
+        self.assertIn("Cannot inspect fixed tracefs artifacts", reason)
+        self.assertIn("refusing", reason)
+
     def test_recovery_cleans_only_valid_same_boot_marker(self):
         """Valid marker cleanup uses only constants plus the validated device token."""
         marker = {"selected_device": self.DEVICE}
@@ -1052,10 +1194,11 @@ class TestI2cAcpiErrorReset(GLTTestBase):
 
     def test_bind_restore_is_idempotent_and_bind_only(self):
         """Cleanup restoration never unbinds and writes bind only when the selected device is absent."""
-        with self.mock.patch.object(i2c_error_reset, "_tegra_i2c_devices", return_value=[self.DEVICE]), \
+        with self.mock.patch.object(i2c_error_reset, "_tegra_i2c_devices", return_value=[self.DEVICE]) as devices, \
              self.mock.patch.object(i2c_error_reset, "_write_text") as write_text, \
              self.mock.patch.object(i2c_error_reset, "_dev_unbind_bind") as unbind_bind:
             self.assertEqual(i2c_error_reset._restore_binding(self.DEVICE), [])
+            devices.assert_called_once_with(prefix="NVDA", strict_errors=True)
         write_text.assert_not_called()
         unbind_bind.assert_not_called()
 
@@ -1073,11 +1216,29 @@ class TestI2cAcpiErrorReset(GLTTestBase):
 
         self.assertIn("still absent", errors[-1])
 
+        with self.mock.patch.object(i2c_error_reset, "_tegra_i2c_devices", side_effect=PermissionError("denied")), \
+             self.mock.patch.object(i2c_error_reset, "_write_text") as write_text:
+            errors = i2c_error_reset._restore_binding(self.DEVICE)
+        self.assertIn("refusing bind write", errors[0])
+        write_text.assert_not_called()
+
+        with self.mock.patch.object(
+            i2c_error_reset,
+            "_tegra_i2c_devices",
+            side_effect=[[], OSError("post-bind EIO")],
+        ), \
+             self.mock.patch.object(i2c_error_reset, "_write_text") as write_text, \
+             self.mock.patch.object(i2c_error_reset.time, "sleep") as sleep:
+            errors = i2c_error_reset._restore_binding(self.DEVICE)
+        self.assertIn("refusing further bind writes", errors[-1])
+        write_text.assert_called_once_with(Path("/sys/bus/platform/drivers/tegra-i2c/bind"), self.DEVICE)
+        sleep.assert_not_called()
+
     def test_cleanup_order_removes_marker_last_after_absence(self):
         """Cleanup order is binding, stop, disable, instance removal, global delete, marker."""
         order = []
 
-        class FakePath:
+        class FakePath:  # pylint: disable=missing-function-docstring
             """Minimal path fake used to record cleanup order."""
 
             def __init__(self, label):
@@ -1094,96 +1255,107 @@ class TestI2cAcpiErrorReset(GLTTestBase):
                 return self
 
             def rmdir(self):
-                """Record private trace-instance removal."""
                 order.append("remove-instance")
 
             def unlink(self):
-                """Record cleanup marker removal."""
                 order.append("remove-marker")
 
-        def write_text(path, value, mode="w"):
-            order.append(f"write:{path}:{mode}:{value}")
+        def write_text(path, value):
+            order.append(f"write:{path}:{value}")
 
-        with self.mock.patch.object(
+        def write_kprobe_command(path, value):
+            order.append(f"kprobe:{path}:{value}")
+
+        with self.mock.patch.multiple(
             i2c_error_reset,
-            "_restore_binding",
-            side_effect=lambda _dev: order.append("restore") or [],
-        ), self.mock.patch.object(
-            i2c_error_reset,
-            "_stop_instance_tracing",
-            side_effect=lambda _root: order.append("stop") or None,
-        ), self.mock.patch.object(i2c_error_reset, "_instance_dir", return_value=FakePath("instance")), \
-             self.mock.patch.object(
-                 i2c_error_reset,
-                 "_instance_event_dir",
-                 side_effect=lambda _root, event: FakePath(f"instance/{event}"),
-             ), self.mock.patch.object(
-                 i2c_error_reset,
-                 "_event_dir",
-                 side_effect=lambda _root, event: FakePath(f"global/{event}"),
-             ), self.mock.patch.object(i2c_error_reset, "_write_text", side_effect=write_text), \
-             self.mock.patch.object(i2c_error_reset, "_fixed_artifacts", return_value=[]), \
-             self.mock.patch.object(i2c_error_reset, "_MARKER_PATH", FakePath("marker")), \
-             self.mock.patch.object(
-                 i2c_error_reset,
-                 "_fsync_parent",
-                 side_effect=lambda _path: order.append("fsync-marker"),
-             ):
+            _restore_binding=self.mock.Mock(side_effect=lambda _dev: order.append("restore") or []),
+            _stop_instance_tracing=self.mock.Mock(side_effect=lambda _root, _present: order.append("stop") or None),
+            _instance_dir=self.mock.Mock(return_value=FakePath("instance")),
+            _instance_event_dir=self.mock.Mock(side_effect=lambda _root, event: FakePath(f"instance/{event}")),
+            _event_dir=self.mock.Mock(side_effect=lambda _root, event: FakePath(f"global/{event}")),
+            _write_text=self.mock.Mock(side_effect=write_text),
+            _write_kprobe_command=self.mock.Mock(side_effect=write_kprobe_command),
+            _fixed_artifacts=self.mock.Mock(return_value=[]),
+            _MARKER_PATH=FakePath("marker"),
+            _fsync_parent=self.mock.Mock(side_effect=lambda _path: order.append("fsync-marker")),
+        ):
             self.assertEqual(i2c_error_reset._cleanup_owned_tracefs(self.ROOT, self.DEVICE), [])
 
         self.assertEqual(order[:2], ["restore", "stop"])
         first_global_delete = (
-            "write:/tracefs/kprobe_events:a:-:"
+            "kprobe:/tracefs/kprobe_events:-:"
             "greenlit_tegra_i2c_acpi_reset/greenlit_tegra_i2c_init_entry"
         )
         self.assertLess(order.index("remove-instance"), order.index(first_global_delete))
         self.assertTrue(all(
-            entry.startswith("write:/tracefs/kprobe_events:a:-:")
-            for entry in order if "kprobe_events" in entry
+            entry.startswith("kprobe:/tracefs/kprobe_events:-:")
+            for entry in order if entry.startswith("kprobe:")
         ))
-        self.assertTrue(all(":w:" in entry for entry in order if entry.startswith("write:instance/")))
+        self.assertTrue(all(entry.endswith(":0") for entry in order if entry.startswith("write:instance/")))
         self.assertEqual(order[-2:], ["remove-marker", "fsync-marker"])
 
     def test_cleanup_retains_marker_on_restore_failure_or_remaining_artifacts(self):
         """The marker survives until binding is restored and fixed tracefs names are absent."""
-        marker = self.mock.Mock()
         absent = self.mock.Mock(lstat=self.mock.Mock(side_effect=FileNotFoundError))
         denied = self.mock.Mock(lstat=self.mock.Mock(side_effect=OSError("lstat denied")))
 
         self.assertFalse(i2c_error_reset._path_present(absent))
         with self.assertRaisesRegex(OSError, "lstat denied"):
             i2c_error_reset._path_present(denied)
-
-        with self.mock.patch.object(i2c_error_reset, "_restore_binding", return_value=["bind failed"]), \
-             self.mock.patch.object(i2c_error_reset, "_stop_instance_tracing", return_value=None), \
-             self.mock.patch.object(i2c_error_reset, "_instance_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_instance_event_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_event_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_fixed_artifacts", return_value=[]), \
-             self.mock.patch.object(i2c_error_reset, "_MARKER_PATH", marker):
-            errors = i2c_error_reset._cleanup_owned_tracefs(self.ROOT, self.DEVICE)
-        self.assertIn("bind failed", errors)
-        marker.unlink.assert_not_called()
-
-        with self.mock.patch.object(i2c_error_reset, "_restore_binding", return_value=[]), \
-             self.mock.patch.object(i2c_error_reset, "_stop_instance_tracing", return_value=None), \
-             self.mock.patch.object(i2c_error_reset, "_instance_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_instance_event_dir", return_value=denied), \
-             self.mock.patch.object(i2c_error_reset, "_event_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_MARKER_PATH", marker):
-            errors = i2c_error_reset._cleanup_owned_tracefs(self.ROOT, self.DEVICE)
-        self.assertIn("lstat denied", errors[0])
-        marker.unlink.assert_not_called()
-
-        with self.mock.patch.object(i2c_error_reset, "_restore_binding", return_value=[]), \
-             self.mock.patch.object(i2c_error_reset, "_stop_instance_tracing", return_value=None), \
-             self.mock.patch.object(i2c_error_reset, "_instance_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_instance_event_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_event_dir", return_value=absent), \
-             self.mock.patch.object(i2c_error_reset, "_fixed_artifacts", return_value=["event"]), \
-             self.mock.patch.object(i2c_error_reset, "_MARKER_PATH", marker):
-            errors = i2c_error_reset._cleanup_owned_tracefs(self.ROOT, self.DEVICE)
-        self.assertIn("Owned tracefs artifacts remain", errors[-1])
+        def run_cleanup(*, restore_errors=(), remaining_artifacts=(), path_presence=False, stop_error=None):
+            present = (
+                {"side_effect": path_presence} if isinstance(path_presence, list) else {"return_value": path_presence}
+            )
+            path_lookup = self.mock.Mock(return_value=self.mock.Mock())
+            result = SimpleNamespace(
+                marker=self.mock.Mock(), path=path_lookup.return_value, path_present=self.mock.Mock(**present),
+                restore=self.mock.Mock(return_value=list(restore_errors)), stop=self.mock.Mock(return_value=stop_error),
+                write_text=self.mock.Mock(), write_kprobe=self.mock.Mock(),
+            )
+            with self.mock.patch.multiple(
+                i2c_error_reset,
+                _restore_binding=result.restore,
+                _stop_instance_tracing=result.stop,
+                _instance_dir=path_lookup, _instance_event_dir=path_lookup, _event_dir=path_lookup,
+                _path_present=result.path_present,
+                _fixed_artifacts=self.mock.Mock(return_value=list(remaining_artifacts)),
+                _MARKER_PATH=result.marker,
+                _write_text=result.write_text, _write_kprobe_command=result.write_kprobe,
+            ):
+                result.errors = i2c_error_reset._cleanup_owned_tracefs(self.ROOT, self.DEVICE)
+            return result
+        def assert_no_trace_mutation(result):
+            for mocked in (result.write_text, result.write_kprobe, result.path.rmdir, result.marker.unlink):
+                mocked.assert_not_called()
+        restore_inspect = "restore inspection failed"
+        preflight = "Cannot inspect private trace instance"
+        cases = (
+            ("bind failed", {"restore_errors": ["bind failed"]}, "bind failed", "restore"),
+            (restore_inspect, {"restore_errors": [restore_inspect]}, restore_inspect, "restore"),
+            ("remaining", {"remaining_artifacts": ["event"]}, "Owned tracefs artifacts remain", ""),
+            ("preflight", {"path_presence": [OSError("preflight EIO")] + [True] * 20}, preflight, ""),
+            ("stop", {"path_presence": True, "stop_error": "stop failed"}, "stop failed", "stop"),
+        )
+        for name, kwargs, expected, check in cases:
+            with self.subTest(case=name):
+                result = run_cleanup(**kwargs)
+                self.assertIn(expected, result.errors[-1])
+                assert_no_trace_mutation(result)
+            if check == "restore":
+                result.path_present.assert_not_called()
+                result.stop.assert_not_called()
+            elif check == "stop":
+                result.stop.assert_called_once_with(self.ROOT, True)
+        restore_errors = ["bind still absent"]
+        ctx = {"marker_active": True, "selected_device": self.DEVICE, "trace_root": self.ROOT,
+               "tracefs_cleanup_blocked": True}
+        with self.mock.patch.object(i2c_error_reset, "_restore_binding", return_value=restore_errors) as restore, \
+             self.mock.patch.object(i2c_error_reset, "_cleanup_owned_tracefs") as cleanup:
+            errors = i2c_error_reset._cleanup_after_outcome(ctx)
+        restore.assert_called_once_with(self.DEVICE)
+        cleanup.assert_not_called()
+        self.assertIn("retained for later same-boot recovery", errors[0])
+        self.assertIn("bind still absent", errors[0])
 
     def test_decorated_result_classifies_pass_skip_fail_and_cleanup_override(self):
         """Final GLT result decisions happen after cleanup inside the decorated test."""
@@ -1212,35 +1384,40 @@ class TestI2cAcpiErrorReset(GLTTestBase):
             captured_context.update(context)
             return []
 
-        with self.mock.patch.object(i2c_error_reset, "_tracefs_root", return_value=self.ROOT), \
-             self.mock.patch.object(
-                 i2c_error_reset,
-                 "_acquire_lock",
-                 return_value=(77, (self.OK, "")),
-             ), \
-             self.mock.patch.object(
-                 i2c_error_reset,
-                 "_recover_or_refuse_foreign_artifacts",
-                 return_value=(self.OK, ""),
-             ), self.mock.patch.object(
-                 i2c_error_reset,
-                 "_select_device",
-                 return_value=((self.OK, ""), self.DEVICE),
-             ), \
-             self.mock.patch.object(i2c_error_reset, "_run_ipmitool_mc_info", return_value=(True, "")), \
-             self.mock.patch.object(i2c_error_reset, "_write_marker", side_effect=OSError("parent fsync failed")), \
-             self.mock.patch.object(
-                 i2c_error_reset,
-                 "_cleanup_after_outcome",
-                 side_effect=capture_cleanup,
-             ) as cleanup_mock, \
-             self.mock.patch.object(i2c_error_reset, "_release_lock", return_value=None), \
+        cleanup_mock = self.mock.Mock(side_effect=capture_cleanup)
+        with self.mock.patch.multiple(
+            i2c_error_reset,
+            _tracefs_root=self.mock.Mock(return_value=self.ROOT),
+            _acquire_lock=self.mock.Mock(return_value=(77, (self.OK, ""))),
+            _recover_or_refuse_foreign_artifacts=self.mock.Mock(return_value=(self.OK, "")),
+            _select_device=self.mock.Mock(return_value=((self.OK, ""), self.DEVICE)),
+            _run_ipmitool_mc_info=self.mock.Mock(return_value=(True, "")),
+            _write_marker=self.mock.Mock(side_effect=OSError("parent fsync failed")),
+            _cleanup_after_outcome=cleanup_mock,
+            _release_lock=self.mock.Mock(return_value=None),
+        ), \
              self.assertRaises(GLTCore.GLTTestFail) as context:
             i2c_error_reset.test_tegra_i2c_acpi_error_reset(None, self.mock_logger)
         cleanup_mock.assert_called_once()
         self.assertTrue(captured_context["marker_active"])
         self.assertEqual(captured_context["selected_device"], self.DEVICE)
         self.assertIn("parent fsync failed", str(context.exception))
+
+        self.setUp()
+
+        def mark_cleanup_blocked(_trace_root, context, _logger):
+            context["selected_device"] = self.DEVICE
+            context["marker_active"] = True
+            context["tracefs_cleanup_blocked"] = True
+            return (self.WARN, "Cannot stop private trace instance; trace proof is non-conclusive.")
+
+        with self.mock.patch.object(i2c_error_reset, "_restore_binding", return_value=[]) as restore, \
+             self.mock.patch.object(i2c_error_reset, "_cleanup_owned_tracefs") as cleanup, \
+             self.assertRaises(GLTCore.GLTTestFail) as context:
+            self._run_decorated(proof_error=mark_cleanup_blocked, cleanup_probe=i2c_error_reset._cleanup_after_outcome)
+        cleanup.assert_not_called()
+        restore.assert_called_once_with(self.DEVICE)
+        self.assertIn("retained for later same-boot recovery", str(context.exception))
 
     def test_decorated_test_preserves_base_exception_after_cleanup(self):
         """KeyboardInterrupt identity is retained while cleanup diagnostics are attached."""
@@ -1264,30 +1441,30 @@ class TestI2cAcpiErrorReset(GLTTestBase):
 
     def test_select_device_classifies_acpi_topology_and_bound_state(self):
         """Preflight separates unsupported topology from attributable discovery failures."""
+        error = i2c_error_reset._IPMI_TEGRA_TOPOLOGY_ERROR
+        match = i2c_error_reset._IPMI_TEGRA_TOPOLOGY_MATCH
+        no_match = i2c_error_reset._IPMI_TEGRA_TOPOLOGY_NO_MATCH
         cases = (
             (False, None, [], self.SKIP, "not ACPI"),
-            (True, (i2c_error_reset._IPMI_TEGRA_TOPOLOGY_ERROR, "udev failed", None), [], self.FAIL, "udev failed"),
-            (True, (i2c_error_reset._IPMI_TEGRA_TOPOLOGY_NO_MATCH, "not ipmi", None), [], self.SKIP, "not ipmi"),
-            (True, (i2c_error_reset._IPMI_TEGRA_TOPOLOGY_MATCH, "../bad", None), [], self.FAIL, "Unexpected"),
-            (
-                True, (i2c_error_reset._IPMI_TEGRA_TOPOLOGY_MATCH, "NVDA2017:00", None),
-                ["NVDA2017:00"], self.SKIP, "not a supported Grace",
-            ),
+            (True, (error, "udev failed", None), [], self.FAIL, "udev failed"),
+            (True, (no_match, "not ipmi", None), [], self.SKIP, "not ipmi"),
+            (True, (match, "../bad", None), [], self.FAIL, "Unexpected"),
+            (True, (match, "NVDA2017:00", None), ["NVDA2017:00"], self.SKIP, "not a supported Grace"),
             (True, self._topology(), [], self.FAIL, "not bound"),
+            (True, self._topology(), PermissionError("sysfs denied"), self.FAIL, "Cannot inspect"),
             (True, self._topology(), [self.DEVICE], self.OK, ""),
         )
 
         for acpi, topology, devices, expected_status, expected_reason in cases:
+            devices_mock = self.mock.Mock(side_effect=devices) if isinstance(devices, OSError) else self.mock.Mock(
+                return_value=devices
+            )
             with self.subTest(expected=expected_reason), \
                  self.mock.patch.object(i2c_error_reset.Path, "is_dir", return_value=acpi), \
                  self.mock.patch.object(i2c_error_reset, "_ipmi_over_tegra_i2c_acpi_topology", return_value=topology), \
-                 self.mock.patch.object(i2c_error_reset, "_tegra_i2c_devices", return_value=devices):
+                 self.mock.patch.object(i2c_error_reset, "_tegra_i2c_devices", devices_mock):
                 outcome, device = i2c_error_reset._select_device(self.mock_logger)
-            self.assertEqual(outcome[0], expected_status)
-            if expected_reason:
-                self.assertIn(expected_reason, outcome[1])
-            else:
-                self.assertEqual(outcome[1], "")
+            self._assert_outcome(outcome, expected_status, expected_reason)
             if expected_status == self.OK:
                 self.assertEqual(device, self.DEVICE)
 
@@ -1311,400 +1488,248 @@ class TestI2cAcpiErrorReset(GLTTestBase):
 
     def test_run_tracefs_proof_fails_binding_and_bmc_health(self):
         """Mutation failures restore binding, then health checks can override them."""
+        bind_failed = {"rebind": (False, "bind failed")}
+        kernel_error = "tegra-i2c NVDA0301:00: i2c transfer timed out"
+        inspect_after_rebind = "Cannot inspect tegra-i2c binding after controlled rebind"
+        post_bmc_failed = {"ipmi_results": [(True, ""), (False, "post ipmi failed")]}
+        stop_reason = "Cannot stop private trace instance"
         cases = (
             ("unsupported", {"select": ((self.SKIP, "unsupported Grace-only proof"), None)}, self.SKIP, "unsupported"),
             ("pre-bmc", {"ipmi_results": [(False, "pre ipmi failed")]}, self.FAIL, "pre ipmi failed"),
-            ("rebind", {"rebind": (False, "bind failed")}, self.FAIL, "Controlled unbind/bind"),
+            ("rebind", bind_failed, self.FAIL, "Controlled unbind/bind"),
             ("not-bound", {"bound_devices": []}, self.FAIL, "not bound"),
-            (
-                "rebind-stop",
-                {"rebind": (False, "bind failed"), "stop_error": "Cannot stop private trace instance"},
-                self.FAIL,
-                "Controlled unbind/bind",
-            ),
-            ("restore", {"rebind": (False, "bind failed"), "restore": ["restore failed"]}, self.FAIL, "restore failed"),
-            (
-                "rebind-post-bmc",
-                {"rebind": (False, "bind failed"), "ipmi_results": [(True, ""), (False, "post ipmi failed")]},
-                self.FAIL,
-                "post ipmi failed",
-            ),
-            (
-                "rebind-kernel-error",
-                {
-                    "rebind": (False, "bind failed"),
-                    "kernel_log": "tegra-i2c NVDA0301:00: i2c transfer timed out",
-                },
-                self.FAIL,
-                "Kernel reported",
-            ),
-            ("post-bmc", {"ipmi_results": [(True, ""), (False, "post ipmi failed")]}, self.FAIL, "post ipmi failed"),
+            ("inspect-after-rebind", {"bound_devices": OSError("post-rebind EIO")}, self.FAIL, inspect_after_rebind),
+            ("rebind-stop", {**bind_failed, "stop_error": stop_reason}, self.FAIL, "Controlled unbind/bind"),
+            ("restore", {**bind_failed, "restore": ["restore failed"]}, self.FAIL, "restore failed"),
+            ("rebind-post-bmc", {**bind_failed, **post_bmc_failed}, self.FAIL, "post ipmi failed"),
+            ("rebind-kernel-error", {**bind_failed, "kernel_log": kernel_error}, self.FAIL, "Kernel reported"),
+            ("post-bmc", post_bmc_failed, self.FAIL, "post ipmi failed"),
         )
 
         for name, options, expected_status, expected in cases:
             with self.subTest(expected=expected):
-                patches, _context = self._run_proof_case(
-                    self._valid_trace(), options, expected_status, expected
-                )
+                patches, context = self._run_proof_case(self._valid_trace(), options, expected_status, expected)
             if name == "unsupported":
                 patches.marker.assert_not_called()
                 patches.setup.assert_not_called()
                 patches.rebind.assert_not_called()
                 patches.restore.assert_not_called()
-            if name in ("rebind", "not-bound", "rebind-stop"):
+            elif name in ("rebind", "not-bound"):
                 patches.restore.assert_called_once_with(self.DEVICE)
                 self.assertEqual(patches.ipmi.call_count, 2)
                 patches.stop.assert_called_once_with(self.ROOT)
                 patches.get_log.assert_called_once()
                 self.assertIn(expected, patches.outcome[1])
                 self.assertNotIn("non-conclusive", patches.outcome[1])
-                patches.stats.assert_not_called()
-                patches.read_trace.assert_not_called()
-                patches.parse.assert_not_called()
-            if name == "restore":
+                self._assert_no_trace_tail(patches)
+            elif name == "rebind-stop":
+                patches.restore.assert_called_once_with(self.DEVICE)
+                self.assertEqual(patches.ipmi.call_count, 1)
+                patches.stop.assert_called_once_with(self.ROOT)
+                patches.get_log.assert_not_called()
+                self.assertIn("Cannot stop private trace instance", patches.outcome[1])
+                self.assertTrue(context["tracefs_cleanup_blocked"])
+                self._assert_no_trace_tail(patches)
+            elif name == "inspect-after-rebind":
+                patches.restore.assert_called_once_with(self.DEVICE)
+                self._assert_no_trace_tail(patches)
+            elif name == "restore":
                 patches.restore.assert_called_once_with(self.DEVICE)
                 self.assertEqual(patches.ipmi.call_count, 1)
                 patches.get_log.assert_not_called()
-            if name in ("rebind-post-bmc", "rebind-kernel-error"):
+            elif name in ("rebind-post-bmc", "rebind-kernel-error"):
                 patches.restore.assert_called_once_with(self.DEVICE)
                 self.assertNotIn("Controlled unbind/bind", patches.outcome[1])
-                patches.stats.assert_not_called()
-                patches.read_trace.assert_not_called()
-                patches.parse.assert_not_called()
+                self._assert_no_trace_tail(patches)
 
     def test_run_tracefs_proof_kernel_log_and_trace_loss_classification(self):
         """Kernel-log failures fail; lost private trace events warn."""
+        tegra_error = "tegra-i2c NVDA0301:00: i2c transfer timed out"
+        tegra_warning = "WARNING: CPU: 0 PID: 1\nCall Trace:\n tegra_i2c_init+0x10/0x80\n"
+        unrelated_warning = "WARNING: CPU: 0 PID: 1\nCall Trace:\n unrelated_driver+0x10/0x80\n"
+        completed_unrelated_warning = (
+            "WARNING: CPU: 0 PID: 1\nCall Trace:\n unrelated_driver+0x10/0x80\n"
+            "---[ end trace 0000000000000000 ]---\n tegra_i2c_init+0x10/0x80\n"
+        )
+        prose_warning = "WARNING: tegra_i2c_init+0x10/0x80 is only prose\n"
+        post_bmc_failed = {"ipmi_results": [(True, ""), (False, "post ipmi failed")]}
+        stop_reason = "Cannot stop private trace instance"
+        stop_failed = {"stop_error": stop_reason}
         cases = (
-            (
-                "checkpoint",
-                {"checkpoint_error": RuntimeError("no checkpoint")},
-                self.FAIL,
-                "checkpoint",
-            ),
+            ("checkpoint", {"checkpoint_error": RuntimeError("no checkpoint")}, self.FAIL, "checkpoint"),
             ("get-log", {"log_error": RuntimeError("lost")}, self.FAIL, "scoped kernel log"),
-            (
-                "kernel-error",
-                {"kernel_log": "tegra-i2c NVDA0301:00: i2c transfer timed out"},
-                self.FAIL,
-                "Kernel reported",
-            ),
-            (
-                "tegra-warning",
-                {"kernel_log": "WARNING: CPU: 0 PID: 1\nCall Trace:\n tegra_i2c_init+0x10/0x80\n"},
-                self.FAIL,
-                "tegra_i2c_init warning",
-            ),
-            (
-                "unrelated-warning",
-                {"kernel_log": "WARNING: CPU: 0 PID: 1\nCall Trace:\n unrelated_driver+0x10/0x80\n"},
-                self.OK,
-                "",
-            ),
-            (
-                "warning-with-non-frame-init-text",
-                {"kernel_log": "WARNING: CPU: 0 PID: 1\nCall Trace:\n tegra_i2c_init text only\n"},
-                self.OK,
-                "",
-            ),
-            (
-                "warning-header-prose-init-token",
-                {"kernel_log": "WARNING: tegra_i2c_init+0x10/0x80 is only prose\n"},
-                self.OK,
-                "",
-            ),
-            (
-                "completed-unrelated-warning-before-init-frame",
-                {
-                    "kernel_log": (
-                        "WARNING: CPU: 0 PID: 1\nCall Trace:\n unrelated_driver+0x10/0x80\n"
-                        "---[ end trace 0000000000000000 ]---\n tegra_i2c_init+0x10/0x80\n"
-                    )
-                },
-                self.OK,
-                "",
-            ),
+            ("kernel-error", {"kernel_log": tegra_error}, self.FAIL, "Kernel reported"),
+            ("tegra-warning", {"kernel_log": tegra_warning}, self.FAIL, "tegra_i2c_init warning"),
+            ("unrelated-warning", {"kernel_log": unrelated_warning}, self.OK, ""),
+            ("warning-with-non-frame-init-text", {"kernel_log": tegra_warning.replace("+0x10/0x80", " text only")},
+             self.OK, ""),
+            ("warning-header-prose-init-token", {"kernel_log": prose_warning}, self.OK, ""),
+            ("completed-unrelated-warning-before-init-frame", {"kernel_log": completed_unrelated_warning}, self.OK, ""),
             ("stats", {"stats": ["cpu0: overrun: 1"]}, self.WARN, "lost events"),
-            (
-                "stop-only",
-                {"stop_error": "Cannot stop private trace instance"},
-                self.WARN,
-                "Cannot stop private trace instance",
-            ),
-            (
-                "stop-post-bmc",
-                {
-                    "stop_error": "Cannot stop private trace instance",
-                    "ipmi_results": [(True, ""), (False, "post ipmi failed")],
-                },
-                self.FAIL,
-                "post ipmi failed",
-            ),
-            (
-                "stop-kernel-error",
-                {
-                    "stop_error": "Cannot stop private trace instance",
-                    "kernel_log": "tegra-i2c NVDA0301:00: i2c transfer timed out",
-                },
-                self.FAIL,
-                "Kernel reported",
-            ),
-            (
-                "trace-read",
-                {"read_trace": (self.WARN, "trace read failed")},
-                self.WARN,
-                "trace read failed",
-            ),
+            ("stop-only", stop_failed, self.WARN, stop_reason),
+            ("stop-post-bmc", {**stop_failed, **post_bmc_failed}, self.WARN, stop_reason),
+            ("stop-kernel-error", {**stop_failed, "kernel_log": tegra_error}, self.WARN, stop_reason),
+            ("trace-read", {"read_trace": (self.WARN, "trace read failed")}, self.WARN, "trace read failed"),
         )
 
         for name, options, expected_status, expected_reason in cases:
             with self.subTest(expected=expected_reason):
-                patches, _context = self._run_proof_case(
-                    self._valid_trace(), options, expected_status, expected_reason
-                )
+                patches, context = self._run_proof_case(self._valid_trace(), options, expected_status, expected_reason)
             if name == "checkpoint":
                 patches.rebind.assert_not_called()
                 self.assertNotIn("rebind", patches.order)
             if "stop_error" in options:
-                patches.stats.assert_not_called()
-                patches.read_trace.assert_not_called()
+                self.assertEqual(patches.ipmi.call_count, 1)
+                patches.get_log.assert_not_called()
+                self._assert_no_trace_tail(patches)
+                self.assertTrue(context["tracefs_cleanup_blocked"])
 
     def test_parser_accepts_ordered_lifecycle_and_signed_retval(self):
-        """The parser proves the fallback lifecycle and skips successful ACPI reset."""
-        event = i2c_error_reset
+        """The LEGO trace shape proves fallback reset and treats ACPI reset as a non-failure."""
+        line = self._line
+        trace = self._valid_trace
         cases = (
-            ("signed", self._valid_trace(reset_ret="0xfffffffffffffffe")),
-            ("built-in-reset-entry-no-module", self._valid_trace()),
-            ("same-pid-multiple-cycles", "\n".join((self._valid_trace(), self._valid_trace()))),
+            ("signed", trace(reset_ret="0xfffffffffffffffe")),
+            ("built-in-reset-entry-no-module", trace()),
+            ("same-pid-multiple-cycles", self._trace(trace(), trace())),
             (
                 "post-pair-unrelated-write",
-                self._valid_trace(extra_before_return=(
-                    self._line(event._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0xff reg=0x20"),
-                )),
+                trace(extra_before_return=(self._writel("0xff", "0x20"),)),
             ),
             (
                 "unrelated-register-writes-around-pair",
-                self._valid_trace(
-                    extra_before_first=(
-                        self._line(event._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0xff reg=0x20"),
-                    ),
-                    extra_between_pair=(
-                        self._line(event._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0xfe reg=0x24"),
-                    ),
-                ),
-            ),
-            (
-                "post-init-client-write",
-                self._valid_trace() + "\n" + self._line(
-                    event._EVENT_WRITEL_ENTRY,
-                    "i2c=0x100 value=0x1 reg=0xb4",
-                ),
+                trace(extra_before_first=(self._writel("0xff", "0x20"),),
+                      extra_between_pair=(self._writel("0xfe", "0x24"),)),
             ),
             (
                 "pre-proof-non-reset-write",
-                self._line(event._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x1 reg=0xb4")
-                + "\n"
-                + self._valid_trace(),
+                self._trace(self._writel("0x1", "0xb4"), trace()),
             ),
             (
                 "acpi-reset-before-fallback",
-                "\n".join((self._valid_trace(reset_ret="0", first_reg="0x20", second_reg="0x24"),
-                           self._valid_trace())),
+                self._trace(trace(reset_ret="0", first_reg="0x20", second_reg="0x24"), trace()),
             ),
+            ("post-init-client-write", self._trace(trace(), self._writel("0x1", "0xb4"))),
         )
         self._assert_parser_cases(cases, self.OK, "")
-        acpi_reset = "\n".join((
-            self._line(event._EVENT_INIT_ENTRY, "i2c=0x100"),
-            self._line(event._EVENT_RESET_ENTRY, "dev=0x200"),
-            self._line(event._EVENT_RESET_RETURN, "retval=0"),
-            self._line(event._EVENT_INIT_RETURN, "retval=0"),
-        ))
+        acpi_reset = self._trace(
+            line(self.INIT_ENTRY, "i2c=0x100"),
+            line(self.RESET_ENTRY, "dev=0x200"),
+            line(self.RESET_RETURN, "retval=0"),
+            line(self.INIT_RETURN, "retval=0"),
+        )
         self._assert_parser_cases((("acpi-reset", acpi_reset),), self.SKIP, "fallback was not exercised")
 
     def test_parser_warns_ambiguous_unmatched_or_truncated_traces(self):
         """Ambiguous parser states warn instead of failing."""
-        event = i2c_error_reset
+        line, trace = self._line, self._valid_trace
+        writel_site = self._site(self.WRITEL_ENTRY)
+        wrong_entry_site = "(tegra_i2c_init+0x0/0x428 [i2c_tegra])"
+        wrong_return_site = "(vfs_read+0x0/0x348 <- i2c_writel)"
         cases = (
+            ("nested", self._trace(line(self.INIT_ENTRY, "i2c=0x100"), line(self.INIT_ENTRY, "i2c=0x100"))),
+            ("reset-return", line(self.RESET_RETURN, "retval=-2")),
+            ("init-return", line(self.INIT_RETURN, "retval=0")),
+            ("missing-pid", f"bad row: {self.INIT_ENTRY}: i2c=0x100"),
+            ("truncated", line(self.INIT_ENTRY, "i2c=0x100")),
             (
-                "nested",
-                "\n".join((
-                    self._line(event._EVENT_INIT_ENTRY, "i2c=0x100"),
-                    self._line(event._EVENT_INIT_ENTRY, "i2c=0x100"),
-                )),
+                "acpi-reset-truncated-before-init-return",
+                self._trace(*trace(reset_ret="0", first_reg="0x20", second_reg="0x24").splitlines()[:3]),
             ),
-            ("reset-return", self._line(event._EVENT_RESET_RETURN, "retval=-2")),
-            ("init-return", self._line(event._EVENT_INIT_RETURN, "retval=0")),
-            ("missing-pid", f"bad row: {event._EVENT_INIT_ENTRY}: i2c=0x100"),
-            ("truncated", self._line(event._EVENT_INIT_ENTRY, "i2c=0x100")),
-            ("acpi-reset-truncated-before-init-return", "\n".join(self._valid_trace(reset_ret="0").splitlines()[:3])),
-            ("reset-dev", self._valid_trace().replace("dev=0x200", "")),
-            ("reset-retval", self._valid_trace().replace("retval=-2", "")),
-            ("init-retval", self._valid_trace().replace("retval=0", "")),
-            ("writel-i2c", self._valid_trace().replace("i2c=0x100 value=0x1", "value=0x1")),
-            ("writel-value", self._valid_trace().replace(" value=0x1", "")),
-            ("writel-reg", self._valid_trace().replace(" reg=0xa8", "", 1)),
-            (
-                "duplicate-field",
-                self._valid_trace().replace("value=0x1 reg=0xa8", "value=0x1 value=0x1 reg=0xa8"),
-            ),
-            ("garbage-suffix", self._valid_trace().replace("value=0x1", "value=0x1oops", 1)),
-            ("second-prefix", self._valid_trace().replace("i2c=0x100", "(extra+0x0/0x4) i2c=0x100", 1)),
-            ("missing-site", self._line(event._EVENT_INIT_ENTRY, "i2c=0x100", site="")),
-            ("garbage-site", self._line(event._EVENT_INIT_ENTRY, "i2c=0x100", site="tegra_i2c_init")),
-            (
-                "wrong-entry-site",
-                self._line(
-                    event._EVENT_WRITEL_ENTRY,
-                    "i2c=0x100 value=0x1 reg=0xa8",
-                    site="(tegra_i2c_init+0x0/0x428 [i2c_tegra])",
-                ),
-            ),
-            (
-                "malformed-module-suffix",
-                self._valid_trace().replace(
-                    self._site(event._EVENT_WRITEL_ENTRY),
-                    "(i2c_writel+0x0/0x2e8 [i2c tegra])",
-                    1,
-                ),
-            ),
-            (
-                "trailing-module-suffix",
-                self._valid_trace().replace(
-                    self._site(event._EVENT_WRITEL_ENTRY),
-                    "(i2c_writel+0x0/0x2e8 [i2c_tegra] extra)",
-                    1,
-                ),
-            ),
-            (
-                "wrong-module-suffix",
-                self._valid_trace().replace(
-                    self._site(event._EVENT_WRITEL_ENTRY),
-                    "(i2c_writel+0x0/0x2e8 [i2c_other])",
-                    1,
-                ),
-            ),
+            ("reset-dev", trace().replace("dev=0x200", "")),
+            ("reset-retval", trace().replace("retval=-2", "")),
+            ("init-retval", trace().replace("retval=0", "")),
+            ("writel-i2c", trace().replace("i2c=0x100 value=0x1", "value=0x1")),
+            ("writel-value", trace().replace(" value=0x1", "")),
+            ("writel-reg", trace().replace(" reg=0xa8", "", 1)),
+            ("duplicate-field", trace().replace("value=0x1 reg=0xa8", "value=0x1 value=0x1 reg=0xa8")),
+            ("garbage-suffix", trace().replace("value=0x1", "value=0x1oops", 1)),
+            ("second-prefix", trace().replace("i2c=0x100", "(extra+0x0/0x4) i2c=0x100", 1)),
+            ("missing-site", line(self.INIT_ENTRY, "i2c=0x100", site="")),
+            ("garbage-site", line(self.INIT_ENTRY, "i2c=0x100", site="tegra_i2c_init")),
+            ("wrong-entry-site", self._writel("0x1", site=wrong_entry_site)),
+            ("malformed-module-suffix", trace().replace(writel_site, "(i2c_writel+0x0/0x2e8 [i2c tegra])", 1)),
+            ("trailing-module-suffix", trace().replace(writel_site, "(i2c_writel+0x0/0x2e8 [i2c_tegra] extra)", 1)),
+            ("wrong-module-suffix", trace().replace(writel_site, "(i2c_writel+0x0/0x2e8 [i2c_other])", 1)),
             (
                 "built-in-reset-entry-module-suffix",
-                self._valid_trace().replace(
-                    self._site(event._EVENT_RESET_ENTRY),
-                    "(__device_reset+0x0/0x148 [i2c_tegra])",
-                    1,
-                ),
-            ),
-            (
-                "wrong-return-site",
-                self._line(
-                    event._EVENT_INIT_RETURN,
-                    "retval=0",
-                    site="(vfs_read+0x0/0x348 <- i2c_writel)",
-                ),
-            ),
-            (
-                "mixed-pid",
-                self._valid_trace() + "\n" + self._line(event._EVENT_INIT_ENTRY, "i2c=0x100", pid=4321),
-            ),
-            (
-                "mixed-controller",
-                "\n".join((self._valid_trace(), self._valid_trace(i2c="0x101"))),
-                "multiple I2C controllers",
-            ),
-            (
-                "mismatch",
-                self._valid_trace().replace("i2c=0x100 value=0x1", "i2c=0x101 value=0x1"),
-            ),
-            (
-                "post-proof-orphan-reset-write",
-                (
-                    self._valid_trace()
-                    + "\n"
-                    + self._line(event._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x0 reg=0xa8")
-                ),
+                trace().replace(self._site(self.RESET_ENTRY), "(__device_reset+0x0/0x148 [i2c_tegra])", 1),
             ),
             (
                 "acpi-reset-fallback-orphan-reset-write",
-                "\n".join((
-                    self._valid_trace(reset_ret="0", first_reg="0x20", second_reg="0x24"),
-                    self._valid_trace(),
-                    self._line(event._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x0 reg=0xa8"),
-                )),
+                self._trace(trace(reset_ret="0", first_reg="0x20", second_reg="0x24"), trace(), self._writel("0x0")),
             ),
+            ("wrong-return-site", line(self.INIT_RETURN, "retval=0", site=wrong_return_site)),
+            ("mixed-pid", self._trace(trace(), line(self.INIT_ENTRY, "i2c=0x100", pid=4321))),
+            ("mixed-controller", self._trace(trace(), trace(i2c="0x101")), "multiple I2C controllers"),
+            ("mismatch", trace().replace("i2c=0x100 value=0x1", "i2c=0x101 value=0x1")),
+            ("post-proof-orphan-reset-write", self._trace(trace(), self._writel("0x0"))),
         )
 
         self._assert_parser_cases(cases, self.WARN, "non-conclusive")
 
     def test_parser_fails_wrong_attributable_lifecycle_values_and_zero_events(self):
         """Complete but wrong lifecycle evidence is a failure, not non-conclusive."""
+        line, trace = self._line, self._valid_trace
+        self._assert_outcome(
+            i2c_error_reset._parse_trace_lifecycle(trace(reset_ret="0", first_reg="0x20", second_reg="0x24")),
+            self.SKIP,
+            "fallback was not exercised",
+        )
         cases = (
-            ("reset-ret", self._valid_trace(reset_ret="-1"), "expected 0 or -ENOENT (-2)"),
-            ("acpi-reset-register-write", self._valid_trace(reset_ret="0"), "reset-register write after ACPI _RST"),
-            ("acpi-reset-init-ret", self._valid_trace(
-                reset_ret="0", first_reg="0x20", second_reg="0x24", init_ret="1"), "tegra_i2c_init returned"),
-            ("acpi-reset-then-invalid-reset-ret", "\n".join((
-                self._valid_trace(reset_ret="0", first_reg="0x20", second_reg="0x24"),
-                self._valid_trace(reset_ret="-1"))), "expected 0 or -ENOENT (-2)"),
+            ("reset-ret", trace(reset_ret="-1"), "__device_reset returned"),
+            ("acpi-reset-register-write", trace(reset_ret="0"), "reset-register write after ACPI _RST"),
+            (
+                "acpi-reset-init-ret",
+                trace(reset_ret="0", first_reg="0x20", second_reg="0x24", init_ret="1"),
+                "tegra_i2c_init returned",
+            ),
+            (
+                "acpi-reset-then-invalid-reset-ret",
+                self._trace(trace(reset_ret="0", first_reg="0x20", second_reg="0x24"), trace(reset_ret="-1")),
+                "__device_reset returned",
+            ),
             (
                 "acpi-reset-then-orphan-reset-write",
-                self._valid_trace(reset_ret="0", first_reg="0x20", second_reg="0x24") + "\n" + self._line(
-                    i2c_error_reset._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x0 reg=0xa8"),
+                self._trace(trace(reset_ret="0", first_reg="0x20", second_reg="0x24"), self._writel("0x0")),
                 "reset-register i2c_writel after ACPI _RST",
             ),
             (
                 "fallback-acpi-reset-orphan-reset-write",
-                "\n".join((
-                    self._valid_trace(),
-                    self._valid_trace(reset_ret="0", first_reg="0x20", second_reg="0x24"),
-                    self._line(i2c_error_reset._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x0 reg=0xa8"),
-                )),
+                self._trace(trace(), trace(reset_ret="0", first_reg="0x20", second_reg="0x24"), self._writel("0x0")),
                 "reset-register i2c_writel after ACPI _RST",
             ),
-            ("first", self._valid_trace(first="0x0"), "first reset-register write"),
-            ("first-reg", self._valid_trace(first_reg="0x20"), "first reset-register write value"),
-            ("second", self._valid_trace(second_reg="0x24"), "assert/deassert"),
-            ("second-value", self._valid_trace(second="0x1"), "second reset-register write value"),
-            ("init-ret", self._valid_trace(init_ret="1"), "tegra_i2c_init returned"),
-            (
-                "third-write",
-                self._valid_trace(extra_before_return=(
-                    self._line(i2c_error_reset._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x0 reg=0xa8"),
-                )),
-                "unexpected reset-register",
-            ),
+            ("first", trace(first="0x0"), "first reset-register write"),
+            ("first-reg", trace(first_reg="0x20"), "first reset-register write value"),
+            ("second", trace(second_reg="0x24"), "assert/deassert"),
+            ("second-value", trace(second="0x1"), "second reset-register write value"),
+            ("init-ret", trace(init_ret="1"), "tegra_i2c_init returned"),
+            ("third-write", trace(extra_before_return=(self._writel("0x0"),)), "unexpected reset-register"),
             (
                 "order",
-                "\n".join((
-                    self._line(i2c_error_reset._EVENT_INIT_ENTRY, "i2c=0x100"),
-                    self._line(i2c_error_reset._EVENT_RESET_ENTRY, "dev=0x200"),
-                    self._line(i2c_error_reset._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x1 reg=0xa8"),
-                    self._line(i2c_error_reset._EVENT_RESET_RETURN, "retval=-2"),
-                    self._line(i2c_error_reset._EVENT_INIT_RETURN, "retval=0"),
-                )),
+                self._trace(
+                    line(self.INIT_ENTRY, "i2c=0x100"), line(self.RESET_ENTRY, "dev=0x200"),
+                    self._writel("0x1"), line(self.RESET_RETURN, "retval=-2"), line(self.INIT_RETURN, "retval=0"),
+                ),
                 "before __device_reset returned",
             ),
             (
                 "no-reset",
-                "\n".join((
-                    self._line(i2c_error_reset._EVENT_INIT_ENTRY, "i2c=0x100"),
-                    self._line(i2c_error_reset._EVENT_INIT_RETURN, "retval=0"),
-                )),
+                self._trace(line(self.INIT_ENTRY, "i2c=0x100"), line(self.INIT_RETURN, "retval=0")),
                 "without an attributable",
             ),
             (
                 "no-writes",
-                "\n".join((
-                    self._line(i2c_error_reset._EVENT_INIT_ENTRY, "i2c=0x100"),
-                    self._line(i2c_error_reset._EVENT_RESET_ENTRY, "dev=0x200"),
-                    self._line(i2c_error_reset._EVENT_RESET_RETURN, "retval=-2"),
-                    self._line(i2c_error_reset._EVENT_INIT_RETURN, "retval=0"),
-                )),
-                "635bf3c8853359a987c5c909d424df92a0d3016a ACPI-without-_RST fallback discriminator",
+                self._trace(
+                    line(self.INIT_ENTRY, "i2c=0x100"), line(self.RESET_ENTRY, "dev=0x200"),
+                    line(self.RESET_RETURN, "retval=-2"), line(self.INIT_RETURN, "retval=0"),
+                ),
+                "assert/deassert",
             ),
             (
                 "continues-after-post-init-client-write",
-                "\n".join((
-                    self._valid_trace(),
-                    self._line(i2c_error_reset._EVENT_WRITEL_ENTRY, "i2c=0x100 value=0x1 reg=0xb4"),
-                    self._valid_trace(reset_ret="-1"),
-                )),
-                "expected 0 or -ENOENT (-2)",
+                self._trace(trace(), self._writel("0x1", "0xb4"), trace(reset_ret="-1")),
+                "__device_reset returned",
             ),
             ("zero", "", "No relevant tracefs events"),
         )
@@ -1717,32 +1742,18 @@ class TestI2cAcpiErrorReset(GLTTestBase):
         cases = (
             ("valid-zeros", valid, ()),
             ("missing-key", "overrun: 0\ncommit overrun: 0\n", ("missing dropped events",)),
-            (
-                "duplicate-key",
-                valid.replace("overrun: 0", "overrun: 0\noverrun: 0"),
-                ("duplicate overrun",),
-            ),
+            ("duplicate-key", valid.replace("overrun: 0", "overrun: 0\noverrun: 0"), ("duplicate overrun",)),
             ("missing-separator", valid.replace("overrun: 0", "overrun"), ("missing ':'",)),
             ("empty-value", valid.replace("overrun: 0", "overrun:"), ("empty overrun",)),
             ("nonnumeric-value", valid.replace("overrun: 0", "overrun: x"), ("malformed overrun",)),
             ("negative-value", valid.replace("overrun: 0", "overrun: -1"), ("malformed overrun",)),
-            (
-                "positive-values",
-                "entries: 4\noverrun: 1\ncommit overrun: 2\ndropped events: 3\n",
-                ("overrun: 1", "commit overrun: 2", "dropped events: 3"),
-            )
+            ("positive-values", "entries: 4\noverrun: 1\ncommit overrun: 2\ndropped events: 3\n",
+             ("overrun: 1", "commit overrun: 2", "dropped events: 3")),
         )
 
         for name, text, expected in cases:
             with self.subTest(case=name), TemporaryDirectory() as temp_dir:
-                stats = (
-                    Path(temp_dir)
-                    / "instances"
-                    / i2c_error_reset._TRACE_INSTANCE
-                    / "per_cpu"
-                    / "cpu0"
-                    / "stats"
-                )
+                stats = Path(temp_dir) / "instances" / i2c_error_reset._TRACE_INSTANCE / "per_cpu" / "cpu0" / "stats"
                 stats.parent.mkdir(parents=True)
                 stats.write_text(text, encoding="utf-8")
 
@@ -1755,92 +1766,62 @@ class TestI2cAcpiErrorReset(GLTTestBase):
     @staticmethod
     def _topology():
         """Return a matching IPMI-over-Tegra-I2C topology tuple."""
-        return (
-            i2c_error_reset._IPMI_TEGRA_TOPOLOGY_MATCH,
-            TestI2cAcpiErrorReset.DEVICE,
-            Path(f"/sys/devices/platform/{TestI2cAcpiErrorReset.DEVICE}"),
-        )
+        device = TestI2cAcpiErrorReset.DEVICE
+        return (i2c_error_reset._IPMI_TEGRA_TOPOLOGY_MATCH, device, Path(f"/sys/devices/platform/{device}"))
 
     @contextlib.contextmanager
     def _proof_patches(self, trace_text, **options):
         """Patch host interactions for _run_tracefs_proof."""
+        defaults = {
+            "select": ((self.OK, ""), self.DEVICE), "ipmi_results": [(True, ""), (True, "")],
+            "rebind": (True, ""), "restore": [], "bound_devices": [self.DEVICE],
+            "kernel_log": "", "stats": [], "read_trace": (self.OK, ""), "parse": (self.OK, ""),
+        }
+        config = {**defaults, **options}
         with contextlib.ExitStack() as stack:
-            ns = SimpleNamespace()
-            ns.order = []
-            mocks = stack.enter_context(self.mock.patch.multiple(
-                i2c_error_reset,
-                _recover_or_refuse_foreign_artifacts=self.mock.DEFAULT,
-                _select_device=self.mock.DEFAULT,
-                _run_ipmitool_mc_info=self.mock.DEFAULT,
-                _write_marker=self.mock.DEFAULT,
-                _restore_binding=self.mock.DEFAULT,
-                _tegra_i2c_devices=self.mock.DEFAULT,
-                _stop_instance_tracing=self.mock.DEFAULT,
-                _trace_stats_overrun_or_dropped=self.mock.DEFAULT,
-                _read_private_trace=self.mock.DEFAULT,
-                _parse_trace_lifecycle=self.mock.DEFAULT,
-            ))
-            mocks["_recover_or_refuse_foreign_artifacts"].return_value = (
-                self.OK, ""
+            patched = (
+                "_recover_or_refuse_foreign_artifacts", "_select_device", "_run_ipmitool_mc_info", "_write_marker",
+                "_restore_binding", "_tegra_i2c_devices", "_stop_instance_tracing",
+                "_trace_stats_overrun_or_dropped", "_read_private_trace", "_parse_trace_lifecycle",
             )
-            mocks["_select_device"].return_value = options.get(
-                "select", ((self.OK, ""), self.DEVICE)
+            mocks = stack.enter_context(
+                self.mock.patch.multiple(i2c_error_reset, **dict.fromkeys(patched, self.mock.DEFAULT))
             )
-            ns.ipmi = mocks["_run_ipmitool_mc_info"]
-            ns.ipmi.side_effect = options.get(
-                "ipmi_results", [(True, ""), (True, "")]
+            ns = SimpleNamespace(
+                order=[], ipmi=mocks["_run_ipmitool_mc_info"], marker=mocks["_write_marker"],
+                restore=mocks["_restore_binding"], stop=mocks["_stop_instance_tracing"],
+                stats=mocks["_trace_stats_overrun_or_dropped"], read_trace=mocks["_read_private_trace"],
+                parse=mocks["_parse_trace_lifecycle"],
             )
-            ns.marker = mocks["_write_marker"]
+            mocks["_recover_or_refuse_foreign_artifacts"].return_value = (self.OK, "")
+            mocks["_select_device"].return_value = config["select"]
+            ns.ipmi.side_effect = config["ipmi_results"]
 
+            record = self._record_proof_call
             ns.setup = stack.enter_context(self.mock.patch.object(
-                i2c_error_reset,
-                "_setup_tracefs",
-                side_effect=lambda root: self._record_proof_call(
-                    ns, "setup", (self.OK, ""), expected=self.ROOT, actual=root
-                ),
+                i2c_error_reset, "_setup_tracefs",
+                side_effect=lambda root: record(ns, "setup", (self.OK, ""), expected=self.ROOT, actual=root),
             ))
             ns.capture = stack.enter_context(self.mock.patch.object(
-                i2c_error_reset.glt_utils,
-                "capture_kernel_log_checkpoint",
+                i2c_error_reset.glt_utils, "capture_kernel_log_checkpoint",
                 side_effect=lambda: self._capture_checkpoint(ns, options),
             ))
-
             ns.rebind = stack.enter_context(self.mock.patch.object(
-                i2c_error_reset,
-                "_dev_unbind_bind",
-                side_effect=lambda device: self._record_proof_call(
-                    ns, "rebind", options.get("rebind", (True, "")), expected=self.DEVICE, actual=device
-                ),
+                i2c_error_reset, "_dev_unbind_bind",
+                side_effect=lambda device: record(ns, "rebind", config["rebind"], expected=self.DEVICE, actual=device),
             ))
-            ns.restore = mocks["_restore_binding"]
-            ns.restore.side_effect = lambda device: self._record_proof_call(
-                ns,
-                "restore",
-                options.get("restore", []),
-                expected=self.DEVICE,
-                actual=device,
+            ns.restore.side_effect = lambda device: record(
+                ns, "restore", config["restore"], expected=self.DEVICE, actual=device
             )
-            mocks["_tegra_i2c_devices"].return_value = options.get("bound_devices", [self.DEVICE])
-            ns.stop = mocks["_stop_instance_tracing"]
+            bound_key = "side_effect" if isinstance(config["bound_devices"], OSError) else "return_value"
+            setattr(mocks["_tegra_i2c_devices"], bound_key, config["bound_devices"])
             ns.stop.return_value = options.get("stop_error")
-            if "log_error" in options:
-                log_patch = self.mock.patch.object(
-                    i2c_error_reset.glt_utils,
-                    "get_kernel_log",
-                    side_effect=options["log_error"],
-                )
-            else:
-                log_patch = self.mock.patch.object(
-                    i2c_error_reset.glt_utils,
-                    "get_kernel_log",
-                    return_value=options.get("kernel_log", ""),
-                )
+            log_kwargs = {"side_effect": options["log_error"]} if "log_error" in options else {
+                "return_value": config["kernel_log"]
+            }
+            log_patch = self.mock.patch.object(i2c_error_reset.glt_utils, "get_kernel_log", **log_kwargs)
             ns.get_log = stack.enter_context(log_patch)
-            ns.stats = mocks["_trace_stats_overrun_or_dropped"]
-            ns.stats.return_value = options.get("stats", [])
-            read_trace = options.get("read_trace", (self.OK, ""))
-            ns.read_trace = mocks["_read_private_trace"]
-            ns.read_trace.return_value = (read_trace, trace_text)
-            ns.parse = mocks["_parse_trace_lifecycle"]
-            ns.parse.return_value = options.get("parse", (self.OK, ""))
+            ns.stats.return_value = config["stats"]
+            ns.read_trace.return_value = (config["read_trace"], trace_text)
+            ns.parse.return_value = config["parse"]
             yield ns
