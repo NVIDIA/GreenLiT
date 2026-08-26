@@ -27,6 +27,7 @@ include = [
     "src/modules/iommu/cmdqv_hyp_own/*",
     "src/modules/iommu/sva_invalidate/*",
     "src/modules/mm/bingo/*",
+    "src/modules/mm/contpte_access_flags/*",
     "src/modules/mm/hotplug_tlb/*",
     "src/modules/pci/aspm_saved_state_probe/*",
     "src/modules/iommu/nested_ste/*.bt"
