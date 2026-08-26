@@ -301,8 +301,18 @@ def _best_rejection_reason(rejections) -> str:
     return best_reason
 
 
-def resolve_perf_command() -> tuple[Optional[str], str]:
+def resolve_perf_command(
+    allow_unmatched: bool = False,
+) -> tuple[Optional[str], str]:
     """Resolve a perf command that works for the running kernel.
+
+    Preference order is exact kernel match, then a kernel-compatible
+    candidate. When ``allow_unmatched`` is set and neither exists, fall back to
+    the first candidate that probes cleanly but reports a different kernel
+    line. Callers whose oracle is kernel-side (for example the cs_etm mmap
+    ENOMEM discriminator) can tolerate a mismatched userspace major/minor;
+    custom proof kernels rarely ship a matching linux-tools package at all.
+    The default stays strict, so existing callers are unaffected.
 
     Returns:
         (command, ""):  a perf command usable for the running kernel.
@@ -311,8 +321,9 @@ def resolve_perf_command() -> tuple[Optional[str], str]:
                         so callers can report it instead of guessing.
     """
     kernel_release = platform.uname().release
-    kernel_version = re.split(r"[-+]", kernel_release, 1)[0]
+    kernel_version = re.split(r"[-+]", kernel_release, maxsplit=1)[0]
     compatible_candidate = None
+    unmatched_fallback = None
     rejections: list[tuple[_PerfRejectRank, str]] = []
 
     for candidate in _get_perf_candidates():
@@ -363,21 +374,26 @@ def resolve_perf_command() -> tuple[Optional[str], str]:
         perf_version = version_match.group(1) if version_match else ""
         if not _candidate_is_kernel_compatible(
                 candidate, kernel_release, kernel_version, perf_version):
-            if perf_version:
-                rejections.append((
-                    _PerfRejectRank.VERSION_MISMATCH,
-                    f"'{candidate}' is perf {perf_version}, which does not "
-                    f"match kernel {kernel_release}. GreenLiT requires a "
-                    "matching perf so tests are not run against a stale "
-                    "perf ABI. Install the matching linux-tools package, or "
-                    "build perf from the matching kernel tree.",
-                ))
-            else:
+            # Probed cleanly but reports a different kernel line. Remember it
+            # so allow_unmatched callers have something to fall back on; still
+            # record the rejection for the strict-mode reason string.
+            if not perf_version:
                 rejections.append((
                     _PerfRejectRank.PROBE_FAILED,
                     "could not parse a perf version from "
                     f"'{candidate} --version' output ({output.strip()!r}).",
                 ))
+                continue
+            if unmatched_fallback is None:
+                unmatched_fallback = candidate
+            rejections.append((
+                _PerfRejectRank.VERSION_MISMATCH,
+                f"'{candidate}' is perf {perf_version}, which does not "
+                f"match kernel {kernel_release}. GreenLiT requires a "
+                "matching perf so tests are not run against a stale "
+                "perf ABI. Install the matching linux-tools package, or "
+                "build perf from the matching kernel tree.",
+            ))
             continue
 
         if _candidate_is_exact_kernel_match(
@@ -389,7 +405,8 @@ def resolve_perf_command() -> tuple[Optional[str], str]:
 
     if compatible_candidate is not None:
         return (compatible_candidate, "")
-
+    if allow_unmatched and unmatched_fallback is not None:
+        return (unmatched_fallback, "")
     best = _best_rejection_reason(rejections)
     reason = f"No usable perf found: {best}" if best else "No usable perf found."
     return (None, reason)
