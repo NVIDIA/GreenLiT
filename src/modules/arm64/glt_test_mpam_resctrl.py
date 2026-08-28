@@ -211,6 +211,58 @@ def _mpam_write32(registers, offset, value):
     struct.pack_into("<I", registers, offset, value & 0xFFFFFFFF)
 
 
+def _read_mbm_assignment_states(path):
+    """Return mbm_total_bytes domain assignment states from a resctrl file."""
+    content = glt_utils.read_sysfs_value(path)
+    states = None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        event, sep, rest = line.partition(":")
+        if not sep:
+            raise ValueError(
+                f"Malformed MBM assignment line {line!r} in {path}")
+        if event != MPAM_MBM_TOTAL_BYTES:
+            continue
+        if states is not None:
+            raise ValueError(
+                f"Duplicate {MPAM_MBM_TOTAL_BYTES} assignment line in {path}")
+        states = {}
+        for entry in rest.split(";"):
+            match = re.fullmatch(r"([0-9]+)=([e_])", entry)
+            if match is None:
+                raise ValueError(
+                    f"Malformed MBM assignment entry {entry!r} in {path}")
+            domain = int(match.group(1))
+            if domain in states:
+                raise ValueError(
+                    f"Duplicate MBM domain {domain} in {path}")
+            states[domain] = match.group(2)
+    if not states:
+        raise ValueError(
+            f"No {MPAM_MBM_TOTAL_BYTES} assignment states in {path}")
+    return states
+
+
+def _read_mbm_counter_counts(path):
+    """Return domain-to-count mapping from an MBM counter info file."""
+    content = glt_utils.read_sysfs_value(path)
+    if not content:
+        raise ValueError(f"MBM counter information file {path} is empty")
+    counts = {}
+    for entry in content.split(";"):
+        match = re.fullmatch(r"([0-9]+)=([0-9]+)", entry)
+        if match is None:
+            raise ValueError(
+                f"Malformed MBM counter entry {entry!r} in {path}")
+        domain = int(match.group(1))
+        if domain in counts:
+            raise ValueError(f"Duplicate MBM domain {domain} in {path}")
+        counts[domain] = int(match.group(2))
+    return counts
+
+
 def _validate_mpam_init_registers(  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks
         registers, label):
     """Validate init-programmed allocation registers for each RIS/PARTID."""
@@ -646,7 +698,7 @@ def test_mpam_mbm_assignment_mode(_, logger):
     """
     Verify the active MPAM MBM counter assignment mode.
 
-    PATCH: https://lore.kernel.org/all/20260707162440.12132-1-ben.horgan@arm.com/
+    PATCH: NVIDIA SAUCE db33ffbdf1ce
     """
     mode_path = os.path.join(
         RESCTRL_MOUNT_POINT, "info", "MB_MON", "mbm_assign_mode")
@@ -670,10 +722,8 @@ def test_mpam_mbm_assignment_mode(_, logger):
         if not os.path.isfile(mode_path):
             GLTCore.GLTTestResult.fail(
                 f"MBM assignment mode file {mode_path} is missing. "
-                "Consider backporting the complete [PATCH v18 00/33] "
-                "x86,fs/resctrl: Support AMD Assignable Bandwidth Monitoring "
-                "Counters (ABMC) series: "
-                "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                "Consider backporting commit db33ffbdf1ce "
+                '("Fix monitor capability and MBM assign for MB events").'
             )
 
         try:
@@ -686,9 +736,8 @@ def test_mpam_mbm_assignment_mode(_, logger):
             GLTCore.GLTTestResult.fail(
                 f"MBM event assignment mode is not enabled in {mode_path} "
                 f"(read {modes!r}). "
-                "Consider backporting the complete [PATCH v5 0/5] arm_mpam: "
-                "resctrl: Counter Assignment (ABMC) series: "
-                "https://lore.kernel.org/all/20260707162440.12132-1-ben.horgan@arm.com/"
+                "Consider backporting commit db33ffbdf1ce "
+                '("Fix monitor capability and MBM assign for MB events").'
             )
 
     if cleanup_errors:
@@ -703,7 +752,7 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
     """
     Verify MPAM MBM total and available counter information.
 
-    PATCH: https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/
+    PATCH: NVIDIA SAUCE db33ffbdf1ce
     """
     monitor_info = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_MON")
     counter_paths = {
@@ -727,53 +776,31 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
             if not os.path.isfile(path):
                 GLTCore.GLTTestResult.fail(
                     f"MBM counter information file {path} is missing. "
-                    "Check the dependency-complete backport of "
-                    "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
-                    "Assignable Bandwidth Monitoring Counters (ABMC), "
-                    "including commits 8c793336eaf8 and 16ff6b038fb3: "
-                    "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                    "Consider backporting commit db33ffbdf1ce "
+                    '("Fix monitor capability and MBM assign for MB events").'
                 )
 
             try:
-                content = glt_utils.read_sysfs_value(path)
+                counts = _read_mbm_counter_counts(path)
             except OSError as e:
                 GLTCore.GLTTestResult.fail(
                     f"Failed to read MBM counter information file {path}: {e}")
-
-            if not content:
+            except ValueError as e:
                 GLTCore.GLTTestResult.fail(
-                    f"MBM counter information file {path} is empty. "
-                    "Check the dependency-complete backport of "
-                    "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
-                    "Assignable Bandwidth Monitoring Counters (ABMC), "
-                    "including commits 8c793336eaf8 and 16ff6b038fb3: "
-                    "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                    f"{e}. Consider backporting commit db33ffbdf1ce "
+                    '("Fix monitor capability and MBM assign for MB events").'
                 )
 
-            counts = {}
-            for entry in content.split(";"):
-                match = re.fullmatch(r"([0-9]+)=([0-9]+)", entry)
-                if match is None:
-                    GLTCore.GLTTestResult.fail(
-                        f"Malformed MBM counter entry {entry!r} in {path}. "
-                        "Check the dependency-complete backport of "
-                        "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
-                        "Assignable Bandwidth Monitoring Counters (ABMC), "
-                        "including commits 8c793336eaf8 and 16ff6b038fb3: "
-                        "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
-                    )
-                domain = int(match.group(1))
-                if domain in counts:
-                    GLTCore.GLTTestResult.fail(
-                        f"Duplicate MBM domain {domain} in {path}. "
-                        "Check the dependency-complete backport of "
-                        "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
-                        "Assignable Bandwidth Monitoring Counters (ABMC), "
-                        "including commits 8c793336eaf8 and 16ff6b038fb3: "
-                        "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
-                    )
-                count = int(match.group(2))
-                counts[domain] = count
+            if name == "num_mbm_cntrs":
+                for domain, count in counts.items():
+                    if count == 0:
+                        GLTCore.GLTTestResult.fail(
+                            f"MBM domain {domain} reports 0 total counters "
+                            "in num_mbm_cntrs. Consider backporting commit "
+                            "db33ffbdf1ce "
+                            '("Fix monitor capability and MBM assign for '
+                            'MB events").'
+                        )
             counts_by_file[name] = counts
 
         total_counts = counts_by_file["num_mbm_cntrs"]
@@ -783,11 +810,8 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
                 f"MBM counter domain mismatch: num_mbm_cntrs has "
                 f"{list(total_counts)}, available_mbm_cntrs has "
                 f"{list(available_counts)}. "
-                "Check the dependency-complete backport of "
-                "[PATCH v18 00/33] x86,fs/resctrl: Support AMD Assignable "
-                "Bandwidth Monitoring Counters (ABMC), including commits "
-                "8c793336eaf8 and 16ff6b038fb3: "
-                "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                "Consider backporting commit db33ffbdf1ce "
+                '("Fix monitor capability and MBM assign for MB events").'
             )
 
         for domain, total in total_counts.items():
@@ -796,11 +820,165 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
                 GLTCore.GLTTestResult.fail(
                     f"MBM domain {domain} reports {available} available "
                     f"counters but only {total} total counters. "
-                    "Check the dependency-complete backport of "
-                    "[PATCH v18 00/33] x86,fs/resctrl: Support AMD "
-                    "Assignable Bandwidth Monitoring Counters (ABMC), "
-                    "including commits 8c793336eaf8 and 16ff6b038fb3: "
-                    "https://lore.kernel.org/all/cover.1757108044.git.babu.moger@amd.com/"
+                    "Consider backporting commit db33ffbdf1ce "
+                    '("Fix monitor capability and MBM assign for MB events").'
+                )
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_mbm_counter_info")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks,too-many-statements
+    """
+    Verify MPAM MBM assignments in a temporary monitor group.
+
+    JIRA: DGX-17560
+    PATCH: NVIDIA SAUCE db33ffbdf1ce
+    """
+    mon_groups_path = os.path.join(RESCTRL_MOUNT_POINT, "mon_groups")
+    group_path = os.path.join(
+        mon_groups_path,
+        f"glt_mbm_assignments_{os.getpid()}_{time.time_ns()}",
+    )
+    assignment_path = os.path.join(group_path, "mbm_MB_assignments")
+    available_path = os.path.join(
+        RESCTRL_MOUNT_POINT, "info", "MB_MON", "available_mbm_cntrs")
+
+    cleanup_errors = []
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        if not os.path.isdir(mon_groups_path):
+            GLTCore.GLTTestResult.fail(
+                f"resctrl monitor group directory {mon_groups_path} is "
+                "missing."
+            )
+
+        try:
+            os.mkdir(group_path)
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to create temporary resctrl monitor group "
+                f"{group_path}: {e}"
+            )
+
+        try:
+            if not os.path.isfile(assignment_path):
+                GLTCore.GLTTestResult.fail(
+                    f"MBM assignment file {assignment_path} is missing. "
+                    "Consider backporting commit db33ffbdf1ce "
+                    '("Fix monitor capability and MBM assign for MB events").'
+                )
+
+            try:
+                original_states = _read_mbm_assignment_states(assignment_path)
+                available_counts = _read_mbm_counter_counts(available_path)
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read valid MBM assignment information: {e}"
+                )
+
+            safe_domains = [
+                domain for domain, state in original_states.items()
+                if state == "e" or (
+                    state == "_" and available_counts.get(domain, 0) > 0)
+            ]
+            if not safe_domains:
+                GLTCore.GLTTestResult.skip(
+                    "No MBM counter is available for a safe assignment "
+                    "test."
+                )
+
+            for selected_domain in safe_domains:
+                counter_path = os.path.join(
+                    group_path, "mon_data",
+                    f"mon_MB_{selected_domain:02d}",
+                    MPAM_MBM_TOTAL_BYTES,
+                )
+                if not os.path.isfile(counter_path):
+                    GLTCore.GLTTestResult.fail(
+                        f"MBM monitor file {counter_path} is missing. "
+                        "Consider backporting commit db33ffbdf1ce "
+                        '("Fix monitor capability and MBM assign for '
+                        'MB events").'
+                    )
+
+                original_state = original_states[selected_domain]
+                transitions = (
+                    ("_", "e") if original_state == "e" else ("e", "_")
+                )
+
+                for expected_state in transitions:
+                    expected_states = original_states.copy()
+                    expected_states[selected_domain] = expected_state
+
+                    try:
+                        with open(assignment_path, "w", encoding="utf-8") as f:
+                            f.write(
+                                f"{MPAM_MBM_TOTAL_BYTES}:"
+                                f"{selected_domain}={expected_state}\n"
+                            )
+                    except OSError as e:
+                        GLTCore.GLTTestResult.fail(
+                            f"Failed to set {MPAM_MBM_TOTAL_BYTES} domain "
+                            f"{selected_domain} to {expected_state!r}: {e}"
+                        )
+
+                    try:
+                        states = _read_mbm_assignment_states(assignment_path)
+                    except (OSError, ValueError) as e:
+                        GLTCore.GLTTestResult.fail(
+                            f"Failed to read back MBM assignments from "
+                            f"{assignment_path}: {e}"
+                        )
+
+                    if states != expected_states:
+                        GLTCore.GLTTestResult.fail(
+                            f"MBM assignment readback mismatch after "
+                            f"setting {MPAM_MBM_TOTAL_BYTES} domain "
+                            f"{selected_domain} to {expected_state!r}: "
+                            f"expected {expected_states}, read {states}."
+                        )
+
+                    try:
+                        with open(counter_path, "r", encoding="utf-8") as f:
+                            counter_value = f.read().strip()
+                    except OSError as e:
+                        GLTCore.GLTTestResult.fail(
+                            f"Failed to read MBM monitor file "
+                            f"{counter_path}: {e}"
+                        )
+
+                    if expected_state == "e" and not counter_value.isdigit():
+                        GLTCore.GLTTestResult.fail(
+                            f"Assigned MBM monitor file {counter_path} "
+                            f"did not contain a non-negative integer "
+                            f"(read {counter_value!r})."
+                        )
+                    if (expected_state == "_"
+                            and counter_value != "Unassigned"):
+                        GLTCore.GLTTestResult.fail(
+                            f"Unassigned MBM monitor file {counter_path} "
+                            f"did not report 'Unassigned' "
+                            f"(read {counter_value!r})."
+                        )
+        finally:
+            try:
+                os.rmdir(group_path)
+            except OSError as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to remove temporary resctrl monitor group "
+                    f"{group_path}: {e}"
                 )
 
     if cleanup_errors:
