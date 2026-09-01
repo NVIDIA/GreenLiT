@@ -11,10 +11,12 @@ from tests.test_base import GLTTestBase
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from common.perf_utils import (
+    PERF_LIST_TIMEOUT_SECONDS,
     PERF_TEST_TIMEOUT_SECONDS,
     PERF_VERSION_TIMEOUT_SECONDS,
     PerfTestStatus,
     get_perf_kernel_version_warning,
+    get_perf_list_json,
     get_perf_version,
     has_coresight_fallback_evidence,
     natural_sort_key,
@@ -210,6 +212,50 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                 resolve_perf_command()[0],
                 "/usr/lib/linux-tools/6.17/perf",
             )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_get_perf_list_json_rejects_non_array(self, mock_run):
+        """Perf-list JSON must be an array of event and metric entries."""
+        mock_run.return_value = self._completed(stdout="{}")
+
+        with self.assertRaisesRegex(ValueError, "not an array"):
+            get_perf_list_json("/perf", self.mock_logger)
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_get_perf_list_json_times_out(self, mock_run):
+        """A hung perf-list command raises a contextual validation error."""
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            ["/perf", "list", "-j"], timeout=PERF_LIST_TIMEOUT_SECONDS
+        )
+
+        with self.assertRaisesRegex(ValueError, "perf list timed out"):
+            get_perf_list_json("/perf", self.mock_logger)
+
+        self.mock_logger.error.assert_called_once_with(
+            "perf list timed out after %s seconds",
+            PERF_LIST_TIMEOUT_SECONDS,
+        )
+
+    @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
+    def test_get_perf_list_json_uses_supplied_command(self, mock_run):
+        """The shared JSON helper invokes the caller-supplied perf binary."""
+        perf_list_json = [{"Unit": "nvidia_ucf_pmu_0"}]
+        mock_run.return_value = self._completed(
+            stdout='[{"Unit": "nvidia_ucf_pmu_0"}]'
+        )
+
+        self.assertEqual(
+            get_perf_list_json("/perf", self.mock_logger),
+            perf_list_json,
+        )
+        mock_run.assert_called_once_with(
+            ["/perf", "list", "-j"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=PERF_LIST_TIMEOUT_SECONDS,
+        )
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_get_perf_version(self, mock_run):

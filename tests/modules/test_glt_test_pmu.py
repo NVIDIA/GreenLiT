@@ -1,7 +1,6 @@
 """Unit tests for ARM64 PMU helper functions."""
 # pylint: disable=duplicate-code,protected-access,too-many-public-methods
 
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -61,47 +60,33 @@ class TestPmuHelpers(GLTTestBase):
         )
 
     def test_get_nvidia_perf_list_uses_resolved_perf_command(self):
-        """Test perf list JSON is read through the caller-supplied perf binary."""
-        completed = subprocess.CompletedProcess(
-            ["/perf", "list", "-j"],
-            0,
-            stdout='[{"Unit": "nvidia_ucf_pmu_0"}]',
-            stderr="",
-        )
-
+        """The caller-supplied perf binary is forwarded to the JSON helper."""
         with self.mock.patch.object(
-            glt_test_pmu.subprocess, "run", return_value=completed
-        ) as mock_run:
+            glt_test_pmu.perf_utils,
+            "get_perf_list_json",
+            return_value=[{"Unit": "nvidia_ucf_pmu_0"}],
+        ) as mock_get_perf_list:
             self.assertEqual(
                 glt_test_pmu._get_nvidia_perf_list("/perf", self.mock_logger),
                 {"nvidia_ucf_pmu"},
             )
 
-        mock_run.assert_called_once_with(
-            ["/perf", "list", "-j"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=glt_test_pmu.PERF_LIST_TIMEOUT_SECONDS,
+        mock_get_perf_list.assert_called_once_with(
+            "/perf", self.mock_logger
         )
 
     def test_get_nvidia_perf_list_times_out(self):
-        """Test a hung perf list command raises instead of returning empty."""
-        timeout = subprocess.TimeoutExpired(
-            ["/perf", "list", "-j"],
-            timeout=glt_test_pmu.PERF_LIST_TIMEOUT_SECONDS,
-        )
-
+        """A timeout reported by the shared JSON helper is propagated."""
         with self.mock.patch.object(
-            glt_test_pmu.subprocess, "run", side_effect=timeout
-        ):
+            glt_test_pmu.perf_utils,
+            "get_perf_list_json",
+            side_effect=ValueError("perf list timed out after 30 seconds"),
+        ) as mock_get_perf_list:
             with self.assertRaisesRegex(ValueError, "perf list timed out"):
                 glt_test_pmu._get_nvidia_perf_list("/perf", self.mock_logger)
 
-        self.mock_logger.error.assert_called_once_with(
-            "perf list timed out after %s seconds",
-            glt_test_pmu.PERF_LIST_TIMEOUT_SECONDS,
+        mock_get_perf_list.assert_called_once_with(
+            "/perf", self.mock_logger
         )
 
     def test_classify_pmu_devices(self):

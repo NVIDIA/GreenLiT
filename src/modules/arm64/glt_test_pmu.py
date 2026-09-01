@@ -16,7 +16,6 @@
 """
 Python script to test PMU.
 """
-import json
 import os
 import platform
 import re
@@ -59,7 +58,6 @@ GRACE_PMU_FAMILIES = (
 GENERIC_FALLBACK_PMU_FAMILIES = (
     "nvidia_uncore_pmu",
 )
-
 
 def _normalize_nvidia_pmu_name(pmu_name):
     """Return the PMU family name without instance-specific suffixes."""
@@ -108,7 +106,6 @@ ARM_SPE_PMUS = ("arm_spe_0", "arm_spe_1", "arm_spe_2", "arm_spe_3")
 ARM_SPE_RECORD_TIMEOUT_SECONDS = 180
 ARM_SPE_DECODE_TIMEOUT_SECONDS = 120
 CSPMU_RECORD_TIMEOUT_SECONDS = 30
-PERF_LIST_TIMEOUT_SECONDS = 30
 ARM_SPE_LLC_RECORD_TIMEOUT_SECONDS = 300
 ARM_SPE_MEMFD_PROBE_TIMEOUT_SECONDS = 10
 COMMON_DATA_SOURCE_LEVELS = ("LVL L2", "LVL Local RAM", "LVL Remote RAM")
@@ -480,29 +477,9 @@ def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger, perf_cmd):
 
 def _get_nvidia_perf_list(perf_cmd, logger):
     """Get NVIDIA-specific perf event unit families."""
-    try:
-        cmd_output = subprocess.run(
-            [perf_cmd, "list", "-j"],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=PERF_LIST_TIMEOUT_SECONDS)
-    except (subprocess.CalledProcessError, OSError) as e:
-        logger.error("Error executing command: %s", e)
-        return set()
-    except subprocess.TimeoutExpired as e:
-        logger.error("perf list timed out after %s seconds", e.timeout)
-        raise ValueError(
-            f"perf list timed out after {e.timeout} seconds"
-        ) from e
-
-    try:
-        perf_list_json = json.loads(cmd_output.stdout)
-    except json.JSONDecodeError as e:
-        logger.error("Failed to parse perf list JSON output: %s", e)
-        return set()
-
-    return _parse_nvidia_perf_units(perf_list_json)
+    return _parse_nvidia_perf_units(
+        perf_utils.get_perf_list_json(perf_cmd, logger)
+    )
 
 
 def _get_nvidia_pmu_devices(pmu_path=NVIDIA_PMU_SYSFS_PATH):
