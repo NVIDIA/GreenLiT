@@ -269,17 +269,22 @@ class GLTRequires:
 class GLTPlanType(Enum):
     """GLT supported test plans"""
 
-    SANITY = ("sanity", "(default) Quick sanity check.", ["ext_executable"])
     STANDARD = (
         "standard",
-        "Standard test cases, reboot will be performed. "
-        "The system may hang and require a power cycle to recover.",
+        "(default) Standard test cases that do not intentionally reboot or kexec and "
+        "are not reasonably expected to hang or crash the system.",
         ["ext_executable"],
+    )
+    DISRUPTIVE = (
+        "disruptive",
+        "Test cases that intentionally reboot or kexec the system, or might hang "
+        "or crash it only if a required patch is missing. Manual recovery, such "
+        "as a power cycle, might be required.",
+        [],
     )
     STRESS = (
         "stress",
-        "Stress system, reboot will be performed. "
-        "The system may hang and require a power cycle to recover.",
+        "Extended stress and stability test cases; may include disruptive tests.",
         ["ext_executable"],
     )
     EXT_EXECUTABLE = ("ext_executable", "External test cases.", [])
@@ -325,6 +330,16 @@ class GLTPlan:
 
         if not hasattr(wrapper, "plans"):
             setattr(wrapper, "plans", [])
+
+        selected_plans = set(wrapper.plans) | {self.plan_type}
+        incompatible_plans = {
+            GLTPlanType.STANDARD.value,
+            GLTPlanType.DISRUPTIVE.value,
+        }
+        if incompatible_plans.issubset(selected_plans):
+            raise ValueError(
+                "A test case cannot belong to both standard and disruptive plans."
+            )
 
         wrapper.plans.append(self.plan_type)
         return wrapper

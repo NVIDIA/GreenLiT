@@ -132,48 +132,38 @@ Please refer to any test case (i.e. a function that starts with `test_` under `<
 The basic contents of a test case would look like the following code block. While you could simply make copies of existing tests and start your test case creation journey from there, scroll down further and refer to the breakdown of this piece of code to understand what each section means, and how you can use them to design your test case:
 
 ```python
-import subprocess
 from common import glt_core as GLTCore
 from common import glt_utils
 from common.nv_device import NvDev
 
-# ...(other test cases omitted for brevity)
+EXPECTED_MODEL_NAME = "Olympus"
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
-def test_nvidia_pci_device_reset_method(sd, logger):
+def test_vera_lscpu_model_name(_, logger):
     """
-    Test primary reset method of Hopper/NVIDIA GFX device.
+    Test if the Vera CPU model name is Olympus.
 
-    PATCH: https://git.kernel.org/torvalds/c/6937b7dd4349 v5.15+
+    PATCH: https://github.com/util-linux/util-linux/commit/9087774
     """
+    nvdev = NvDev()
+    if not nvdev.is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("The CPU is not Vera.")
 
-    for tests in sd.progress:
-        if test_nvidia_pci_device_reset_method.__name__ not in tests:
-            continue
-        if "MightReset" in tests[test_nvidia_pci_device_reset_method.__name__]:
+    model_name = glt_utils.get_cpu_model_name(logger)
+    if model_name is None:
+        GLTCore.GLTTestResult.fail("Failed to get CPU model name from lscpu.")
 
-            # ...(section omitted for brevity)
+    logger.info("lscpu Model name: %s", model_name)
 
-            if p.returncode == 0 and p.stdout.strip() != '0':
-                logger.info("System reset didn't happen")
-                glt_utils.systemd_enable(enable=False)
-                glt_utils.start_systemd_timer(start=False)
-                return
-
-            GLTCore.GLTTestResult.fail("System was reset")
-
-    lspci_output = NvDev.get_nvidia_3d_bdf()
-    pci_dev_addrs = list(lspci_output.splitlines())
-
-    if not pci_dev_addrs:
-        GLTCore.GLTTestResult.skip("SKIP: NVIDIA hopper pcie device ID not found.")
-
-    # ...(section omitted for brevity)
-
-    glt_utils.arm_for_reset(test_nvidia_pci_device_reset_method.__name__, sd)
+    if EXPECTED_MODEL_NAME != model_name:
+        GLTCore.GLTTestResult.fail(
+            f"CPU model name mismatch. Expected '{EXPECTED_MODEL_NAME}' in model name, "
+            f"but got '{model_name}'. "
+            "Please backport the patch to util-linux: "
+            "https://github.com/util-linux/util-linux/commit/9087774"
+        )
 ```
 
 ### Categorizing Your Test Case
@@ -194,19 +184,26 @@ When any new "category" (i.e. new directory under `/src/modules`) is introduced,
 
 Decide which test plan(s) your test case should be included into.
 
-Choose from the 3 valid test plans:
+Choose from the 3 valid native test plans:
 
-- `"sanity"` - Quick smoke tests for basic functionality
-- `"standard"` - Comprehensive testing for standard validation
-- `"stress"` - Extended stress and stability testing
+- `"standard"` - Comprehensive non-disruptive validation; tests must not
+  intentionally reboot or kexec and must not be reasonably expected to hang,
+  crash, reset, or require manual recovery
+- `"disruptive"` - Tests that intentionally reboot or kexec the system, or might
+  hang or crash it only if a required patch is missing. Manual recovery, such as
+  a power cycle, might be required
+- `"stress"` - Extended stress and stability testing; may include disruptive
+  tests
 
 Use the decorator `@GLTCore.GLTPlan("<test plan name>")` with your test case to include the test into a certain plan. Use multiple decorators if your test should be in multiple test plans.
+Do not assign the same test to both `standard` and `disruptive`. Disruptive
+tests should normally also remain in `stress` when extended validation is
+appropriate.
 
 **Example:**
 
 ```python
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 def test_my_feature(_, logger):
     """Test description"""
@@ -244,11 +241,11 @@ def test_my_feature(_, logger):
 **Example:**
 
 ```python
-def test_nvidia_pci_device_reset_method(sd, logger):
+def test_vera_lscpu_model_name(_, logger):
     """
-    Test primary reset method of Hopper/NVIDIA GFX device.
+    Test if the Vera CPU model name is Olympus.
 
-    PATCH: https://git.kernel.org/torvalds/c/6937b7dd4349 v5.15+
+    PATCH: https://github.com/util-linux/util-linux/commit/9087774
     """
 ```
 
@@ -266,7 +263,7 @@ Use a comment above the line that requires modifying:
 
 ```python
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
 def test_my_feature(_, logger):
     """Test description"""
     pass
@@ -426,7 +423,6 @@ If your test case should only be run when other test case(s) have failed, use th
 ```python
 @GLTCore.GLTRequires.must_pass("hwtracing", "test_perf_coresight")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_perf_events(_, logger):
@@ -461,8 +457,9 @@ Some tests need to reboot the device under test and resume after boot to check
 post-reboot state, or need a special reboot mechanism to recover from a locked-up
 kernel. All reboot mechanisms rely on the same pattern: check `sd.progress` to tell
 whether this is the first run or a resumed run after the test triggered its own
-reboot — the same pattern used in [Example Test Case Structure](#example-test-case-structure)
-above.
+reboot, as shown in the
+[Create a Test Case that Requires a Simple Reboot](#create-a-test-case-that-requires-a-simple-reboot)
+example below.
 
 ### Create a Test Case that Requires a Simple Reboot
 
@@ -472,7 +469,7 @@ triggered the reboot:
 
 ```python
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_reboot(sd, logger):
     """Reboot system to see if it's bootable"""
@@ -543,7 +540,7 @@ _kexec_conditional_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 )
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_efi_runtime_services_mask(sd, logger):
     if not glt_utils.is_efi_system():
@@ -836,7 +833,9 @@ External tests have some limitations compared to Python test cases:
 - No direct access to the scheduler for reboot testing
 - Must manage their own error handling and logging
 
-If your test needs these features, consider creating a [standard Python test case](#create-a-test-case-that-does-not-require-reboots) instead.
+If your test needs these features, create a native Python test under
+`src/modules/` and assign `disruptive` and `stress` when it needs reboot or
+kexec handling.
 
 ## Inclusion of Additional Packages
 

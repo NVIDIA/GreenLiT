@@ -23,7 +23,6 @@ from common import glt_core as GLTCore
 from common import glt_utils
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_persistence_mode(_, logger):

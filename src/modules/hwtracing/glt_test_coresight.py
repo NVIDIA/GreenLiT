@@ -184,7 +184,6 @@ def _run_cs_etm_record(perf_cmd, output_path, logger, cpu_range):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_perf_coresight(_, logger):
@@ -225,7 +224,6 @@ def test_perf_coresight(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_perf_cs_etm_multisocket_trace_id_map(sd, logger):

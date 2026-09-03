@@ -344,7 +344,6 @@ def _validate_cppc_sysfs_helpers(logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_vera_cppc_sysfs_helpers(_, logger):
@@ -364,7 +363,6 @@ def test_vera_cppc_sysfs_helpers(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cppc_perf_controls(_, logger):
@@ -719,7 +717,6 @@ def _validate_cppc_prerequisites(require_stress_ng=False):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cppc_cpufreq_online_get_did_not_fail(_, logger):

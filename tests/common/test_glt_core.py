@@ -149,41 +149,45 @@ class TestGLTCore(GLTTestBase):
     def test_plan_type(self):
         """Test the GLTPlanType enum"""
         # Test enum values
-        self.assertEqual(GLTPlanType.SANITY.value, "sanity")
         self.assertEqual(GLTPlanType.STANDARD.value, "standard")
+        self.assertEqual(GLTPlanType.DISRUPTIVE.value, "disruptive")
         self.assertEqual(GLTPlanType.STRESS.value, "stress")
-
         # Test descriptions
-        self.assertIn("Quick sanity check", GLTPlanType.SANITY.description)
-        self.assertIn("Standard test cases", GLTPlanType.STANDARD.description)
-        self.assertIn("Stress system", GLTPlanType.STRESS.description)
+        self.assertIn("(default)", GLTPlanType.STANDARD.description)
         self.assertIn(
-            "may hang and require a power cycle",
+            "reboot or kexec the system", GLTPlanType.DISRUPTIVE.description
+        )
+        self.assertIn(
+            "do not intentionally reboot or kexec",
             GLTPlanType.STANDARD.description,
         )
         self.assertIn(
-            "may hang and require a power cycle",
+            "Manual recovery, such as a power cycle",
+            GLTPlanType.DISRUPTIVE.description,
+        )
+        self.assertIn(
+            "may include disruptive tests",
             GLTPlanType.STRESS.description,
         )
 
     def test_plan(self):
         """Test the GLTPlan class"""
         # Test plan creation with valid type
-        plan = GLTPlan("sanity")
-        self.assertEqual(plan.plan_type, "sanity")
+        plan = GLTPlan("standard")
+        self.assertEqual(plan.plan_type, "standard")
 
         # Test invalid plan type
         with self.assertRaises(ValueError):
             GLTPlan("invalid_plan")
 
         # Test the decorator functionality
-        @GLTPlan("sanity")
+        @GLTPlan("standard")
         def test_func():
             return "test"
 
         # Verify the decorator adds plans attribute
         self.assertTrue(hasattr(test_func, "plans"))
-        self.assertEqual(test_func.plans[0], "sanity")
+        self.assertEqual(test_func.plans[0], "standard")
 
         # Verify the function still works
         self.assertEqual(test_func(), "test")
@@ -197,6 +201,20 @@ class TestGLTCore(GLTTestBase):
         self.assertEqual(len(multi_plan_func.plans), 2)
         self.assertIn("standard", multi_plan_func.plans)
         self.assertIn("stress", multi_plan_func.plans)
+
+        with self.assertRaisesRegex(
+                ValueError, "cannot belong to both standard and disruptive"):
+            @GLTPlan("standard")
+            @GLTPlan("disruptive")
+            def invalid_standard_outer():
+                return "invalid"
+
+        with self.assertRaisesRegex(
+                ValueError, "cannot belong to both standard and disruptive"):
+            @GLTPlan("disruptive")
+            @GLTPlan("standard")
+            def invalid_disruptive_outer():
+                return "invalid"
 
     def test_test_attr(self):
         """Test the GLTTestAttr class"""
@@ -225,15 +243,15 @@ class TestGLTCore(GLTTestBase):
 
         # Test with multiple decorators in real-world style
         @GLTTestAttr(cat="arm64")
-        @GLTPlan("sanity")
         @GLTPlan("standard")
+        @GLTPlan("stress")
         def real_world_test():
             return "real_world_example"
 
         # Verify both plans are applied
         self.assertEqual(len(real_world_test.__wrapped__.attr.plans), 2)
-        self.assertIn("sanity", real_world_test.__wrapped__.attr.plans)
         self.assertIn("standard", real_world_test.__wrapped__.attr.plans)
+        self.assertIn("stress", real_world_test.__wrapped__.attr.plans)
         self.assertEqual(real_world_test.__wrapped__.attr.category, "arm64")
 
         # Test default result
@@ -683,12 +701,12 @@ class TestGLTCore(GLTTestBase):
 
     def test_plan_nesting(self):
         """Test the GLTPlanType.get_all_nested method"""
-        nested = GLTPlanType.get_all_nested(["sanity"])
-        assert "sanity" in nested
-        assert "ext_executable" in nested
         nested = GLTPlanType.get_all_nested(["standard"])
-        assert "standard" in nested
-        assert "ext_executable" in nested
+        assert nested == {"standard", "ext_executable"}
+        nested = GLTPlanType.get_all_nested(["disruptive"])
+        assert nested == {"disruptive"}
+        nested = GLTPlanType.get_all_nested(["stress"])
+        assert nested == {"stress", "ext_executable"}
         nested = GLTPlanType.get_all_nested(["ext_executable"])
         assert nested == {"ext_executable"}
 

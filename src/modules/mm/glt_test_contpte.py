@@ -103,7 +103,6 @@ def _evaluate_probe_result(probe):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_contpte_set_access_flags_no_op(_, logger):  # pylint: disable=too-many-branches

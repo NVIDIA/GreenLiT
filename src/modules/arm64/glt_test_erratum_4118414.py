@@ -38,7 +38,6 @@ PATCH_CONTEXT = (
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_arm64_erratum_4118414(_, logger):

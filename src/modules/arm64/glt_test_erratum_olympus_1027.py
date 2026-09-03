@@ -44,7 +44,6 @@ PATCH_CONTEXT = (
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_olympus_1027_erratum(_, logger):

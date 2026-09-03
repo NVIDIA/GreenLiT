@@ -64,7 +64,6 @@ def _getauxval(aux_type):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_vera_ls64_userspace_abi(_, logger):

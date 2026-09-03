@@ -264,7 +264,6 @@ def _probe_olympus_pmccntr(logger, perf_cmd):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_olympus_pmccntr_wfi_handling(_, logger):

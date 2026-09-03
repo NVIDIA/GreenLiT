@@ -23,7 +23,6 @@ from common import kselftest
 from common.nv_device import NvDev
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_virt_kselftest(_, __):

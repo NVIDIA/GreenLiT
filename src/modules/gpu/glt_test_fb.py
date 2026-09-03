@@ -24,7 +24,6 @@ from common import glt_utils
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_fb_efi_addresses(_, __):

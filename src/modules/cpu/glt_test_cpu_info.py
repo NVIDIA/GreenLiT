@@ -23,7 +23,6 @@ EXPECTED_MODEL_NAME = "Olympus"
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_vera_lscpu_model_name(_, logger):

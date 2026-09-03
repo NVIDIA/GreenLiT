@@ -236,7 +236,6 @@ def is_NVDA0301_present(logger): # pylint: disable=invalid-name
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_i2c_and_ipmi_device(_, logger):
@@ -266,7 +265,6 @@ def test_i2c_and_ipmi_device(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_ipmi_i2c_pec(_, logger):
@@ -314,7 +312,6 @@ def test_ipmi_i2c_pec(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra_i2c_acpi_runtime_pm_irq_safe(_, logger):  # pylint: disable=too-many-branches
@@ -446,7 +443,6 @@ def _restore_tegra_i2c_binding(_scheduler, attr, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra_i2c_dma_pio_fallback(_, __):
@@ -513,7 +509,6 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_tegra410_i2c_device(_, logger):

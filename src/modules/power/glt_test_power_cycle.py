@@ -21,7 +21,7 @@ from common import glt_utils
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_reboot(sd, logger):
     """Reboot system to see if it's bootable"""

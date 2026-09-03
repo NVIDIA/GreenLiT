@@ -639,7 +639,6 @@ def _record_arm_spe(perf_cmd, perf_data_path, pmu, logger):
 
 @GLTCore.GLTRequires.must_pass("hwtracing", "test_perf_coresight")
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_perf_events(_, logger):
@@ -679,7 +678,6 @@ def test_nvidia_perf_events(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_all_pmu_events(_, logger):
@@ -705,7 +703,8 @@ def test_all_pmu_events(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_perf_cspmu_rejects_foreign_events(_, logger):
     """Verify CSPMU rejects events meant for other PMUs (commit 15c7ef73).
 
@@ -752,7 +751,6 @@ def test_perf_cspmu_rejects_foreign_events(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_arm_spe_pmu(sd, logger):
@@ -848,7 +846,6 @@ def test_arm_spe_pmu(sd, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_pmccntr_smt_handling(_, logger):
@@ -906,7 +903,6 @@ def test_pmccntr_smt_handling(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_perf_arm_spe_olympus_data_source(sd, logger):

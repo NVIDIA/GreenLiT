@@ -272,7 +272,7 @@ class TestTestCaseDiscovery(GLTTestBase):
         for test_case, expected_name in expected_names.items():
             with self.subTest(test_case=test_case.__name__):
                 self.assertEqual(
-                    set(test_case.plans), {"sanity", "standard", "stress"}
+                    set(test_case.plans), {"standard", "stress"}
                 )
                 self.assertEqual(
                     GLTCore.GLTScheduler.get_test_case_name(test_case),

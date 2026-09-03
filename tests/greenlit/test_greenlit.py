@@ -35,6 +35,38 @@ def _summary(test_tags=None, categories=None, test_cases=None, verbose=False):
 class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test pure helper functions used by glt-test-suite."""
 
+    def test_get_active_plan_tags_defaults_to_standard(self):
+        """No explicit plan selects standard and its nested external tests."""
+        args = _args([])
+        for plan in GLTCore.GLTPlanType:
+            setattr(args, plan.value, False)
+
+        self.assertEqual(
+            greenlit.get_active_plan_tags(args),
+            {"standard", "ext_executable"},
+        )
+
+    def test_get_active_plan_tags_selects_disruptive(self):
+        """The disruptive plan does not include nested plan tags."""
+        args = _args([])
+        for plan in GLTCore.GLTPlanType:
+            setattr(args, plan.value, plan.value == "disruptive")
+
+        self.assertEqual(
+            greenlit.get_active_plan_tags(args),
+            {"disruptive"},
+        )
+
+    def test_parse_arguments_maps_deprecated_sanity_to_standard(self):
+        """The removed sanity plan remains a deprecated CLI alias."""
+        with mock.patch.object(
+                greenlit.sys, "argv", ["glt-test-suite", "--sanity"]), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            args = greenlit.parse_arguments([])
+
+        self.assertTrue(args.standard)
+        self.assertIn("--sanity is deprecated", stderr.getvalue())
+
     def test_parse_test_selector_accepts_category_test_name(self):
         """Valid selectors are returned unchanged."""
         self.assertEqual(
@@ -75,7 +107,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         """Config entries outside scheduler.test_list are ignored."""
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_prereq():
             return "prereq"
 
@@ -114,7 +146,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         """Later YAML files replace earlier definitions for the same test."""
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_prereq():
             return "prereq"
 
@@ -208,7 +240,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         """Selected test IDs must exist."""
 
         @GLTCore.GLTTestAttr(cat="cxl", name="test_known")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_known():
             return "known"
 
@@ -217,7 +249,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 return_value=[test_known]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["cxl"], ["cxl:test_missing"],
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(test_objs, [])
         self.assertIn("Unknown test ID: cxl:test_missing", error)
@@ -228,7 +260,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 
         @GLTCore.GLTRequires.must_pass("cxl", "test_missing")
         @GLTCore.GLTTestAttr(cat="cxl", name="test_selected")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_selected():
             return "selected"
 
@@ -237,7 +269,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 return_value=[test_selected]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["cxl"], ["cxl:test_selected"],
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(test_objs, [])
         self.assertIn("cxl:test_missing", error)
@@ -256,7 +288,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 return_value=[test_stress]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["cxl"], ["cxl:test_stress"],
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(test_objs, [])
         self.assertIn("cxl:test_stress", error)
@@ -273,7 +305,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 
         @GLTCore.GLTRequires.must_pass("cxl", "test_prereq")
         @GLTCore.GLTTestAttr(cat="cxl", name="test_selected")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_selected():
             return "selected"
 
@@ -282,7 +314,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 return_value=[test_selected, test_prereq]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["cxl"], ["cxl:test_selected"],
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(test_objs, [])
         self.assertIn("Required test ID cxl:test_prereq", error)
@@ -292,10 +324,10 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
     def test_discover_target_test_cases_filters_normal_roots_by_plan(self):
         """Category discovery ignores out-of-plan tests that are not prerequisites."""
 
-        @GLTCore.GLTTestAttr(cat="pci", name="test_sanity")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
-        def test_sanity():
-            return "sanity"
+        @GLTCore.GLTTestAttr(cat="pci", name="test_standard")
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
+        def test_standard():
+            return "standard"
 
         @GLTCore.GLTTestAttr(cat="pci", name="test_stress")
         @GLTCore.GLTPlan(GLTCore.GLTPlanType.STRESS.value)
@@ -304,23 +336,23 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 
         with mock.patch.object(
                 greenlit, "test_case_discover",
-                return_value=[test_sanity, test_stress]):
+                return_value=[test_standard, test_stress]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
-                ["pci"], None, {GLTCore.GLTPlanType.SANITY.value})
+                ["pci"], None, {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(
             [f"{obj.__wrapped__.attr.category}:{obj.__wrapped__.attr.name}"
              for obj in test_objs],
-            ["pci:test_sanity"])
+            ["pci:test_standard"])
 
     def test_discover_target_test_cases_rejects_empty_selection(self):
         """Discovery reports when plan/category selection finds no tests."""
         with mock.patch.object(greenlit, "test_case_discover",
                                return_value=[]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
-                ["cxl"], None, {GLTCore.GLTPlanType.SANITY.value})
+                ["cxl"], None, {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(test_objs, [])
         self.assertEqual(error, "")
@@ -361,10 +393,10 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         """Runnable category tests cannot depend on out-of-plan prerequisites."""
 
         @GLTCore.GLTRequires.must_pass("hwtracing", "test_stress_prereq")
-        @GLTCore.GLTTestAttr(cat="pci", name="test_sanity")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
-        def test_sanity():
-            return "sanity"
+        @GLTCore.GLTTestAttr(cat="pci", name="test_standard")
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
+        def test_standard():
+            return "standard"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_stress_prereq")
         @GLTCore.GLTPlan(GLTCore.GLTPlanType.STRESS.value)
@@ -372,7 +404,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
             return "stress"
 
         discovered = {
-            ("pci",): [test_sanity],
+            ("pci",): [test_standard],
             ("hwtracing",): [test_stress_prereq],
         }
 
@@ -381,7 +413,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 side_effect=lambda cats: discovered[tuple(cats)]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["pci"], None,
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(test_objs, [])
         self.assertIn("Required test ID hwtracing:test_stress_prereq", error)
@@ -393,17 +425,17 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 
         @GLTCore.GLTRequires.must_pass("hwtracing", "test_prereq")
         @GLTCore.GLTTestAttr(cat="arm64", name="test_main")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_main():
             return "main"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_prereq():
             return "prereq"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_unrelated")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_unrelated():
             return "unrelated"
 
@@ -417,7 +449,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 side_effect=lambda cats: discovered[tuple(cats)]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["arm64"], None,
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
@@ -431,17 +463,17 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 
         @GLTCore.GLTRequires.must_pass("hwtracing", "test_prereq")
         @GLTCore.GLTTestAttr(cat="arm64", name="test_selected")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_selected():
             return "selected"
 
         @GLTCore.GLTTestAttr(cat="arm64", name="test_unrelated")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_unrelated():
             return "unrelated"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_prereq():
             return "prereq"
 
@@ -455,7 +487,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
                 side_effect=lambda cats: discovered[tuple(cats)]):
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["arm64"], ["arm64:test_selected"],
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
@@ -469,17 +501,17 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
 
         @GLTCore.GLTRequires.must_pass("hwtracing", "test_prereq")
         @GLTCore.GLTTestAttr(cat="arm64", name="test_main")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_main():
             return "main"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_prereq():
             return "prereq"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_unrelated")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_unrelated():
             return "unrelated"
 
@@ -494,7 +526,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
             test_objs, error, exit_code = greenlit.discover_target_test_cases(
                 ["arm64", "hwtracing"],
                 ["arm64:test_main", "hwtracing:test_prereq"],
-                {GLTCore.GLTPlanType.SANITY.value})
+                {GLTCore.GLTPlanType.STANDARD.value})
 
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
@@ -652,7 +684,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
     def test_resolve_target_test_objects_reports_empty_normal_run(self):
         """Empty normal run selection is handled before main builds a scheduler."""
         args = _args(["cxl"])
-        active_plan_tags = {GLTCore.GLTPlanType.SANITY.value}
+        active_plan_tags = {GLTCore.GLTPlanType.STANDARD.value}
 
         with mock.patch.object(
                 greenlit, "resolve_run_selection",
@@ -695,7 +727,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
     def test_resolve_target_test_objects_allows_empty_list(self):
         """Empty --list selection is not an error."""
         args = _args(["cxl"], list_tests=True)
-        active_plan_tags = {GLTCore.GLTPlanType.SANITY.value}
+        active_plan_tags = {GLTCore.GLTPlanType.STANDARD.value}
 
         with mock.patch.object(
                 greenlit, "resolve_run_selection",
@@ -717,7 +749,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
     def test_resolve_target_test_objects_forwards_discovery_error(self):
         """Discovery decides the exit code for discovery-specific failures."""
         args = _args(["cxl"])
-        active_plan_tags = {GLTCore.GLTPlanType.SANITY.value}
+        active_plan_tags = {GLTCore.GLTPlanType.STANDARD.value}
 
         with mock.patch.object(
                 greenlit, "resolve_run_selection",
@@ -880,12 +912,12 @@ class TestGreenlitResumeHelpers(GLTTestBase):
         """Resume passes exact saved test IDs back to discovery."""
 
         @GLTCore.GLTTestAttr(cat="arm64", name="test_main")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_main():
             return "main"
 
         @GLTCore.GLTTestAttr(cat="hwtracing", name="test_prereq")
-        @GLTCore.GLTPlan(GLTCore.GLTPlanType.SANITY.value)
+        @GLTCore.GLTPlan(GLTCore.GLTPlanType.STANDARD.value)
         def test_prereq():
             return "prereq"
 
@@ -896,7 +928,7 @@ class TestGreenlitResumeHelpers(GLTTestBase):
             with open(progress_path, "w", encoding="UTF-8") as progress_file:
                 json.dump([{
                     "Summary": {
-                        "TestTags": [GLTCore.GLTPlanType.SANITY.value],
+                        "TestTags": [GLTCore.GLTPlanType.STANDARD.value],
                         "Categories": ["arm64", "hwtracing"],
                     }
                 }, {

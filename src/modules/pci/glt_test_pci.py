@@ -151,7 +151,6 @@ def _write_aspm_policy(policy, policy_path=ASPM_POLICY_PATH):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_cxl_cache_ats_always_on(_, logger):
@@ -236,7 +235,7 @@ def test_cxl_cache_ats_always_on(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_nvidia_pci_device_reset_method(sd, logger):
     """
@@ -294,7 +293,6 @@ def test_nvidia_pci_device_reset_method(sd, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_renesas_xhci_pci_config(_, __):
@@ -334,7 +332,6 @@ def test_renesas_xhci_pci_config(_, __):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
@@ -475,7 +472,6 @@ def test_pci_secondary_mabort(_, logger):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
@@ -688,7 +684,6 @@ def _has_usb_devices_behind_hub(controller_bdf: str) -> tuple[bool, str]:
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("sanity")
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
@@ -795,7 +790,7 @@ _acs_kexec_conditional_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
 
 # pylint: disable=too-many-branches
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 def test_pci_acs_configurability(sd, logger):
     """
@@ -1044,7 +1039,7 @@ def _resolve_and_validate_target(bdf: str):
 
 
 @GLTCore.GLTTestAttr()
-@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("disruptive")
 @GLTCore.GLTPlan("stress")
 # pylint: disable=too-many-branches
 def test_msix_mem_restore_no_ur(sd, logger):

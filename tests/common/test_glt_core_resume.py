@@ -98,7 +98,7 @@ class TestGLTSchedulerResume(GLTTestBase):
         scheduler.sort()
         initial_progress = [{"Current": "progress"}]
         scheduler.progress = initial_progress
-        scheduler.test_tags = {GLTPlanType.SANITY.value}
+        scheduler.test_tags = {GLTPlanType.STANDARD.value}
         scheduler.test_categories = ["current"]
 
         with tempfile.TemporaryDirectory() as session_dir:
@@ -125,7 +125,7 @@ class TestGLTSchedulerResume(GLTTestBase):
         self.assertIn(
             "unknown test case external:missing_sh", progress_error)
         self.assertIs(scheduler.progress, initial_progress)
-        self.assertEqual(scheduler.test_tags, {GLTPlanType.SANITY.value})
+        self.assertEqual(scheduler.test_tags, {GLTPlanType.STANDARD.value})
         self.assertEqual(scheduler.test_categories, ["current"])
         self.assertEqual(scheduler.test_list, [external_test])
         self.assertEqual(
