@@ -25,8 +25,10 @@ import glob
 import json
 import os
 import re
-import struct
 import subprocess
+
+from common import glt_utils
+from common import pci_utils
 
 
 # PCI class code reported by CXL Type-3 devices ("CXL Memory Device").
@@ -214,18 +216,11 @@ def read_cxl_device_dvsec_cap_bits(
     cache_wbi_capable_bit = 1 << 6
     rst_capable_bit = 1 << 7
 
-    cfg_path = os.path.join(
-        sysfs_root, "sys", "bus", "pci", "devices", bdf, "config",
+    raw = pci_utils.read_config_word(
+        bdf, dvsec_off + cap_reg_off, sysfs_root=sysfs_root,
     )
-    try:
-        with open(cfg_path, "rb") as f:
-            f.seek(dvsec_off + cap_reg_off)
-            raw_bytes = f.read(2)
-    except OSError:
+    if raw is None:
         return None
-    if len(raw_bytes) < 2:
-        return None
-    (raw,) = struct.unpack("<H", raw_bytes)
     return {
         "cache_capable":     bool(raw & cache_capable_bit),
         "mem_capable":       bool(raw & mem_capable_bit),
@@ -254,23 +249,108 @@ def read_cxl_device_dvsec_status2_bits(
     rst_done_bit = 1 << 1
     rst_err_bit = 1 << 2
 
-    cfg_path = os.path.join(
-        sysfs_root, "sys", "bus", "pci", "devices", bdf, "config",
+    raw = pci_utils.read_config_word(
+        bdf, dvsec_off + status2_reg_off, sysfs_root=sysfs_root,
     )
-    try:
-        with open(cfg_path, "rb") as f:
-            f.seek(dvsec_off + status2_reg_off)
-            raw_bytes = f.read(2)
-    except OSError:
+    if raw is None:
         return None
-    if len(raw_bytes) < 2:
-        return None
-    (raw,) = struct.unpack("<H", raw_bytes)
     return {
         "cache_inv": bool(raw & cache_inv_bit),
         "rst_done":  bool(raw & rst_done_bit),
         "rst_err":   bool(raw & rst_err_bit),
     }
+
+
+def read_cxl_port_unmask_sbr(
+    bdf: str, dvsec_off: int, sysfs_root: str = "/",
+) -> bool | None:
+    """Return whether Unmask SBR is set in the CXL Port Control register.
+
+    `dvsec_off` is the CXL Port Extensions DVSEC base from
+    find_cxl_port_dvsec_base(). True means Unmask SBR is 1 (SBR can take
+    effect); False means it is 0 (SBR is masked). None if the config-space
+    read fails.
+    """
+    # CXL r3.1 §8.1.5.2 Port Control Extensions; Unmask SBR is bit 0.
+    port_ctl_off = 0x0C
+    unmask_sbr_bit = 0x0001
+
+    raw = pci_utils.read_config_word(
+        bdf, dvsec_off + port_ctl_off, sysfs_root=sysfs_root,
+    )
+    if raw is None:
+        return None
+    return bool(raw & unmask_sbr_bit)
+
+
+def read_cxl_flexbus_port_cxl_mode(
+    bdf: str, dvsec_off: int, sysfs_root: str = "/",
+) -> bool | None:
+    """Return whether Flex Bus Port Status reports CXL.cache or CXL.mem.
+
+    Mirrors pcie_is_cxl() / set_pcie_cxl(): the kernel sets pci_dev->is_cxl
+    when either status bit is set. `dvsec_off` is the Flex Bus Port DVSEC
+    base (DVSEC ID 0x0007). None if the config-space read fails.
+    """
+    # Flex Bus Port Status (CXL r3.1 / r4.0 §8.1.8).
+    status_off = 0x0E
+    cache_status_bit = 1 << 0
+    mem_status_bit = 1 << 2
+
+    raw = pci_utils.read_config_word(
+        bdf, dvsec_off + status_off, sysfs_root=sysfs_root,
+    )
+    if raw is None:
+        return None
+    return bool(raw & (cache_status_bit | mem_status_bit))
+
+
+def is_cxl_sbr_masked_port(bdf: str, sysfs_root: str = "/") -> bool | None:
+    """Return whether `bdf` matches pcie_is_cxl() && cxl_sbr_masked().
+
+    True when the port is in CXL mode and Unmask SBR is 0, so the PCI core
+    must hide the ``bus`` reset method from downstream devices. False when
+    the condition is conclusively absent (no CXL Port / Flex Bus DVSEC, link
+    in PCIe mode, or Unmask SBR is 1). None when lspci or config space
+    cannot be read, so the caller cannot tell.
+    """
+    try:
+        result = glt_utils.run_command(
+            ["lspci", "-vv", "-s", bdf],
+            f"Failed to read CXL DVSECs on {bdf}",
+        )
+    except RuntimeError:
+        return None
+
+    flexbus_port_dvsec_id = 0x0007
+    port_off = None
+    flex_off = None
+    for line in result.stdout.splitlines():
+        match = _DVSEC_LINE_RE.search(line)
+        if not match:
+            continue
+        if int(match.group(2), 16) != _CXL_DVSEC_VENDOR:
+            continue
+        dvsec_id = int(match.group(3), 16)
+        offset = int(match.group(1), 16)
+        if dvsec_id == _CXL_PORT_EXT_DVSEC_ID and port_off is None:
+            port_off = offset
+        elif dvsec_id == flexbus_port_dvsec_id and flex_off is None:
+            flex_off = offset
+        if port_off is not None and flex_off is not None:
+            break
+    if port_off is None or flex_off is None:
+        # pciutils still exits 0 when a capability cannot be decoded.
+        if "<access denied>" in result.stdout:
+            return None
+        return False
+    in_cxl_mode = read_cxl_flexbus_port_cxl_mode(bdf, flex_off, sysfs_root)
+    if not in_cxl_mode:
+        return in_cxl_mode
+    unmask_sbr = read_cxl_port_unmask_sbr(bdf, port_off, sysfs_root)
+    if unmask_sbr is None:
+        return None
+    return not unmask_sbr
 
 
 def any_cxl_region_committed(sysfs_root: str = "/") -> bool:

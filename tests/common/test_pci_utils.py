@@ -1,6 +1,9 @@
 """Unit test script for common/pci_utils.py"""
 
+import os
+import shutil
 import subprocess
+import tempfile
 from unittest.mock import MagicMock
 
 from tests.test_base import GLTTestBase
@@ -19,10 +22,13 @@ from src.common.pci_utils import (
     get_iommu_group_type,
     get_pci_children,
     get_pci_class,
+    get_pci_parent,
+    get_reset_methods,
     iface_pci_bdfs,
     is_ats_enabled,
     mounted_block_devices,
     pci_bdfs_backing_mount,
+    read_config_word,
     unsafe_pci_bdfs,
     sysfs_path_to_pci_bdf,
 )
@@ -315,6 +321,211 @@ class TestPciUtils(GLTTestBase):
     def test_pci_class_usb_host_constant(self):
         """USB host controller class prefix matches the PCI spec."""
         self.assertEqual(PCI_CLASS_USB_HOST, "0x0c03")
+
+
+class TestGetPciParent(GLTTestBase):
+    """Tests for get_pci_parent() against a fake sysfs tree."""
+
+    PARENT = "0000:00:01.0"
+    CHILD = "0000:01:00.0"
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def _link_pci_device(self, real_dir, bdf):
+        bus_dir = os.path.join(self.tmpdir, "sys", "bus", "pci", "devices")
+        os.makedirs(bus_dir, exist_ok=True)
+        os.symlink(
+            os.path.relpath(real_dir, bus_dir),
+            os.path.join(bus_dir, bdf),
+        )
+
+    def test_returns_immediate_upstream_bridge(self):
+        """A downstream device's sysfs parent BDF is the upstream bridge."""
+        parent_dir = os.path.join(
+            self.tmpdir, "sys", "devices", "pci0000:00", self.PARENT,
+        )
+        child_dir = os.path.join(parent_dir, self.CHILD)
+        os.makedirs(child_dir)
+        self._link_pci_device(parent_dir, self.PARENT)
+        self._link_pci_device(child_dir, self.CHILD)
+
+        parent, error = get_pci_parent(self.CHILD, sysfs_root=self.tmpdir)
+        self.assertEqual(parent, self.PARENT)
+        self.assertIsNone(error)
+
+    def test_returns_none_for_root_bus_device(self):
+        """A device whose sysfs parent is not a BDF has no upstream bridge."""
+        parent_dir = os.path.join(
+            self.tmpdir, "sys", "devices", "pci0000:00", self.PARENT,
+        )
+        os.makedirs(parent_dir)
+        self._link_pci_device(parent_dir, self.PARENT)
+
+        parent, error = get_pci_parent(self.PARENT, sysfs_root=self.tmpdir)
+        self.assertIsNone(parent)
+        self.assertIsNone(error)
+
+    def test_reports_error_when_device_missing(self):
+        """Missing sysfs entries are lookup failures, not root-bus devices."""
+        parent, error = get_pci_parent(self.CHILD, sysfs_root=self.tmpdir)
+        self.assertIsNone(parent)
+        self.assertIsNotNone(error)
+        self.assertIn("cannot resolve", error)
+        self.assertIn(self.CHILD, error)
+
+    def test_reports_error_for_malformed_bdf(self):
+        """Rejects values that are not domain-prefixed BDFs."""
+        parent, error = get_pci_parent("../etc/passwd", sysfs_root=self.tmpdir)
+        self.assertIsNone(parent)
+        self.assertIsNotNone(error)
+        self.assertIn("malformed BDF", error)
+
+    def test_reports_error_when_parent_missing_from_bus(self):
+        """A BDF-shaped parent without a bus/pci/devices entry is unresolved."""
+        parent_dir = os.path.join(
+            self.tmpdir, "sys", "devices", "pci0000:00", self.PARENT,
+        )
+        child_dir = os.path.join(parent_dir, self.CHILD)
+        os.makedirs(child_dir)
+        self._link_pci_device(child_dir, self.CHILD)
+
+        parent, error = get_pci_parent(self.CHILD, sysfs_root=self.tmpdir)
+        self.assertIsNone(parent)
+        self.assertIsNotNone(error)
+        self.assertIn(self.PARENT, error)
+        self.assertIn("missing from sysfs", error)
+
+
+class TestGetResetMethods(GLTTestBase):
+    """Tests for get_reset_methods()."""
+
+    BDF = "0000:01:00.0"
+
+    def test_splits_space_separated_tokens(self):
+        """Returns each advertised reset method as its own token."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            return_value="flr bus cxl_bus",
+        ) as read_mock:
+            result = get_reset_methods(self.BDF)
+        self.assertEqual(result, ["flr", "bus", "cxl_bus"])
+        read_mock.assert_called_once_with(
+            f"/sys/bus/pci/devices/{self.BDF}/reset_method"
+        )
+
+    def test_does_not_treat_cxl_bus_as_bus(self):
+        """The cxl_bus method is distinct from the bus method."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            return_value="flr cxl_bus",
+        ):
+            result = get_reset_methods(self.BDF)
+        self.assertEqual(result, ["flr", "cxl_bus"])
+        self.assertNotIn("bus", result)
+
+    def test_missing_file_returns_empty_list(self):
+        """An absent reset_method file means no methods are advertised."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=FileNotFoundError,
+        ):
+            self.assertEqual(get_reset_methods(self.BDF), [])
+
+    def test_unreadable_file_returns_none(self):
+        """Permission errors are unvalidated rather than empty."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            side_effect=PermissionError,
+        ):
+            self.assertIsNone(get_reset_methods(self.BDF))
+
+    def test_empty_file_returns_empty_list(self):
+        """A present but empty reset_method file advertises nothing."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value",
+            return_value="",
+        ):
+            self.assertEqual(get_reset_methods(self.BDF), [])
+
+
+class TestReadConfigWord(GLTTestBase):
+    """Tests for read_config_word() against a fake sysfs config file."""
+
+    BDF = "0000:00:01.0"
+    OFFSET = 0x0C
+    VALUE = 0xABCD
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def _write_config(self, size, word_off=None, word=None):
+        device_dir = os.path.join(
+            self.tmpdir, "sys", "bus", "pci", "devices", self.BDF,
+        )
+        os.makedirs(device_dir, exist_ok=True)
+        buf = bytearray(size)
+        if word_off is not None:
+            buf[word_off] = word & 0xFF
+            buf[word_off + 1] = (word >> 8) & 0xFF
+        with open(os.path.join(device_dir, "config"), "wb") as cfg:
+            cfg.write(buf)
+
+    def test_reads_little_endian_word(self):
+        """Returns the 16-bit little-endian value at the requested offset."""
+        self._write_config(self.OFFSET + 2, self.OFFSET, self.VALUE)
+        self.assertEqual(
+            read_config_word(self.BDF, self.OFFSET, sysfs_root=self.tmpdir),
+            self.VALUE,
+        )
+
+    def test_returns_none_when_config_missing(self):
+        """Missing config file is unreadable rather than zero."""
+        self.assertIsNone(
+            read_config_word(self.BDF, self.OFFSET, sysfs_root=self.tmpdir)
+        )
+
+    def test_returns_none_on_short_read(self):
+        """A file too short to cover the offset is unreadable."""
+        self._write_config(self.OFFSET + 1)
+        self.assertIsNone(
+            read_config_word(self.BDF, self.OFFSET, sysfs_root=self.tmpdir)
+        )
+
+    def test_returns_none_for_malformed_bdf(self):
+        """Rejects values that are not domain-prefixed BDFs."""
+        self.assertIsNone(
+            read_config_word("../etc/passwd", 0, sysfs_root=self.tmpdir)
+        )
+
+    def test_returns_none_for_negative_offset(self):
+        """Negative config offsets are rejected before seeking."""
+        self._write_config(2, 0, self.VALUE)
+        self.assertIsNone(
+            read_config_word(self.BDF, -1, sysfs_root=self.tmpdir)
+        )
+
+    def test_returns_none_on_permission_error(self):
+        """OSError on open is unreadable rather than a raised exception."""
+        self._write_config(self.OFFSET + 2, self.OFFSET, self.VALUE)
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.open",
+            side_effect=PermissionError("no perm"),
+            create=True,
+        ):
+            self.assertIsNone(
+                read_config_word(self.BDF, self.OFFSET, sysfs_root=self.tmpdir)
+            )
 
 
 class TestPciUtilsAts(GLTTestBase):
