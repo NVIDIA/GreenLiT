@@ -21,7 +21,7 @@ references:
     purpose: Canonical upstream Linux implementation and commit history.
 lenses:
   convention:
-    model: composer-2.5
+    model: gemini-flash
     instructions: |
       Review every changed artifact for GreenLiT conventions and language
       idioms. Discover rules from, in descending authority: repo docs and tool
@@ -109,7 +109,7 @@ lenses:
       finding to a changed GreenLiT line, except commit-message findings,
       which anchor to the offending summary line or MR title.
   discriminator:
-    model: grok-4.5
+    model: grok
     applies_to: [src/modules/**, external_tests/**]
     instructions: |
       Step back from the proposed implementation and determine the simplest
@@ -185,7 +185,7 @@ lenses:
       line.
     references: [linux-mainline]
   common-helper-contracts:
-    model: composer-2.5
+    model: gemini-flash
     applies_to: [src/**, tests/**]
     instructions: |
       Review shared-helper safety, API contracts, and carve-outs across
@@ -241,7 +241,7 @@ lenses:
       Anchor every finding to a changed GreenLiT line. Do not impose generic
       style preferences already owned by pylint.
   discovery:
-    model: composer-2.5
+    model: gemini-flash
     applies_to: [src/greenlit/**, tests/greenlit/**]
     instructions: |
       Review GreenLiT CLI scheduling, category/test-case discovery, resume, and
