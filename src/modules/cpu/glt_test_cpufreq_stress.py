@@ -17,12 +17,14 @@
 Python script to test CPU frequency under stress.
 """
 # pylint: disable=too-many-lines
+import errno
 import glob
 import os
 import platform
 import re
 import signal
 import subprocess
+import sys
 import time
 
 from common import glt_core as GLTCore
@@ -63,7 +65,21 @@ HIGH_PERF_CPU_FREQ_MHZ = 1000
 SCALING_FREQ_MIN_PERCENT = 70
 CPPC_PERF_LIMITED_CLEAR_MASK = "0x3"
 CPPC_PERF_LIMITED_SUPPORTED_MASK = 0x3
+CPPC_QOS_UPDATE_SETTLE_SECS = 1
+CPPC_QOS_UPDATE_TIMEOUT_SECS = 5
+CPPC_QOS_UPDATE_POLL_SECS = 0.1
 CPPC_PERF_LIMITED_ABI_PATCH = "https://git.kernel.org/torvalds/c/13c45a26635f"
+CPPC_BOOST_QOS_PATCH = "https://git.kernel.org/torvalds/c/6e39ba4e5a82"
+CPPC_BOOST_QOS_PATCHES = (
+    "https://git.kernel.org/torvalds/c/04aa9d0726cc",
+    CPPC_BOOST_QOS_PATCH,
+    "https://git.kernel.org/torvalds/c/9266b4da051a",
+)
+CPPC_BOOST_QOS_HINT = (
+    f"This symptom matches the fix in {CPPC_BOOST_QOS_PATCH}. Check whether "
+    "the complete CPPC boost QoS series is applied, including its QoS lifetime "
+    "fix (upstream order):\n" + "\n".join(CPPC_BOOST_QOS_PATCHES)
+)
 CPPC_PERF_CONTROLS_PATCHES = (
     "https://git.kernel.org/torvalds/c/658fa7b1c47a",
     "https://git.kernel.org/torvalds/c/b3e45fb2db9d",
@@ -250,7 +266,10 @@ def _read_sysfs_int_value(path):
     try:
         value = glt_utils.read_sysfs_value(path)
     except (IOError, OSError) as e:
-        raise OSError(f"cannot read {path}: {e}") from e
+        message = f"cannot read {path}: {e}"
+        if e.errno is None:
+            raise OSError(message) from e
+        raise OSError(e.errno, message) from e
     try:
         int(value, 0)
     except ValueError as e:
@@ -276,6 +295,56 @@ def _get_first_cppc_cpufreq_dir():
 
     drivers = ", ".join(sorted(set(non_cppc_drivers))) or "unknown"
     return None, f"cppc_cpufreq not active (current driver: {drivers})."
+
+
+def _get_cppc_boost_qos_test_caps(scaling_min, nominal_max):
+    """Choose two distinct scaling caps between the minimum and nominal max."""
+    span = nominal_max - scaling_min
+    if scaling_min <= 0 or span < 3:
+        return None
+
+    first_cap = scaling_min + span // 3
+    second_cap = scaling_min + (2 * span) // 3
+    if not scaling_min < first_cap < second_cap < nominal_max:
+        return None
+    return first_cap, second_cap
+
+
+def _get_cppc_ospm_nominal_test_freq(scaling_min, nominal_max):
+    """Choose an OSPM nominal frequency that leaves boost headroom."""
+    span = nominal_max - scaling_min
+    if scaling_min <= 0 or span < 4:
+        return None
+
+    ospm_nominal = scaling_min + (3 * span) // 4
+    if not scaling_min < ospm_nominal < nominal_max:
+        return None
+    return ospm_nominal
+
+
+def _wait_for_cppc_scaling_max(
+        path, expected, deadline, poll_secs=CPPC_QOS_UPDATE_POLL_SECS):
+    """Wait for the expected cap, returning the last observation on timeout."""
+    observed = int(_read_sysfs_int_value(path), 0)
+    while observed != expected:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_secs, remaining))
+        observed = int(_read_sysfs_int_value(path), 0)
+    return observed
+
+
+def _write_cppc_scaling_max_and_wait(
+        path, requested,
+        timeout_secs=CPPC_QOS_UPDATE_TIMEOUT_SECS,
+        poll_secs=CPPC_QOS_UPDATE_POLL_SECS):
+    """Write a cap and wait for that value, not just an intermediate change."""
+    requested = int(requested)
+    glt_utils.write_sysfs_value(path, requested)
+    return _wait_for_cppc_scaling_max(
+        path, requested, time.monotonic() + timeout_secs, poll_secs
+    )
 
 
 def _validate_cppc_sysfs_helpers(logger):
@@ -341,6 +410,492 @@ def _validate_cppc_sysfs_helpers(logger):
                 logger.warning("Failed to restore %s", scaling_min_path)
 
     return True, None
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cppc_boost_frequency_qos(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify CPPC boost and scaling-max requests remain independent.
+
+    Requires cppc_cpufreq on all policies and usable boost headroom. When
+    firmware provides no static headroom, use the optional OSPM nominal
+    control only if the policy exposes it and supports boost transitions.
+
+    PATCH: https://git.kernel.org/torvalds/c/6e39ba4e5a82
+    RECOMMENDED UPSTREAM SERIES (only PATCH above is discriminated):
+        https://git.kernel.org/torvalds/c/04aa9d0726cc
+        https://git.kernel.org/torvalds/c/6e39ba4e5a82
+        https://git.kernel.org/torvalds/c/9266b4da051a
+    OSPM ABI: https://lore.kernel.org/lkml/20260807214837.863209-3-sumitg@nvidia.com/
+    OSPM BOOST: https://lore.kernel.org/lkml/20260807214837.863209-4-sumitg@nvidia.com/
+    """
+    ok, reason = _validate_cppc_prerequisites()
+    if not ok:
+        if _is_cppc_not_applicable(reason):
+            GLTCore.GLTTestResult.skip(reason)
+        GLTCore.GLTTestResult.fail(reason)
+
+    cpufreq_dir, reason = _get_first_cppc_cpufreq_dir()
+    if cpufreq_dir is None:
+        if _is_cppc_not_applicable(reason):
+            GLTCore.GLTTestResult.skip(reason)
+        GLTCore.GLTTestResult.fail(reason)
+
+    boost_path = os.path.join(CPU_SYSFS_ROOT, "cpufreq", "boost")
+    cpuinfo_max_path = os.path.join(cpufreq_dir, "cpuinfo_max_freq")
+    scaling_min_path = os.path.join(cpufreq_dir, "scaling_min_freq")
+    scaling_max_path = os.path.join(cpufreq_dir, "scaling_max_freq")
+    ospm_nominal_path = os.path.join(cpufreq_dir, "ospm_nominal_freq")
+
+    if not os.path.isfile(boost_path):
+        GLTCore.GLTTestResult.skip(
+            f"{boost_path} is unavailable; cpufreq does not expose global "
+            "boost control."
+        )
+
+    try:
+        original_boost = int(_read_sysfs_int_value(boost_path), 0)
+    except (IOError, OSError, ValueError) as error:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot read the original CPPC boost state: {error}"
+        )
+    if original_boost not in (0, 1):
+        GLTCore.GLTTestResult.fail(
+            f"{boost_path} has invalid state {original_boost}; expected 0 or 1."
+        )
+
+    policy_dirs = sorted(glob.glob(
+        os.path.join(CPU_SYSFS_ROOT, "cpufreq", "policy[0-9]*")
+    ))
+    if not policy_dirs:
+        GLTCore.GLTTestResult.skip(
+            "Cannot enumerate cpufreq policies to preserve all scaling-max caps "
+            "before changing global boost."
+        )
+    policy_boost_paths = sorted(glob.glob(
+        os.path.join(CPU_SYSFS_ROOT, "cpufreq", "policy[0-9]*", "boost")
+    ))
+    cppc_caps_dir = os.path.join(os.path.dirname(cpufreq_dir), "acpi_cppc")
+    highest_perf_path = os.path.join(cppc_caps_dir, "highest_perf")
+    nominal_perf_path = os.path.join(cppc_caps_dir, "nominal_perf")
+    original_policy_boosts = {}
+    use_ospm_nominal = False
+    ospm_restore_required = False
+    boost_restore_required = False
+    scaling_max_restore_required = False
+    ospm_boost_transition_supported = False
+    original_ospm_nominal = None
+    ospm_test_freq = None
+    original_cpuinfo_max = None
+    try:
+        for policy_boost_path in policy_boost_paths:
+            policy_boost = int(_read_sysfs_int_value(policy_boost_path), 0)
+            if policy_boost not in (0, 1):
+                GLTCore.GLTTestResult.fail(
+                    f"{policy_boost_path} has invalid state {policy_boost}; "
+                    "expected 0 or 1."
+                )
+            original_policy_boosts[policy_boost_path] = policy_boost
+
+        unsynchronized = [
+            path for path, state in original_policy_boosts.items()
+            if state != original_boost
+        ]
+        if unsynchronized:
+            GLTCore.GLTTestResult.skip(
+                "Global and per-policy boost states are not synchronized; "
+                "cannot safely round-trip the system-wide boost setting: "
+                + ", ".join(unsynchronized)
+            )
+
+        original_scaling_max = int(_read_sysfs_int_value(scaling_max_path), 0)
+        # Global boost also changes unselected policies. On affected kernels
+        # those transitions overwrite their userspace QoS requests as well.
+        # Enumerate policies independently: older kernels expose global boost
+        # without per-policy boost files. Read every cap before the first write.
+        original_scaling_maxes = {scaling_max_path: original_scaling_max}
+        for policy_dir in policy_dirs:
+            policy_max_path = os.path.join(policy_dir, "scaling_max_freq")
+            if os.path.realpath(policy_max_path) != \
+                    os.path.realpath(scaling_max_path):
+                original_scaling_maxes[policy_max_path] = int(
+                    _read_sysfs_int_value(policy_max_path), 0
+                )
+        scaling_min = int(_read_sysfs_int_value(scaling_min_path), 0)
+        original_cpuinfo_max = int(_read_sysfs_int_value(cpuinfo_max_path), 0)
+
+        if os.path.isfile(highest_perf_path) and \
+                os.path.isfile(nominal_perf_path):
+            highest_perf = int(_read_sysfs_int_value(highest_perf_path), 0)
+            nominal_perf = int(_read_sysfs_int_value(nominal_perf_path), 0)
+            if highest_perf < nominal_perf:
+                GLTCore.GLTTestResult.skip(
+                    "Firmware reports invalid CPPC boost limits: "
+                    f"highest_perf={highest_perf}, nominal_perf={nominal_perf}."
+                )
+            if highest_perf == nominal_perf:
+                if not os.path.isfile(ospm_nominal_path):
+                    GLTCore.GLTTestResult.skip(
+                        "Firmware does not expose static CPPC boost headroom "
+                        "and the policy has no OSPM nominal-frequency control: "
+                        f"highest_perf={highest_perf}, "
+                        f"nominal_perf={nominal_perf}."
+                    )
+
+                # The public CPPC v4 OSPM series deliberately exposes this as
+                # a write-only ABI. It also registers boost support up front
+                # and makes set_boost() use the software-tracked nominal value.
+                use_ospm_nominal = True
+    except (IOError, OSError, ValueError) as error:
+        GLTCore.GLTTestResult.fail(
+            f"Cannot read the original CPPC frequency limits: {error}"
+        )
+
+    restore_errors = []
+    try:
+        if use_ospm_nominal:
+            # cpuinfo.max_freq exposes the effective OSPM nominal while boost
+            # is disabled. Use it to preserve a pre-existing value without
+            # attempting to read the write-only ospm_nominal_freq attribute.
+            # This cannot recover a raw firmware request or unset sentinel;
+            # frequency-conversion mismatches are checked during cleanup.
+            if original_boost:
+                boost_restore_required = True
+                scaling_max_restore_required = True
+                glt_utils.write_sysfs_value(boost_path, "0")
+                time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+                disabled_policy_boosts = {
+                    path: int(_read_sysfs_int_value(path), 0)
+                    for path in policy_boost_paths
+                }
+                if int(_read_sysfs_int_value(boost_path), 0) != 0 or \
+                        any(disabled_policy_boosts.values()):
+                    GLTCore.GLTTestResult.skip(
+                        "Cannot synchronize disabled CPPC boost state to "
+                        "preserve the effective OSPM nominal frequency before "
+                        "testing."
+                    )
+            original_ospm_nominal = int(
+                _read_sysfs_int_value(cpuinfo_max_path), 0
+            )
+            ospm_test_freq = _get_cppc_ospm_nominal_test_freq(
+                scaling_min, original_ospm_nominal
+            )
+            if ospm_test_freq is None:
+                GLTCore.GLTTestResult.skip(
+                    "The CPPC v4 policy has no room to lower its OSPM "
+                    "nominal frequency while staying above scaling_min: "
+                    f"scaling_min={scaling_min}, "
+                    f"nominal_max={original_ospm_nominal}."
+                )
+
+            try:
+                glt_utils.write_sysfs_value(
+                    ospm_nominal_path, ospm_test_freq
+                )
+            except OSError as error:
+                if error.errno not in (errno.EOPNOTSUPP, errno.ENODEV):
+                    # A failed sysfs write can still have partially changed
+                    # firmware state, so conservatively attempt restoration.
+                    ospm_restore_required = True
+                    raise
+                GLTCore.GLTTestResult.skip(
+                    "The platform does not support programming its OSPM "
+                    f"nominal frequency at {ospm_nominal_path}: {error}"
+                )
+            else:
+                ospm_restore_required = True
+
+            # Prove the OSPM support series registered boost for every policy
+            # before installing either QoS cap. The transition also makes
+            # earlier downstream revisions recalculate cpuinfo.max_freq.
+            scaling_max_restore_required = True
+            boost_restore_required = True
+            try:
+                glt_utils.write_sysfs_value(boost_path, "1")
+            except OSError as error:
+                if error.errno not in (
+                        errno.EINVAL, errno.EOPNOTSUPP, errno.ENODEV):
+                    raise
+                current_boost = int(
+                    _read_sysfs_int_value(boost_path), 0
+                )
+                current_policy_boosts = {
+                    path: int(_read_sysfs_int_value(path), 0)
+                    for path in policy_boost_paths
+                }
+                if current_boost != 0 or any(
+                        current_policy_boosts.values()):
+                    raise
+                # A confirmed unsupported no-op needs no compensating
+                # write, unless fixture setup disabled original boost.
+                boost_restore_required = bool(original_boost)
+                scaling_max_restore_required = bool(original_boost)
+                GLTCore.GLTTestResult.skip(
+                    "The OSPM nominal-frequency control did not provide "
+                    "global CPPC boost support: "
+                    f"{error}"
+                )
+            else:
+                ospm_boost_transition_supported = True
+                time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+                fixture_boosted = int(
+                    _read_sysfs_int_value(cpuinfo_max_path), 0
+                )
+                enabled_policy_boosts = {
+                    path: int(_read_sysfs_int_value(path), 0)
+                    for path in policy_boost_paths
+                }
+                fixture_boost = int(
+                    _read_sysfs_int_value(boost_path), 0
+                )
+                glt_utils.write_sysfs_value(boost_path, "0")
+                time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+                disabled_policy_boosts = {
+                    path: int(_read_sysfs_int_value(path), 0)
+                    for path in policy_boost_paths
+                }
+                if fixture_boost != 1 or \
+                        any(state != 1 for state in
+                            enabled_policy_boosts.values()) or \
+                        fixture_boosted <= ospm_test_freq or \
+                        int(_read_sysfs_int_value(boost_path), 0) != 0 or \
+                        any(disabled_policy_boosts.values()):
+                    GLTCore.GLTTestResult.skip(
+                        "The OSPM nominal-frequency control did not create "
+                        "a synchronized, distinct CPPC boost range."
+                    )
+        elif original_boost:
+            boost_restore_required = True
+            scaling_max_restore_required = True
+            glt_utils.write_sysfs_value(boost_path, "0")
+            time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+        boost_disabled = int(_read_sysfs_int_value(boost_path), 0)
+        nominal_max = int(_read_sysfs_int_value(cpuinfo_max_path), 0)
+        logger.info(
+            "CPPC boost QoS policy %s: scaling_min=%d nominal_max=%d",
+            cpufreq_dir, scaling_min, nominal_max
+        )
+        if boost_disabled != 0:
+            GLTCore.GLTTestResult.fail(f"{boost_path} remained enabled after writing 0.")
+        if use_ospm_nominal and not \
+                scaling_min < nominal_max < original_cpuinfo_max:
+            GLTCore.GLTTestResult.skip(
+                "Lowering the OSPM nominal frequency did not create a "
+                "distinct CPPC boost range: "
+                f"scaling_min={scaling_min}, nominal_max={nominal_max}, "
+                f"platform_max={original_cpuinfo_max}."
+            )
+
+        caps = _get_cppc_boost_qos_test_caps(scaling_min, nominal_max)
+        if caps is None:
+            GLTCore.GLTTestResult.skip(
+                "The CPPC policy has no room for two distinct scaling-max "
+                f"constraints between {scaling_min} and {nominal_max}."
+            )
+
+        first_cap, second_cap = caps
+        scaling_max_restore_required = True
+        first_accepted_cap = _write_cppc_scaling_max_and_wait(
+            scaling_max_path, first_cap
+        )
+        # A clamped or still-pending value does not prove this request
+        # took effect. Do not use it as a boost-overwrite baseline.
+        if first_accepted_cap != first_cap:
+            GLTCore.GLTTestResult.skip(
+                f"Cannot establish the requested scaling-max constraint "
+                f"at {scaling_max_path} within "
+                f"{CPPC_QOS_UPDATE_TIMEOUT_SECS}s: requested {first_cap}, "
+                f"observed {first_accepted_cap}."
+            )
+
+        boost_restore_required = True
+        glt_utils.write_sysfs_value(boost_path, "1")
+        time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+        boost_enabled = int(_read_sysfs_int_value(boost_path), 0)
+        boosted_max = int(_read_sysfs_int_value(cpuinfo_max_path), 0)
+        observed_cap = int(_read_sysfs_int_value(scaling_max_path), 0)
+        logger.info(
+            "After boost enable: boost=%d cpuinfo_max=%d scaling_max=%d",
+            boost_enabled, boosted_max, observed_cap
+        )
+        if boost_enabled != 1:
+            GLTCore.GLTTestResult.fail(f"{boost_path} remained disabled after writing 1.")
+        if boosted_max <= nominal_max:
+            GLTCore.GLTTestResult.skip(
+                "The CPPC policy does not expose a distinct boost frequency "
+                f"({boosted_max} <= nominal {nominal_max})."
+            )
+        if observed_cap != first_accepted_cap:
+            GLTCore.GLTTestResult.fail(
+                "Enabling CPPC boost overwrote the scaling-max QoS constraint "
+                f"at {scaling_max_path}: expected {first_accepted_cap}, "
+                f"observed {observed_cap}.\n{CPPC_BOOST_QOS_HINT}"
+            )
+
+        second_accepted_cap = _write_cppc_scaling_max_and_wait(
+            scaling_max_path, second_cap
+        )
+        if second_accepted_cap != second_cap:
+            GLTCore.GLTTestResult.skip(
+                "Cannot establish the second requested scaling-max "
+                f"constraint at {scaling_max_path} within "
+                f"{CPPC_QOS_UPDATE_TIMEOUT_SECS}s: requested {second_cap}, "
+                f"observed {second_accepted_cap}."
+            )
+
+        glt_utils.write_sysfs_value(boost_path, "0")
+        time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+        boost_disabled = int(_read_sysfs_int_value(boost_path), 0)
+        restored_nominal_max = int(_read_sysfs_int_value(cpuinfo_max_path), 0)
+        observed_cap = int(_read_sysfs_int_value(scaling_max_path), 0)
+        logger.info(
+            "After boost disable: boost=%d cpuinfo_max=%d scaling_max=%d",
+            boost_disabled, restored_nominal_max, observed_cap
+        )
+        if boost_disabled != 0:
+            GLTCore.GLTTestResult.fail(f"{boost_path} remained enabled after writing 0.")
+        if restored_nominal_max != nominal_max:
+            GLTCore.GLTTestResult.fail(
+                "Disabling CPPC boost did not restore the nominal maximum "
+                f"frequency: expected {nominal_max}, observed "
+                f"{restored_nominal_max}."
+            )
+        if observed_cap != second_accepted_cap:
+            GLTCore.GLTTestResult.fail(
+                "Disabling CPPC boost overwrote the scaling-max QoS "
+                f"constraint at {scaling_max_path}: expected "
+                f"{second_accepted_cap}, observed {observed_cap}.\n"
+                f"{CPPC_BOOST_QOS_HINT}"
+            )
+    except (IOError, OSError, ValueError) as error:
+        GLTCore.GLTTestResult.fail(
+            f"CPPC boost-frequency QoS validation failed: {error}"
+        )
+    finally:
+        # Preserve the propagating diagnostic if cleanup also fails.
+        original_error = sys.exc_info()[1]
+        if ospm_restore_required:
+            try:
+                glt_utils.write_sysfs_value(
+                    ospm_nominal_path, original_ospm_nominal
+                )
+            except (IOError, OSError, ValueError) as error:
+                restore_errors.append(
+                    f"cannot restore {ospm_nominal_path}: {error}"
+                )
+
+        try:
+            # A global write re-synchronizes every policy even if the global
+            # value already matches. With a restored OSPM nominal value, a
+            # 1 -> 0 transition also refreshes the disabled policy maximum.
+            if ospm_restore_required and ospm_boost_transition_supported:
+                glt_utils.write_sysfs_value(boost_path, "1")
+                glt_utils.write_sysfs_value(boost_path, "0")
+                time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+                restored_nominal = int(_read_sysfs_int_value(cpuinfo_max_path), 0)
+                if restored_nominal != original_ospm_nominal:
+                    restore_errors.append(
+                        f"effective OSPM nominal restored to {restored_nominal}, "
+                        f"expected {original_ospm_nominal}"
+                    )
+        except (IOError, OSError, ValueError) as error:
+            restore_errors.append(f"cannot verify restored OSPM nominal: {error}")
+
+        try:
+            if boost_restore_required or \
+                    (ospm_restore_required and original_boost):
+                glt_utils.write_sysfs_value(boost_path, original_boost)
+            if boost_restore_required or ospm_restore_required:
+                time.sleep(CPPC_QOS_UPDATE_SETTLE_SECS)
+            restored_boost = int(_read_sysfs_int_value(boost_path), 0)
+            if restored_boost != original_boost:
+                restore_errors.append(
+                    f"{boost_path} restored to {restored_boost}, expected "
+                    f"{original_boost}"
+                )
+            if ospm_restore_required:
+                restored_cpuinfo_max = int(
+                    _read_sysfs_int_value(cpuinfo_max_path), 0
+                )
+                if restored_cpuinfo_max != original_cpuinfo_max:
+                    restore_errors.append(
+                        f"{cpuinfo_max_path} restored to "
+                        f"{restored_cpuinfo_max}, expected "
+                        f"{original_cpuinfo_max}"
+                    )
+        except (IOError, OSError, ValueError) as error:
+            restore_errors.append(f"cannot restore {boost_path}: {error}")
+
+        if scaling_max_restore_required:
+            # Two shared wait budgets: first allow peers to converge without
+            # writes, then verify all issued restores. Neither grows with the
+            # policy count. The bounds cover polling, not blocking sysfs I/O.
+            peer_restore_deadline = time.monotonic() + CPPC_QOS_UPDATE_TIMEOUT_SECS
+            pending_restores = {}
+            for path, original_max in original_scaling_maxes.items():
+                try:
+                    # Do not rewrite unchanged peer requests: sysfs reports
+                    # the effective limit, not other clients' hidden requests.
+                    if path != scaling_max_path and _wait_for_cppc_scaling_max(
+                            path, original_max, peer_restore_deadline) == original_max:
+                        continue
+                    # Queue every necessary restore before waiting for any.
+                    glt_utils.write_sysfs_value(path, original_max)
+                    pending_restores[path] = original_max
+                except (IOError, OSError, ValueError) as error:
+                    restore_errors.append(
+                        f"cannot restore {path}: {error}"
+                    )
+
+            # A fresh phase budget gives even the final restore time to apply;
+            # the passive convergence deadline may already have expired.
+            restore_deadline = time.monotonic() + CPPC_QOS_UPDATE_TIMEOUT_SECS
+            for path, original_max in pending_restores.items():
+                try:
+                    restored_scaling_max = _wait_for_cppc_scaling_max(
+                        path, original_max, restore_deadline
+                    )
+                    if restored_scaling_max != original_max:
+                        restore_errors.append(
+                            f"{path} restored to {restored_scaling_max}, "
+                            f"expected {original_max}"
+                        )
+                except (IOError, OSError, ValueError) as error:
+                    restore_errors.append(
+                        f"cannot restore {path}: {error}"
+                    )
+
+        for policy_boost_path, original_policy_boost in \
+                original_policy_boosts.items():
+            try:
+                restored_policy_boost = int(
+                    _read_sysfs_int_value(policy_boost_path), 0
+                )
+                if restored_policy_boost != original_policy_boost:
+                    restore_errors.append(
+                        f"{policy_boost_path} restored to "
+                        f"{restored_policy_boost}, expected "
+                        f"{original_policy_boost}"
+                    )
+            except (IOError, OSError, ValueError) as error:
+                restore_errors.append(
+                    f"cannot verify {policy_boost_path}: {error}"
+                )
+
+        if restore_errors:
+            restore_reason = "Failed to restore CPPC policy state: " + "; ".join(restore_errors)
+            reason = str(original_error) if original_error is not None else None
+            if isinstance(original_error, GLTCore.GLTTestSkip):
+                # The CLI summary keeps one line; lead with why SKIP became FAIL.
+                reason = f"{restore_reason}\nOriginal skip: {reason}"
+            else:
+                reason = f"{reason}\nAdditionally, {restore_reason}" if reason else restore_reason
+            GLTCore.GLTTestResult.fail(reason)
+
+    logger.info("PASS: CPPC boost-frequency QoS constraints remained independent")
 
 
 @GLTCore.GLTTestAttr()
