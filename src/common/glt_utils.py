@@ -45,6 +45,23 @@ MOK_PRIVATE_KEY = os.path.join(MOK_KEY_DIR, "MOK.priv")
 MOK_CERTIFICATE = os.path.join(MOK_KEY_DIR, "MOK.der")
 
 _BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+_JOURNAL_BOOT_ID_RE = re.compile(
+    r"^(?:[0-9a-fA-F]{32}|"
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+
+
+@dataclass(frozen=True)
+class JournalBoot:
+    """A boot retained by journald.
+
+    ``index`` is relative to the listing snapshot. Use ``boot_id`` as the
+    stable key when retrieving records.
+    """
+
+    index: int
+    boot_id: str
 
 
 @dataclass(frozen=True)
@@ -300,6 +317,60 @@ def _read_boot_id() -> str:
     return boot_id
 
 
+def _validate_kernel_log_boot_id(boot_id: str) -> None:
+    """Require an exact retained-journal boot ID."""
+    if not isinstance(boot_id, str):
+        raise RuntimeError(
+            "Kernel-log boot_id must be a string, "
+            f"got {type(boot_id).__name__}"
+        )
+    if not boot_id:
+        raise RuntimeError("Kernel-log boot_id is empty")
+    if not _JOURNAL_BOOT_ID_RE.fullmatch(boot_id):
+        raise RuntimeError(
+            "Kernel-log boot_id must be a complete 128-bit boot ID"
+        )
+
+
+def _parse_journal_boots(list_boots_output: str) -> list[JournalBoot]:
+    """Parse ``journalctl --list-boots`` output."""
+    boots = []
+    for line_number, line in enumerate(list_boots_output.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        parts = stripped.split(maxsplit=2)
+        if len(parts) < 2:
+            raise RuntimeError(
+                "Unexpected journalctl --list-boots output on line "
+                f"{line_number}: {stripped}"
+            )
+
+        try:
+            boot_index = int(parts[0])
+        except ValueError as error:
+            if parts[0].upper() == "IDX":
+                continue
+            raise RuntimeError(
+                "Unexpected journalctl --list-boots index on line "
+                f"{line_number}: {stripped}"
+            ) from error
+
+        boot_id = parts[1].lower()
+        try:
+            _validate_kernel_log_boot_id(boot_id)
+        except RuntimeError as error:
+            raise RuntimeError(
+                "Unexpected journalctl --list-boots boot ID on line "
+                f"{line_number}: {stripped}"
+            ) from error
+
+        boots.append(JournalBoot(index=boot_index, boot_id=boot_id))
+
+    return boots
+
+
 def run_command(
     command: list[str], failure_message: str, timeout: float = 30.0
 ) -> subprocess.CompletedProcess:
@@ -357,6 +428,26 @@ def capture_kernel_log_checkpoint() -> KernelLogCheckpoint:
     )
 
 
+def list_journal_boots() -> list[JournalBoot]:
+    """Return every boot retained by journald in journalctl listing order.
+
+    Boot IDs are normalized to lowercase. RuntimeError is raised when
+    journalctl fails, returns malformed output, or lists no retained boots.
+    """
+    result = run_command(
+        [
+            "journalctl",
+            "--no-pager",
+            "--list-boots",
+        ],
+        "Failed to enumerate retained journal boots with journalctl",
+    )
+    boots = _parse_journal_boots(result.stdout)
+    if not boots:
+        raise RuntimeError("journalctl returned no retained boot records")
+    return boots
+
+
 @contextmanager
 def chdir_managed(path):
     """
@@ -392,15 +483,44 @@ def check_kernel_log(
 
 def get_kernel_log(
     checkpoint: KernelLogCheckpoint | None = None,
+    *,
+    boot_id: str | None = None,
 ) -> str:
-    """Return current-boot kernel-log text or text after a checkpoint.
+    """Return kernel-log text for the current boot or a selected boot.
 
-    RuntimeError is raised when journalctl retrieval fails, the checkpoint
-    belongs to another boot, or checkpoint continuity cannot be proven. Only a
-    checkpointed query returns ``""``, meaning no new records; a booted kernel
-    always logs, so an empty current-boot read means journald is not serving
-    kmsg and is reported as a failure instead of a defect-free log.
+    With a checkpoint, return current-boot records appended after it. With a
+    boot_id, return the complete retained kernel log for that exact boot.
+    checkpoint and boot_id are mutually exclusive.
+
+    RuntimeError is raised when journalctl retrieval fails, a selected complete
+    boot log is empty, the checkpoint belongs to another boot, or checkpoint
+    continuity cannot be proven. Only a checkpointed query returns ``""``,
+    meaning no new records.
     """
+    if checkpoint is not None and boot_id is not None:
+        raise RuntimeError(
+            "Kernel-log checkpoint and boot_id are mutually exclusive"
+        )
+
+    if boot_id is not None:
+        _validate_kernel_log_boot_id(boot_id)
+        result = run_command(
+            [
+                "journalctl",
+                "--no-pager",
+                f"--boot={boot_id}",
+                "-k",
+                "-o",
+                "cat",
+            ],
+            f"Failed to retrieve the kernel log for boot {boot_id} with journalctl",
+        )
+        if not result.stdout:
+            raise RuntimeError(
+                f"journalctl returned no kernel records for boot {boot_id}"
+            )
+        return result.stdout
+
     if checkpoint is None:
         result = run_command(
             [

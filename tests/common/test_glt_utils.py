@@ -41,6 +41,13 @@ def _command_failure(command, stderr):
     )
 
 
+JOURNAL_LIST_BOOTS_OUTPUT = """
+IDX BOOT ID                          FIRST ENTRY                 LAST ENTRY
+ -1 ABCDEF0123456789ABCDEF0123456789 Tue 2026-09-08 10:00:00 UTC Tue 2026-09-08 10:05:00 UTC
+  0 01234567-89AB-CDEF-0123-456789ABCDEF Tue 2026-09-08 10:10:00 UTC Tue 2026-09-08 10:15:00 UTC
+"""
+
+
 class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test Class for GLT Utils"""
 
@@ -49,6 +56,97 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         self.assertIsNotNone(
             getattr(glt_utils_module, "KernelLogCheckpoint", None)
         )
+
+    def test_parse_journal_boots_normalizes_exact_boot_ids(self):
+        """Parse retained indexes and normalize exact boot IDs."""
+        boots = glt_utils_module._parse_journal_boots(  # pylint: disable=protected-access
+            JOURNAL_LIST_BOOTS_OUTPUT
+        )
+
+        self.assertEqual(
+            boots,
+            [
+                glt_utils_module.JournalBoot(
+                    index=-1,
+                    boot_id="abcdef0123456789abcdef0123456789",
+                ),
+                glt_utils_module.JournalBoot(
+                    index=0,
+                    boot_id="01234567-89ab-cdef-0123-456789abcdef",
+                ),
+            ],
+        )
+
+    def test_parse_journal_boots_rejects_malformed_lines(self):
+        """Surface malformed journal indexes, IDs, and short records."""
+        cases = (
+            ("0\n", "output"),
+            (
+                "not-an-index 0123456789abcdef0123456789abcdef date\n",
+                "index",
+            ),
+            ("0 not-a-boot-id date\n", "boot ID"),
+        )
+
+        for output, expected_message in cases:
+            with self.subTest(output=output), self.assertRaises(
+                RuntimeError
+            ) as context:
+                glt_utils_module._parse_journal_boots(  # pylint: disable=protected-access
+                    output
+                )
+
+            self.assertIn(expected_message, str(context.exception))
+            self.assertIn("line 1", str(context.exception))
+
+    def test_list_journal_boots_uses_supported_arguments(self):
+        """List retained boots without consulting current boot state."""
+        result = subprocess.CompletedProcess(
+            ["journalctl"],
+            0,
+            stdout=JOURNAL_LIST_BOOTS_OUTPUT,
+            stderr="",
+        )
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", return_value=result
+        ) as mock_run, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._read_boot_id"
+        ) as mock_read_boot_id:
+            boots = glt_utils_module.list_journal_boots()
+
+        self.assertEqual(len(boots), 2)
+        mock_read_boot_id.assert_not_called()
+        mock_run.assert_called_once_with(
+            ["journalctl", "--no-pager", "--list-boots"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30.0,
+        )
+
+    def test_list_journal_boots_rejects_empty_history(self):
+        """Do not turn an empty journal history into a clean observation."""
+        result = subprocess.CompletedProcess(
+            ["journalctl"], 0, stdout="", stderr=""
+        )
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", return_value=result
+        ), self.assertRaisesRegex(RuntimeError, "no retained boot records"):
+            glt_utils_module.list_journal_boots()
+
+    def test_list_journal_boots_propagates_command_failure(self):
+        """Report journal boot-enumeration failures."""
+        journal_error = _command_failure(["journalctl"], "journal error")
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", side_effect=journal_error
+        ), self.assertRaisesRegex(
+            RuntimeError,
+            "Failed to enumerate retained journal boots with journalctl",
+        ):
+            glt_utils_module.list_journal_boots()
 
     @GLTTestBase.unittest.mock.patch("subprocess.run")
     @GLTTestBase.unittest.mock.patch(
@@ -651,8 +749,8 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             with self.assertRaises(RuntimeError):
                 glt_utils_module.get_kernel_log(checkpoint)
 
-    def test_get_kernel_log_rejects_malformed_boot_id(self):
-        """Reject empty or wrongly typed boot IDs before reading the system boot."""
+    def test_get_kernel_log_after_checkpoint_rejects_malformed_boot_id(self):
+        """Reject malformed checkpoint boot IDs before reading the system boot."""
         checkpoint_type = getattr(
             glt_utils_module, "_JournalKernelLogCheckpoint"
         )
@@ -700,6 +798,120 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                     glt_utils_module.get_kernel_log(checkpoint)
             self.assertIn(expected_message, str(context.exception))
             mock_run.assert_not_called()
+
+    def test_get_kernel_log_returns_selected_boot_journal_text(self):
+        """Retrieve complete kernel logs by exact compact or UUID boot ID."""
+        boot_ids = (
+            "ABCDEF0123456789ABCDEF0123456789",
+            "01234567-89AB-CDEF-0123-456789ABCDEF",
+        )
+
+        for boot_id in boot_ids:
+            journal_result = subprocess.CompletedProcess(
+                ["journalctl"],
+                0,
+                stdout="first message\nsecond message\n",
+                stderr="",
+            )
+            with self.subTest(boot_id=boot_id), GLTTestBase.unittest.mock.patch(
+                "subprocess.run", return_value=journal_result
+            ) as mock_run:
+                result = glt_utils_module.get_kernel_log(boot_id=boot_id)
+
+            self.assertEqual(result, "first message\nsecond message\n")
+            mock_run.assert_called_once_with(
+                [
+                    "journalctl",
+                    "--no-pager",
+                    f"--boot={boot_id}",
+                    "-k",
+                    "-o",
+                    "cat",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30.0,
+            )
+
+    def test_get_kernel_log_rejects_invalid_selected_boot_id(self):
+        """Reject ambiguous or malformed retained-boot selectors."""
+        cases = (
+            ("", "boot_id is empty"),
+            (1, "boot_id must be a string"),
+            (" ", "complete 128-bit boot ID"),
+            ("0", "complete 128-bit boot ID"),
+            ("-1", "complete 128-bit boot ID"),
+            ("g" * 32, "complete 128-bit boot ID"),
+            ("0" * 31, "complete 128-bit boot ID"),
+        )
+
+        for boot_id, expected_message in cases:
+            with self.subTest(boot_id=boot_id), GLTTestBase.unittest.mock.patch(
+                "src.common.glt_utils.run_command"
+            ) as mock_run, GLTTestBase.unittest.mock.patch(
+                "src.common.glt_utils._read_boot_id"
+            ) as mock_read_boot_id:
+                with self.assertRaises(RuntimeError) as context:
+                    glt_utils_module.get_kernel_log(boot_id=boot_id)
+
+            self.assertIn(expected_message, str(context.exception))
+            mock_run.assert_not_called()
+            mock_read_boot_id.assert_not_called()
+
+    def test_get_kernel_log_rejects_checkpoint_with_selected_boot(self):
+        """Reject conflicting log windows before reading any system state."""
+        checkpoint_type = getattr(
+            glt_utils_module, "_JournalKernelLogCheckpoint"
+        )
+        checkpoint = checkpoint_type(boot_id="boot-1", cursor="cursor-1")
+
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.run_command"
+        ) as mock_run, GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._read_boot_id"
+        ) as mock_read_boot_id:
+            with self.assertRaises(RuntimeError) as context:
+                glt_utils_module.get_kernel_log(
+                    checkpoint,
+                    boot_id="0123456789abcdef0123456789abcdef",
+                )
+
+        self.assertIn("mutually exclusive", str(context.exception))
+        mock_run.assert_not_called()
+        mock_read_boot_id.assert_not_called()
+
+    def test_get_kernel_log_rejects_empty_selected_boot_journal(self):
+        """Do not interpret an unreadable retained boot as signature-free."""
+        boot_id = "0123456789abcdef0123456789abcdef"
+        empty_journal = subprocess.CompletedProcess(
+            ["journalctl"], 0, stdout="", stderr=""
+        )
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", return_value=empty_journal
+        ):
+            with self.assertRaises(RuntimeError) as context:
+                glt_utils_module.get_kernel_log(boot_id=boot_id)
+
+        self.assertIn(
+            f"no kernel records for boot {boot_id}",
+            str(context.exception),
+        )
+
+    def test_get_kernel_log_selected_boot_propagates_journal_failure(self):
+        """Report retained-boot journal retrieval failures."""
+        boot_id = "0123456789abcdef0123456789abcdef"
+        journal_error = _command_failure(["journalctl"], "journal error")
+
+        with GLTTestBase.unittest.mock.patch(
+            "subprocess.run", side_effect=journal_error
+        ):
+            with self.assertRaises(RuntimeError) as context:
+                glt_utils_module.get_kernel_log(boot_id=boot_id)
+
+        self.assertIn(f"boot {boot_id}", str(context.exception))
+        self.assertIn("journalctl", str(context.exception))
 
     def test_get_kernel_log_raises_when_journal_command_fails(self):
         """Propagate journalctl failure without trying another backend."""
