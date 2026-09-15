@@ -13,6 +13,7 @@ greenlit/
 ├── poetry.toml             # Poetry configuration file
 ├── pyproject.toml          # Project build configuration
 ├── src/                    # Test framework source code
+│   ├── bin/                # Private runtime helpers packaged as wheel data
 │   ├── common/             # Common utilities
 │   │   └── virt/           # Libvirt/QEMU helper APIs for tests
 │   ├── greenlit/           # Main package
@@ -67,6 +68,7 @@ Use this table when modifying the repository. For how to run the suite on a syst
 | New in-tree test case | `src/modules/<module>/glt_test_<feature>.py` | [Test modules](#test-modules), [writing-test-cases.md](writing-test-cases.md) |
 | New test module (category) | `src/modules/<module>/` (directory name = CLI flag) | Confirm with user first; update the module list in this doc; [AGENTS.md](../../AGENTS.md) |
 | Shared helper used by tests | `src/common/` or `src/common/virt/` for libvirt/QEMU | Unit test under `tests/common/` |
+| Private subprocess helper used by native tests | `src/bin/` (packaged under `greenlit/_runtime/bin/`) | `install.sh` copies the installed payload to `/usr/share/greenlit/bin/`; invoke helpers by path, not as CLIs or external tests |
 | CLI, discovery, or scheduling | `src/greenlit/greenlit.py`, `src/common/glt_core.py` | — |
 | External executable test | `external_tests/` (installed to `/usr/share/greenlit/executing_dir/`) | [user-manual.md](../user-guides/user-manual.md), [writing-test-cases.md](writing-test-cases.md) |
 | Per-test skip or config YAML | `confs/glt-confs.d/` (installed to `/usr/share/greenlit/confs.d/`) | [configuration.md](../user-guides/configuration.md) |
@@ -75,6 +77,12 @@ Use this table when modifying the repository. For how to run the suite on a syst
 
 Unit tests under `tests/modules/` validate module test logic with mocks. They do not define
 new GreenLiT runtime test categories; runtime categories remain under `src/modules/`.
+Private helpers under `src/bin/` are carried in the wheel under
+`greenlit/_runtime/bin/`. A full `install.sh` run automatically copies that
+installed payload to `/usr/share/greenlit/bin/`. Installing the Python wheel
+alone leaves the payload inside the Python installation and does not configure
+the system runtime path. Development checkouts can instead stage `src/bin/`
+manually as described in [development-setup.md](development-setup.md).
 
 ## Read also
 * [user-manual.md](../user-guides/user-manual.md) — Runtime, CLI, automation on hardware

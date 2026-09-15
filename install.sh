@@ -20,6 +20,8 @@ UNINSTALL=false
 LOCAL_WHL_DIR=""
 PYTHON_CMD="${PYTHON_CMD:-python3}"
 INSTALL_CONFIG="/usr/share/greenlit/install.env"
+PRIVATE_BIN_DIR="/usr/share/greenlit/bin"
+PRIVATE_BIN_PAYLOAD="greenlit/_runtime/bin"
 SAVED_PYTHON=""
 SAVED_SCRIPTS=""
 
@@ -312,9 +314,33 @@ install_from_local_wheels() {
 }
 
 setup_configuration() {
+  local install_python="${SAVED_PYTHON:-${PYTHON_CMD}}"
+  local private_bin_source
+
+  if ! private_bin_source="$("${install_python}" - "${PRIVATE_BIN_PAYLOAD}" <<'PY'
+from importlib.metadata import distribution
+import sys
+
+print(distribution("greenlit").locate_file(sys.argv[1]))
+PY
+)"; then
+    echo "ERROR: Unable to locate packaged GreenLiT runtime helpers."
+    exit 1
+  fi
+  if [ ! -d "${private_bin_source}" ]; then
+    echo "ERROR: Packaged GreenLiT runtime helper directory is missing: ${private_bin_source}"
+    exit 1
+  fi
+
   echo "Creating GreenLiT configuration directories..."
+  mkdir -p "${PRIVATE_BIN_DIR}"
   mkdir -p /usr/share/greenlit/confs.d
   mkdir -p /usr/share/greenlit/executing_dir
+
+  echo "Copying private runtime helpers..."
+  cp -R "${private_bin_source}/." "${PRIVATE_BIN_DIR}/"
+  find "${PRIVATE_BIN_DIR}" -type d -name __pycache__ -prune -exec rm -rf {} +
+  find "${PRIVATE_BIN_DIR}" -type f -name '*.pyc' -delete
 
   echo "Copying configuration files..."
   cp confs/hardware-manifest.json /usr/share/greenlit/
