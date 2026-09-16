@@ -1,4 +1,5 @@
 """Unit test script for common/cxl_utils.py"""
+# pylint: disable=too-many-lines
 
 import os
 import shutil
@@ -737,7 +738,7 @@ class TestReadCxlDeviceDvsecCapBits(GLTTestBase):
             self.tmpdir, self._BDF, {self._CAP_ABS_OFF: 0x0000},
         )
         with GLTTestBase.unittest.mock.patch(
-            "src.common.cxl_utils.open",
+            "src.common.cxl_utils.pci_utils.open",
             side_effect=PermissionError("no perm"),
             create=True,
         ) as open_mock:
@@ -852,7 +853,7 @@ class TestReadCxlDeviceDvsecStatus2Bits(GLTTestBase):
             self.tmpdir, self._BDF, {self._STATUS2_ABS_OFF: 0x0000},
         )
         with GLTTestBase.unittest.mock.patch(
-            "src.common.cxl_utils.open",
+            "src.common.cxl_utils.pci_utils.open",
             side_effect=PermissionError("no perm"),
             create=True,
         ) as open_mock:
@@ -862,6 +863,219 @@ class TestReadCxlDeviceDvsecStatus2Bits(GLTTestBase):
                 )
             )
         open_mock.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# read_cxl_port_unmask_sbr / read_cxl_flexbus_port_cxl_mode /
+# is_cxl_sbr_masked_port
+# ---------------------------------------------------------------------------
+
+LSPCI_VV_FLEXBUS_DVSEC = (
+    "0000:00:01.0 PCI bridge: ...\n"
+    "\tCapabilities: [47c v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0007 Rev=1 Len=20: CXL\n"
+)
+
+LSPCI_VV_PORT_AND_FLEXBUS = (
+    "0000:00:01.0 PCI bridge: ...\n"
+    "\tCapabilities: [468 v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0003 Rev=2 Len=14: CXL\n"
+    "\tCapabilities: [47c v1] Designated Vendor-Specific: "
+    "Vendor=1e98 ID=0007 Rev=1 Len=20: CXL\n"
+)
+
+
+class TestReadCxlPortUnmaskSbr(GLTTestBase):
+    """Tests for read_cxl_port_unmask_sbr()."""
+
+    _DVSEC_OFF = 0x468
+    _CTL_ABS_OFF = _DVSEC_OFF + 0x0C
+    _BDF = "0000:00:01.0"
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def test_false_when_unmask_sbr_clear(self):
+        """Unmask SBR bit 0 clear means SBR is masked."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._CTL_ABS_OFF: 0x0000},
+        )
+        self.assertFalse(
+            cxl_utils.read_cxl_port_unmask_sbr(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_true_when_unmask_sbr_set(self):
+        """Unmask SBR bit 0 set means SBR can take effect."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._CTL_ABS_OFF: 0x0001},
+        )
+        self.assertTrue(
+            cxl_utils.read_cxl_port_unmask_sbr(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_returns_none_when_config_missing(self):
+        """Device directory absent → None."""
+        self.assertIsNone(
+            cxl_utils.read_cxl_port_unmask_sbr(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+
+class TestReadCxlFlexbusPortCxlMode(GLTTestBase):
+    """Tests for read_cxl_flexbus_port_cxl_mode()."""
+
+    _DVSEC_OFF = 0x47C
+    _STATUS_ABS_OFF = _DVSEC_OFF + 0x0E
+    _BDF = "0000:00:01.0"
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def test_true_when_cache_status_set(self):
+        """Cache status bit matches pcie_is_cxl()."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._STATUS_ABS_OFF: 0x0001},
+        )
+        self.assertTrue(
+            cxl_utils.read_cxl_flexbus_port_cxl_mode(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_true_when_mem_status_set(self):
+        """Mem status bit matches pcie_is_cxl()."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._STATUS_ABS_OFF: 0x0004},
+        )
+        self.assertTrue(
+            cxl_utils.read_cxl_flexbus_port_cxl_mode(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+    def test_false_when_neither_cxl_status_bit_set(self):
+        """PCIe-mode Flex Bus status is not pcie_is_cxl()."""
+        _make_device_config(
+            self.tmpdir, self._BDF, {self._STATUS_ABS_OFF: 0x0000},
+        )
+        self.assertFalse(
+            cxl_utils.read_cxl_flexbus_port_cxl_mode(
+                self._BDF, self._DVSEC_OFF, sysfs_root=self.tmpdir,
+            )
+        )
+
+
+class TestIsCxlSbrMaskedPort(GLTTestBase):
+    """Tests for is_cxl_sbr_masked_port()."""
+
+    _BDF = "0000:00:01.0"
+    _PORT_CTL_ABS = 0x468 + 0x0C
+    _FLEX_STATUS_ABS = 0x47C + 0x0E
+
+    def setUp(self):
+        super().setUp()
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        super().tearDown()
+
+    def _config(self, port_ctl, flex_status):
+        _make_device_config(
+            self.tmpdir, self._BDF,
+            {self._PORT_CTL_ABS: port_ctl, self._FLEX_STATUS_ABS: flex_status},
+        )
+
+    def test_true_when_cxl_mode_and_sbr_masked(self):
+        """CXL.cache status with Unmask SBR clear is the hide-bus case."""
+        self._config(port_ctl=0x0000, flex_status=0x0001)
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.glt_utils.run_command",
+            return_value=_mock_run(stdout=LSPCI_VV_PORT_AND_FLEXBUS),
+        ):
+            self.assertTrue(
+                cxl_utils.is_cxl_sbr_masked_port(
+                    self._BDF, sysfs_root=self.tmpdir,
+                )
+            )
+
+    def test_false_when_unmask_sbr_set(self):
+        """Unmask SBR set means bus reset is a real hardware method."""
+        self._config(port_ctl=0x0001, flex_status=0x0001)
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.glt_utils.run_command",
+            return_value=_mock_run(stdout=LSPCI_VV_PORT_AND_FLEXBUS),
+        ):
+            self.assertFalse(
+                cxl_utils.is_cxl_sbr_masked_port(
+                    self._BDF, sysfs_root=self.tmpdir,
+                )
+            )
+
+    def test_false_when_link_in_pcie_mode(self):
+        """Unmask SBR has no effect when the link is not in CXL mode."""
+        self._config(port_ctl=0x0000, flex_status=0x0000)
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.glt_utils.run_command",
+            return_value=_mock_run(stdout=LSPCI_VV_PORT_AND_FLEXBUS),
+        ):
+            self.assertFalse(
+                cxl_utils.is_cxl_sbr_masked_port(
+                    self._BDF, sysfs_root=self.tmpdir,
+                )
+            )
+
+    def test_false_when_port_dvsec_missing(self):
+        """No Port Extensions DVSEC means cxl_sbr_masked() is false."""
+        self._config(port_ctl=0x0000, flex_status=0x0001)
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.glt_utils.run_command",
+            return_value=_mock_run(stdout=LSPCI_VV_FLEXBUS_DVSEC),
+        ):
+            self.assertFalse(
+                cxl_utils.is_cxl_sbr_masked_port(
+                    self._BDF, sysfs_root=self.tmpdir,
+                )
+            )
+
+    def test_none_when_config_unreadable(self):
+        """DVSECs present but config missing cannot be classified."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.glt_utils.run_command",
+            return_value=_mock_run(stdout=LSPCI_VV_PORT_AND_FLEXBUS),
+        ):
+            self.assertIsNone(
+                cxl_utils.is_cxl_sbr_masked_port(
+                    self._BDF, sysfs_root=self.tmpdir,
+                )
+            )
+
+    def test_none_when_lspci_fails(self):
+        """lspci timeout, missing binary, or non-zero exit cannot be classified."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.cxl_utils.glt_utils.run_command",
+            side_effect=RuntimeError("Failed to run lspci"),
+        ):
+            self.assertIsNone(
+                cxl_utils.is_cxl_sbr_masked_port(
+                    self._BDF, sysfs_root=self.tmpdir,
+                )
+            )
 
 
 if __name__ == "__main__":

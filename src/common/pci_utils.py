@@ -19,6 +19,7 @@ Utilities for inspecting PCI device capabilities via lspci and sysfs.
 
 import os
 import re
+import struct
 import subprocess
 from typing import Optional
 
@@ -150,6 +151,83 @@ def get_pci_children(parent_bdf: str) -> list[str]:
     except OSError:
         return []
     return [entry for entry in entries if _BDF_BARE_RE.match(entry)]
+
+
+def get_pci_parent(
+    bdf: str, sysfs_root: str = "/",
+) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(parent_bdf, error)`` for the immediate upstream PCI bridge.
+
+    Mirrors ``pci_upstream_bridge()`` for the topology result:
+    - ``(parent, None)``: ``parent`` is the sysfs parent BDF
+    - ``(None, None)``: ``bdf`` sits on a root bus (no upstream PCI bridge)
+    - ``(None, reason)``: lookup failed because ``bdf`` is malformed or the
+      sysfs path is missing or cannot be resolved
+    """
+    if not _BDF_BARE_RE.match(bdf):
+        return None, f"malformed BDF {bdf!r}"
+    device_link = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", bdf,
+    )
+    try:
+        resolved = os.path.realpath(device_link, strict=True)
+    except OSError as exc:
+        return None, f"cannot resolve {device_link}: {exc}"
+    parent = os.path.basename(os.path.dirname(resolved))
+    if not _BDF_BARE_RE.match(parent):
+        return None, None
+    parent_link = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", parent,
+    )
+    if not os.path.exists(parent_link):
+        return None, f"upstream {parent} of {bdf} is missing from sysfs"
+    return parent, None
+
+
+def get_reset_methods(bdf: str, sysfs_root: str = "/") -> Optional[list[str]]:
+    """Return the tokens from ``reset_method``, or None if unreadable.
+
+    An absent ``reset_method`` file means no methods are advertised and
+    returns an empty list. Other OS errors return None so callers can treat
+    the device as unvalidated rather than as "bus is hidden".
+    """
+    path = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", bdf, "reset_method",
+    )
+    try:
+        content = glt_utils.read_sysfs_value(path)
+    except FileNotFoundError:
+        return []
+    except OSError:
+        return None
+    return content.split()
+
+
+def read_config_word(
+    bdf: str, offset: int, sysfs_root: str = "/",
+) -> Optional[int]:
+    """Return a little-endian 16-bit word from PCI config space.
+
+    Reads two bytes at ``offset`` from
+    ``<sysfs_root>/sys/bus/pci/devices/<bdf>/config``. None if ``bdf`` is
+    malformed, ``offset`` is negative, or the read fails (missing device,
+    permission, or short read).
+    """
+    if not _BDF_BARE_RE.match(bdf) or offset < 0:
+        return None
+    cfg_path = os.path.join(
+        sysfs_root, "sys", "bus", "pci", "devices", bdf, "config",
+    )
+    try:
+        with open(cfg_path, "rb") as cfg:
+            cfg.seek(offset)
+            raw_bytes = cfg.read(2)
+    except OSError:
+        return None
+    if len(raw_bytes) < 2:
+        return None
+    (raw,) = struct.unpack("<H", raw_bytes)
+    return raw
 
 
 def get_pci_class(bdf: str) -> Optional[str]:

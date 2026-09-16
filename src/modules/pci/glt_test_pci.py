@@ -122,6 +122,67 @@ def _get_cxl_cache_bdfs(bdfs, logger):
     return cxl_cache_bdfs
 
 
+def _collect_cxl_sbr_masked_reset_targets(bdfs, logger):
+    """Classify devices below CXL ports that have SBR masked.
+
+    Returns ``(checked, advertised_bus, unvalidated)``:
+    - checked: children of a CXL-mode port with Unmask SBR clear whose
+      ``reset_method`` was readable
+    - advertised_bus: subset of checked that still list the ``bus`` token
+    - unvalidated: children whose upstream-bridge lookup, CXL port
+      registers, or ``reset_method`` could not be read. Root-bus devices
+      (no upstream PCI bridge) are skipped, not unvalidated.
+    """
+    bridge_cache = {}
+    checked = []
+    advertised_bus = []
+    unvalidated = []
+
+    for bdf in bdfs:
+        parent, parent_error = pci_utils.get_pci_parent(bdf)
+        if parent_error:
+            unvalidated.append(bdf)
+            logger.warning(
+                "Unable to resolve upstream PCI bridge of %s: %s; "
+                "cannot validate SBR masking.",
+                bdf, parent_error,
+            )
+            continue
+        if parent is None:
+            continue
+        if parent not in bridge_cache:
+            bridge_cache[parent] = cxl_utils.is_cxl_sbr_masked_port(parent)
+            logger.debug(
+                "Upstream bridge %s CXL-SBR-masked: %s",
+                parent, bridge_cache[parent],
+            )
+        masked = bridge_cache[parent]
+        if masked is None:
+            unvalidated.append(bdf)
+            logger.warning(
+                "Unable to read CXL Port / Flex Bus registers on upstream "
+                "bridge %s of %s; cannot validate SBR masking.",
+                parent, bdf,
+            )
+            continue
+        if not masked:
+            continue
+        methods = pci_utils.get_reset_methods(bdf)
+        if methods is None:
+            unvalidated.append(bdf)
+            logger.warning(
+                "Unable to read reset_method on %s below CXL SBR-masked "
+                "bridge %s.",
+                bdf, parent,
+            )
+            continue
+
+        checked.append(bdf)
+        if "bus" in methods:
+            advertised_bus.append(bdf)
+    return checked, advertised_bus, unvalidated
+
+
 def _read_aspm_probe_hits(proc_path=ASPM_PROBE_PROC_PATH):
     """Read ASPM config and saved-state probe counters."""
     values = {}
@@ -231,6 +292,57 @@ def test_cxl_cache_ats_always_on(_, logger):
             "CXL.cache device(s) did not conclusively exercise the ATS always-on "
             f"bypass path: {', '.join(unvalidated_bdfs)}. Devices must use "
             "an identity IOMMU domain and show 'ATSCtl: Enable+'."
+        )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_cxl_sbr_masked_hides_bus_reset_method(_, logger):
+    """
+    Verify 'bus' is not advertised in reset_method when CXL masks SBR.
+
+    When a device sits below a CXL port that is in CXL mode and has Unmask
+    SBR clear, pci_reset_bus_function() must return -ENOTTY even on probe
+    so sysfs does not list 'bus'.
+
+    PATCH: PCI/CXL: Hide SBR from reset_methods if masked by CXL
+           (702c1d56c717)
+    """
+    if not glt_utils.is_cli_available("lspci"):
+        GLTCore.GLTTestResult.skip(
+            "lspci not available; install 'pciutils' to perform the test."
+        )
+
+    try:
+        target_bdfs = os.listdir("/sys/bus/pci/devices")
+    except OSError as error:
+        GLTCore.GLTTestResult.skip(f"Unable to enumerate PCI devices: {error}.")
+
+    checked, advertised_bus, unvalidated = _collect_cxl_sbr_masked_reset_targets(
+        target_bdfs, logger,
+    )
+
+    if advertised_bus:
+        GLTCore.GLTTestResult.fail(
+            "Device(s) below a CXL port with SBR masked still advertise "
+            f"'bus' in reset_method: {', '.join(advertised_bus)}. "
+            "Apply PCI/CXL: Hide SBR from reset_methods if masked by CXL "
+            "(https://git.kernel.org/torvalds/c/702c1d56c717)."
+        )
+
+    if not checked and not unvalidated:
+        GLTCore.GLTTestResult.skip(
+            "No PCI device found below a CXL port that is in CXL mode with "
+            "Unmask SBR cleared; SBR hide path is not observable after "
+            f"checking {len(target_bdfs)} PCI device(s)."
+        )
+
+    if unvalidated:
+        GLTCore.GLTTestResult.warn(
+            "Could not conclusively validate CXL SBR-masked reset_method "
+            f"on: {', '.join(unvalidated)}. The upstream bridge, CXL Port / "
+            "Flex Bus registers, or reset_method must be readable."
         )
 
 
