@@ -19,6 +19,10 @@ references:
     remote: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
     ref: master
     purpose: Canonical upstream Linux implementation and commit history.
+  linux-nvidia:
+    remote: https://github.com/NVIDIA/NV-Kernels.git
+    ref: linux-nvidia-6.18-next
+    purpose: NVIDIA target kernel implementation and downstream commit history.
 lenses:
   convention:
     model: gemini-flash
@@ -116,14 +120,18 @@ lenses:
       reliable way to discriminate whether the complete claimed kernel fix is
       present in the running kernel.
 
-      Use upstream Linux history to establish the complete fixed-versus-unfixed
-      boundary, but do not require the test structure to mirror the patch series
-      or internal implementation. Translate the complete fix into the smallest
+      Use the kernel history for the MR's stated target to establish the complete
+      fixed-versus-unfixed boundary. For NVIDIA kernel targets, inspect
+      linux-nvidia for the downstream implementation, fixes, and backports;
+      use linux-mainline for upstream provenance and comparison. Do not assume
+      upstream and downstream commit hashes or behavior are identical. Do not
+      require the test structure to mirror the patch series or internal
+      implementation. Translate the complete fix into the smallest
       externally observable invariant or state transition that is true only
       when the fix is present. State explicitly whether the test covers the
       full series, a userspace ABI surface, or a single commit, and align fail
-      messages, comments, and Makefile notes to the same upstream hashes. When
-      the claimed fix spans multiple causal commits, ensure relevant
+      messages, comments, and Makefile notes to the relevant target-kernel hashes.
+      When the claimed fix spans multiple causal commits, ensure relevant
       partial-fix kernels still fail.
 
       Before accepting a behavioral trigger as proof, verify the kernel path
@@ -183,7 +191,7 @@ lenses:
       If the boundary cannot be established, report insufficient evidence rather
       than inventing one. Anchor every actionable finding to a changed GreenLiT
       line.
-    references: [linux-mainline]
+    references: [linux-mainline, linux-nvidia]
   common-helper-contracts:
     model: gemini-flash
     applies_to: [src/**, tests/**]
