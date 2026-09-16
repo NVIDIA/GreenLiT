@@ -141,6 +141,8 @@ lenses:
     #   and !388#note_69408274 (jszu)
     # - NVIDIA/target kernel before ABI claims: !368#note_66839797 (icheng)
     # - linux-nvidia reference retained from devel (DGX-18014)
+    # - Cited PATCH SHA ≠ missing patch; resolve cherry-picks on the pin:
+    #   !379#note_69658586 (icheng)
     instructions: |
       Establish the testcase contract from project documentation and the
       testcase result semantics: patch discrimination, behavioral validation,
@@ -182,6 +184,16 @@ lenses:
       messages, comments, and Makefile notes to the relevant target-kernel hashes.
       When the claimed fix spans multiple causal commits, ensure relevant
       partial-fix kernels still fail.
+
+      When a cited PATCH SHA is not an ancestor of the pinned target
+      reference, do not conclude the patch is absent. Search only that pin
+      (commit subject, cherry-pick footer, or the same hunk) for an equivalent
+      object. If one exists, the fix is present on the target: ask the test to
+      name that target-ref hash in PATCH/fail text, and do not claim the
+      fixed/unfixed boundary cannot be established. If none exists, report
+      insufficient evidence rather than patch absence. Cite only the pin or an
+      ancestor; do not invent a hash or use linux-mainline documentation as the
+      NVIDIA ABI.
 
       Before accepting a behavioral trigger as proof, verify the kernel path
       under test actually executed (e.g. a runtime-resume callback ran—not
