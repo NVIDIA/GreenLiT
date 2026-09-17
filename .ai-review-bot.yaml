@@ -26,6 +26,16 @@ references:
 lenses:
   convention:
     model: gemini-flash
+    # Policy sources (YAML comments; not sent to the model):
+    # - Jira IDs allowed; do not leak process: !379#note_69388553 (achi)
+    # - Cheap platform/config checks first: !374#note_65739004 (achi)
+    # - Keep historical evidence before skip: !388#note_69369915 and
+    #   !388#note_69397544 (achi, jszu)
+    # - Behavior-level tests, not implementation-mirroring: !363#note_64678026
+    #   (icheng)
+    # - Parser/shared-helper/framework coverage: guardrail so the !363 behavior
+    #   rule does not drop tests/modules, tests/common, or tests/greenlit coverage.
+    #   Not a quoted human comment.
     instructions: |
       Review every changed artifact for GreenLiT conventions and language
       idioms. Discover rules from, in descending authority: repo docs and tool
@@ -69,8 +79,10 @@ lenses:
       only from `@GLTCore.GLTTestAttr()`-decorated functions. Topology/HW match
       helpers must distinguish match, unsupported (skip), and inspection
       failure (fail)—never collapse infra errors into bare false/skip. Do not
-      put `DGX-xxxx` in customer-visible fail/skip messages, docstrings, or
-      constant names.
+      expose internal workflow/process details in customer-visible text. Jira
+      identifiers used for traceability are allowed, including in test
+      docstrings; an identifier alone is not process disclosure. Do not infer
+      that Jira tags are mandatory everywhere.
 
       Lifecycle and process idioms: prefer `sys.executable` over bare
       `python3`; keep `make clean`, tempdirs, and device restore in `finally`
@@ -78,7 +90,10 @@ lenses:
       signal handlers in one test; do not add redundant root/capability
       checks (`glt-test-suite` already requires root). Do not add single-use
       or unittest-only wrappers that only forward to another helper—inline or
-      test the underlying function.
+      test the underlying function. Check cheap, necessary platform/config
+      prerequisites before module loading, mutation, or expensive collection.
+      Do not move a gate earlier if that discards historical evidence required
+      by an explicitly accepted diagnostic contract.
 
       Import-time and UAPI: `src/modules/**` must not raise for ABI size,
       endianness, or similar static checks at import (suite discovery
@@ -94,8 +109,14 @@ lenses:
       coverage when appropriate. Long-running or heavy-tooling tests may be
       `stress`-only. Prefer `tests/modules/` for hardware-independent parsing
       and multi-candidate selection; expect `tests/greenlit/` for
-      deterministic `src/greenlit/**` logic. New control-flow branches need
-      unit assertions for those branches—not only mocked success paths.
+      deterministic `src/greenlit/**` logic. Request tests for concrete
+      uncovered hardware-independent behavior or contracts, including failure
+      paths—not every private helper or implementation branch merely because
+      it exists. Prefer behavior-level assertions and existing test seams;
+      do not require wrapper extraction or implementation-mirroring tests.
+      Hardware-dependent cases may use the documented targeted-review or
+      hardware-validation path. Preserve meaningful parser, shared-helper,
+      and framework coverage; private visibility alone is not an exemption.
 
       Also flag clear deviations in typing, ownership, quoting, subprocess,
       resource, concurrency, post hooks, public API compatibility, and
@@ -115,10 +136,40 @@ lenses:
   discriminator:
     model: grok
     applies_to: [src/modules/**, external_tests/**]
+    # Policy sources (YAML comments; not sent to the model):
+    # - Passive historical diagnosis; patch link ≠ presence: !388#note_69138699
+    #   and !388#note_69408274 (jszu)
+    # - NVIDIA/target kernel before ABI claims: !368#note_66839797 (icheng)
+    # - linux-nvidia reference retained from devel (DGX-18014)
+    # - Cited PATCH SHA ≠ missing patch; resolve cherry-picks on the pin:
+    #   !379#note_69658586 (icheng)
     instructions: |
-      Step back from the proposed implementation and determine the simplest
-      reliable way to discriminate whether the complete claimed kernel fix is
-      present in the running kernel.
+      Establish the testcase contract from project documentation and the
+      testcase result semantics: patch discrimination, behavioral validation,
+      or passive historical diagnosis. GreenLiT accepts passive retained-journal
+      failure diagnostics when their declared contract and implementation
+      report historical failure observation rather than current-kernel patch
+      presence. A patch link alone does not claim patch presence. For such a
+      diagnostic, require results to identify the observed boot/history and
+      state that PASS means only failure not observed. Do not demand a trigger
+      or binary patch-presence test that replaces that contract. Still report
+      unreadable evidence treated as success, incorrect attribution, or claims
+      about current-kernel patch state unsupported by the observation.
+
+      For a testcase claiming patch discrimination, step back from the
+      implementation and determine the simplest reliable way to discriminate
+      whether the complete claimed fix is present in the running kernel. The
+      fixed/unfixed and trigger non-vacuity requirements below apply to that
+      claim, not to an explicitly accepted passive diagnostic.
+
+      Establish the declared kernel repository, branch/version, and hardware
+      scope before asserting an ABI or implementation mismatch. Use upstream
+      history for ancestry, not as an automatic substitute for a targeted
+      NVIDIA/backport ABI. Require source or DUT evidence applicable to that
+      target; if unavailable, report insufficient evidence rather than treating
+      mainline differences as defects. Distinguish upstream and backport
+      hashes explicitly. A reference declaration does not prove it matches
+      the target kernel.
 
       Use the kernel history for the MR's stated target to establish the complete
       fixed-versus-unfixed boundary. For NVIDIA kernel targets, inspect
@@ -133,6 +184,16 @@ lenses:
       messages, comments, and Makefile notes to the relevant target-kernel hashes.
       When the claimed fix spans multiple causal commits, ensure relevant
       partial-fix kernels still fail.
+
+      When a cited PATCH SHA is not an ancestor of the pinned target
+      reference, do not conclude the patch is absent. Search only that pin
+      (commit subject, cherry-pick footer, or the same hunk) for an equivalent
+      object. If one exists, the fix is present on the target: ask the test to
+      name that target-ref hash in PATCH/fail text, and do not claim the
+      fixed/unfixed boundary cannot be established. If none exists, report
+      insufficient evidence rather than patch absence. Cite only the pin or an
+      ancestor; do not invent a hash or use linux-mainline documentation as the
+      NVIDIA ABI.
 
       Before accepting a behavioral trigger as proof, verify the kernel path
       under test actually executed (e.g. a runtime-resume callback ran—not
