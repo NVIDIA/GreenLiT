@@ -39,6 +39,7 @@ RESCTRL_FS_TYPE = "resctrl"
 RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
 PROC_FILESYSTEMS = "/proc/filesystems"
 PROC_MOUNTS = "/proc/mounts"
+MPAM_DEBUGFS_PATH = "/sys/kernel/debug/mpam"
 MPAM_MON_FEATURES = "mon_features"
 MPAM_MBM_TOTAL_BYTES = "mbm_total_bytes"
 MPAM_PLATFORM_CAPABILITIES = {
@@ -1029,6 +1030,88 @@ def test_mpam_resctrl_schemata(_, logger):
             GLTCore.GLTTestResult.fail(
                 f"Failed to read resctrl schemata {schemata_path}: {e}"
             )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_cpuless_numa_domains(_, logger):
+    """
+    Verify CPU-less memory MSCs receive a usable CPU affinity.
+
+    Requires mounted debugfs with MPAM component information. ACPI memory
+    MSCs use class.255 and Linux NUMA node IDs as component IDs. Check the
+    RIS affinity directly, independently of resctrl control names or
+    schemata domain IDs. Skip when no memory MSC belongs to a CPU-less node.
+
+    PATCH: 24ecc38401ef NVIDIA: VR: SAUCE: arm_mpam: Handle CPU-less numa nodes
+    JIRA: DGX-17718
+    """
+    if not os.path.isdir(MPAM_DEBUGFS_PATH):
+        GLTCore.GLTTestResult.skip(
+            f"MPAM debug information is unavailable at {MPAM_DEBUGFS_PATH}; "
+            "requires CONFIG_DEBUG_FS and mounted debugfs."
+        )
+
+    component_paths = sorted(glob.glob(
+        os.path.join(MPAM_DEBUGFS_PATH, "class.255", "comp.*")))
+    checked_components = 0
+    for component_path in component_paths:
+        node = os.path.basename(component_path).removeprefix("comp.")
+        if not node.isdigit():
+            GLTCore.GLTTestResult.fail(
+                f"Invalid MPAM memory component path: {component_path}")
+        cpulist_path = f"/sys/devices/system/node/node{node}/cpulist"
+        try:
+            with open(cpulist_path, "r", encoding="utf-8") as f:
+                cpulist = f.read().strip()
+        except OSError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read CPU list for MPAM memory node {node} "
+                f"from {cpulist_path}: {error}"
+            )
+        if cpulist:
+            continue
+
+        ris_paths = sorted(glob.glob(os.path.join(
+            component_path, "vmsc.*", "msc.*_ris.*")))
+        if not ris_paths:
+            GLTCore.GLTTestResult.fail(
+                f"No MPAM RIS affinity information for CPU-less NUMA "
+                f"node {node} at {component_path}."
+            )
+
+        for ris_path in ris_paths:
+            affinity_path = os.path.join(ris_path, "affinity")
+            try:
+                with open(affinity_path, "r", encoding="utf-8") as f:
+                    affinity = f.read().strip()
+            except OSError as error:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read MPAM RIS affinity for CPU-less NUMA "
+                    f"node {node} from {affinity_path}: {error}"
+                )
+            # debugfs_create_cpumask() exposes a hexadecimal bitmap (%*pb),
+            # unlike the decimal CPU lists in NUMA sysfs.
+            if not re.fullmatch(r"[0-9a-fA-F]+(?:,[0-9a-fA-F]+)*", affinity):
+                GLTCore.GLTTestResult.fail(
+                    f"Malformed MPAM RIS affinity {affinity!r} "
+                    f"in {affinity_path}."
+                )
+            if not int(affinity.replace(",", ""), 16):
+                GLTCore.GLTTestResult.fail(
+                    f"MPAM RIS {affinity_path} has empty CPU affinity for "
+                    f"CPU-less NUMA node {node}; check the CPU-less NUMA "
+                    "affinity fix 24ecc38401ef."
+                )
+            logger.info("CPU-less NUMA node %s: MPAM RIS affinity %s = %s",
+                        node, affinity_path, affinity)
+        checked_components += 1
+
+    if not checked_components:
+        GLTCore.GLTTestResult.skip(
+            "No MPAM memory MSC belongs to a CPU-less NUMA node."
+        )
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
