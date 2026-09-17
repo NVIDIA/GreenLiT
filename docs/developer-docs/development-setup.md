@@ -20,6 +20,8 @@ normal install, or Option B for an offline/wheel-based install.
 
 - Python 3.10 or higher
 - Clone the greenlit repository or untar the source tarball
+- A C compiler, `make`, and Linux UAPI headers for tests that build native
+  probes or direct-KVM micro-guests
 - Root/sudo privileges, but only if you go on to do the optional
   [manual runtime configuration](#manual-runtime-configuration) below
 
