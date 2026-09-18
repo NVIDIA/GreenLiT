@@ -1034,7 +1034,6 @@ def test_mpam_resctrl_schemata(_, logger):
 
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
-@GLTCore.GLTPlan("stress")
 def test_mpam_cpuless_numa_domains(_, logger):
     """
     Verify CPU-less memory MSCs receive a usable CPU affinity.
@@ -1063,8 +1062,7 @@ def test_mpam_cpuless_numa_domains(_, logger):
                 f"Invalid MPAM memory component path: {component_path}")
         cpulist_path = f"/sys/devices/system/node/node{node}/cpulist"
         try:
-            with open(cpulist_path, "r", encoding="utf-8") as f:
-                cpulist = f.read().strip()
+            cpulist = glt_utils.read_sysfs_value(cpulist_path)
         except OSError as error:
             GLTCore.GLTTestResult.fail(
                 f"Failed to read CPU list for MPAM memory node {node} "
@@ -1084,8 +1082,7 @@ def test_mpam_cpuless_numa_domains(_, logger):
         for ris_path in ris_paths:
             affinity_path = os.path.join(ris_path, "affinity")
             try:
-                with open(affinity_path, "r", encoding="utf-8") as f:
-                    affinity = f.read().strip()
+                affinity = glt_utils.read_sysfs_value(affinity_path)
             except OSError as error:
                 GLTCore.GLTTestResult.fail(
                     f"Failed to read MPAM RIS affinity for CPU-less NUMA "
