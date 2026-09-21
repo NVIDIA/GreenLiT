@@ -17,6 +17,7 @@
 # pylint: disable=too-many-lines
 
 from contextlib import contextmanager
+import fnmatch
 import glob
 import mmap
 import os
@@ -39,6 +40,7 @@ RESCTRL_FS_TYPE = "resctrl"
 RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
 PROC_FILESYSTEMS = "/proc/filesystems"
 PROC_MOUNTS = "/proc/mounts"
+MPAM_DEBUGFS_PATH = "/sys/kernel/debug/mpam"
 MPAM_MON_FEATURES = "mon_features"
 MPAM_MBM_TOTAL_BYTES = "mbm_total_bytes"
 MPAM_PLATFORM_CAPABILITIES = {
@@ -159,6 +161,21 @@ def _cpus_of_node(node) -> list:
         except ValueError:
             continue
     return cpus
+
+
+def _mpam_debugfs_subdirs(path, pattern) -> list:
+    """Return the sorted subdirectories of path whose names match pattern.
+
+    Unlike glob.glob(), directory enumeration errors propagate as OSError,
+    so a caller can distinguish a failed inspection of advertised MPAM
+    debugfs topology (any other OSError) from an absent optional directory
+    (FileNotFoundError).
+    """
+    with os.scandir(path) as entries:
+        return sorted(
+            entry.path for entry in entries
+            if fnmatch.fnmatchcase(entry.name, pattern) and entry.is_dir()
+        )
 
 
 def _sum_l3_occupancy(occupancy_files) -> int:
@@ -1029,6 +1046,104 @@ def test_mpam_resctrl_schemata(_, logger):
             GLTCore.GLTTestResult.fail(
                 f"Failed to read resctrl schemata {schemata_path}: {e}"
             )
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+def test_mpam_cpuless_numa_domains(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify CPU-less memory MSCs receive a usable CPU affinity.
+
+    Requires mounted debugfs with MPAM component information. ACPI memory
+    MSCs use class.255 and Linux NUMA node IDs as component IDs. Check the
+    RIS affinity directly, independently of resctrl control names or
+    schemata domain IDs. Skip when no memory MSC belongs to a CPU-less node.
+    Fail when the advertised debugfs topology cannot be enumerated.
+
+    PATCH: 24ecc38401ef NVIDIA: VR: SAUCE: arm_mpam: Handle CPU-less numa nodes
+    JIRA: DGX-17718
+    """
+    memory_class_path = os.path.join(MPAM_DEBUGFS_PATH, "class.255")
+    try:
+        component_paths = _mpam_debugfs_subdirs(memory_class_path, "comp.*")
+    except FileNotFoundError:
+        # A missing path is confirmed absence: either MPAM debugfs is
+        # unavailable or the kernel advertises no memory MSC class.
+        if not os.path.isdir(MPAM_DEBUGFS_PATH):
+            GLTCore.GLTTestResult.skip(
+                f"MPAM debug information is unavailable at {MPAM_DEBUGFS_PATH}; "
+                "requires CONFIG_DEBUG_FS and mounted debugfs."
+            )
+        component_paths = []
+    except OSError as error:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to inspect MPAM memory components at "
+            f"{memory_class_path}: {error}"
+        )
+    checked_components = 0
+    for component_path in component_paths:
+        node = os.path.basename(component_path).removeprefix("comp.")
+        if not node.isdigit():
+            GLTCore.GLTTestResult.fail(
+                f"Invalid MPAM memory component path: {component_path}")
+        cpulist_path = f"/sys/devices/system/node/node{node}/cpulist"
+        try:
+            cpulist = glt_utils.read_sysfs_value(cpulist_path)
+        except OSError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read CPU list for MPAM memory node {node} "
+                f"from {cpulist_path}: {error}"
+            )
+        if cpulist:
+            continue
+
+        try:
+            ris_paths = [
+                ris_path
+                for vmsc_path in _mpam_debugfs_subdirs(component_path, "vmsc.*")
+                for ris_path in _mpam_debugfs_subdirs(vmsc_path, "msc.*_ris.*")
+            ]
+        except OSError as error:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to inspect MPAM RIS information for CPU-less NUMA "
+                f"node {node} at {component_path}: {error}"
+            )
+        if not ris_paths:
+            GLTCore.GLTTestResult.fail(
+                f"No MPAM RIS affinity information for CPU-less NUMA "
+                f"node {node} at {component_path}."
+            )
+
+        for ris_path in ris_paths:
+            affinity_path = os.path.join(ris_path, "affinity")
+            try:
+                affinity = glt_utils.read_sysfs_value(affinity_path)
+            except OSError as error:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read MPAM RIS affinity for CPU-less NUMA "
+                    f"node {node} from {affinity_path}: {error}"
+                )
+            # debugfs_create_cpumask() exposes a hexadecimal bitmap (%*pb),
+            # unlike the decimal CPU lists in NUMA sysfs.
+            if not re.fullmatch(r"[0-9a-fA-F]+(?:,[0-9a-fA-F]+)*", affinity):
+                GLTCore.GLTTestResult.fail(
+                    f"Malformed MPAM RIS affinity {affinity!r} "
+                    f"in {affinity_path}."
+                )
+            if not int(affinity.replace(",", ""), 16):
+                GLTCore.GLTTestResult.fail(
+                    f"MPAM RIS {affinity_path} has empty CPU affinity for "
+                    f"CPU-less NUMA node {node}; check the CPU-less NUMA "
+                    "affinity fix 24ecc38401ef."
+                )
+            logger.info("CPU-less NUMA node %s: MPAM RIS affinity %s = %s",
+                        node, affinity_path, affinity)
+        checked_components += 1
+
+    if not checked_components:
+        GLTCore.GLTTestResult.skip(
+            "No MPAM memory MSC belongs to a CPU-less NUMA node."
+        )
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
