@@ -140,26 +140,21 @@ def _cpus_of_node(node) -> list:
     """Return the list of online CPU ids owned by a NUMA node.
 
     Parses /sys/devices/system/node/node<N>/cpulist (e.g. "0-15,88-103").
-    Returns an empty list if the node has no CPUs or cannot be read.
+    Returns an empty list if the node has no CPUs. Raises OSError if the
+    cpulist cannot be read, or ValueError if a range cannot be parsed.
     """
     cpus = []
-    try:
-        with open(f"/sys/devices/system/node/node{node}/cpulist",
-                  "r", encoding="utf-8") as f:
-            spec = f.read().strip()
-    except OSError:
-        return cpus
+    with open(f"/sys/devices/system/node/node{node}/cpulist",
+              "r", encoding="utf-8") as f:
+        spec = f.read().strip()
     for part in spec.split(","):
         if not part:
             continue
-        try:
-            if "-" in part:
-                lo, hi = part.split("-")
-                cpus.extend(range(int(lo), int(hi) + 1))
-            else:
-                cpus.append(int(part))
-        except ValueError:
-            continue
+        if "-" in part:
+            lo, hi = part.split("-")
+            cpus.extend(range(int(lo), int(hi) + 1))
+        else:
+            cpus.append(int(part))
     return cpus
 
 
@@ -1002,6 +997,365 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
         GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_mbm_assignments")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks,too-many-statements
+        _, logger):
+    """
+    Verify that MPAM MBM bytes grow under NUMA-bound memory traffic.
+
+    Require nondecreasing numeric samples and growth above the baseline.
+    This checks counter liveness, not byte-accurate scaling, NRDY recovery,
+    overflow handling, or completeness of a kernel patch series.
+    The target NVIDIA kernel's MB_MON assignment domains use NUMA node
+    IDs, so no separate MB control domain-type metadata is required.
+
+    JIRA: DGX-17570
+    """
+    workload_duration_sec = 10
+    sample_interval_sec = 1
+    baseline_timeout_sec = 5
+    stress_workers = 4
+    stress_l3_size_mib = 160
+    stress_l3_size = f"{stress_l3_size_mib}M"
+    # Released stress-ng versions allocate three arrays, each four times
+    # the configured L3 size divided among workers. Allow 128 MiB overhead.
+    min_free_mem_kib = (12 * stress_l3_size_mib + 128) * 1024
+
+    mon_groups_path = os.path.join(RESCTRL_MOUNT_POINT, "mon_groups")
+    group_path = os.path.join(
+        mon_groups_path,
+        f"glt_mbm_growth_{os.getpid()}_{time.time_ns()}",
+    )
+    assignment_path = os.path.join(group_path, "mbm_MB_assignments")
+    available_path = os.path.join(
+        RESCTRL_MOUNT_POINT, "info", "MB_MON", "available_mbm_cntrs")
+    root_tasks_path = os.path.join(RESCTRL_MOUNT_POINT, "tasks")
+    group_tasks_path = os.path.join(group_path, "tasks")
+
+    cleanup_errors = []
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        for cli in ("stress-ng", "numactl"):
+            if not glt_utils.is_cli_available(cli):
+                GLTCore.GLTTestResult.skip(
+                    f"'{cli}' CLI not available. Cannot drive MBM traffic.")
+
+        if not os.path.isdir(mon_groups_path):
+            GLTCore.GLTTestResult.fail(
+                f"resctrl monitor group directory {mon_groups_path} is "
+                "missing."
+            )
+        try:
+            os.mkdir(group_path)
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to create temporary resctrl monitor group "
+                f"{group_path}: {e}"
+            )
+
+        proc = None
+        pgid = None
+        try:
+            if not os.path.isfile(assignment_path):
+                GLTCore.GLTTestResult.fail(
+                    f"MBM assignment file {assignment_path} is missing.")
+            if not os.path.isfile(available_path):
+                GLTCore.GLTTestResult.fail(
+                    f"MBM counter information file {available_path} is "
+                    "missing."
+                )
+
+            try:
+                original_states = _read_mbm_assignment_states(assignment_path)
+                available_counts = _read_mbm_counter_counts(available_path)
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read valid MBM assignment information: {e}"
+                )
+
+            assignment_domains = original_states.keys()
+            available_counter_domains = available_counts.keys()
+            if assignment_domains != available_counter_domains:
+                GLTCore.GLTTestResult.fail(
+                    f"MBM assignment domain mismatch: {assignment_path} has "
+                    f"{list(assignment_domains)}, {available_path} has "
+                    f"{list(available_counter_domains)}."
+                )
+
+            candidate_domains = [
+                domain for domain, state in original_states.items()
+                if state == "e"
+            ]
+            candidate_domains.extend(
+                domain for domain, state in original_states.items()
+                if state == "_" and available_counts[domain] > 0
+            )
+
+            # On the target NVIDIA kernel, enabled MB assignments require
+            # the MBA resource and memory MBM monitor to share a class.
+            # That class's component IDs are NUMA node IDs, independently
+            # of the optional MB control domain_id metadata.
+            selected_domain = None
+            for domain in candidate_domains:
+                meminfo_path = (
+                    f"/sys/devices/system/node/node{domain}/meminfo")
+                try:
+                    with open(meminfo_path, "r", encoding="utf-8") as meminfo:
+                        mem_total_kib = None
+                        mem_free_kib = None
+                        for line in meminfo:
+                            fields = line.split()
+                            if len(fields) >= 4 and fields[2] == "MemTotal:":
+                                mem_total_kib = int(fields[3])
+                            elif len(fields) >= 4 and fields[2] == "MemFree:":
+                                mem_free_kib = int(fields[3])
+                except (OSError, ValueError) as e:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to read NUMA node memory size from "
+                        f"{meminfo_path}: {e}"
+                    )
+
+                if mem_total_kib is None or mem_free_kib is None:
+                    GLTCore.GLTTestResult.fail(
+                        f"NUMA node meminfo {meminfo_path} does not "
+                        "report MemTotal and MemFree."
+                    )
+                cpulist_path = (
+                    f"/sys/devices/system/node/node{domain}/cpulist")
+                try:
+                    domain_cpus = _cpus_of_node(domain)
+                except (OSError, ValueError) as e:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to read NUMA node CPU list from "
+                        f"{cpulist_path}: {e}"
+                    )
+                if (mem_total_kib > 0 and domain_cpus
+                        and mem_free_kib >= min_free_mem_kib):
+                    selected_domain = domain
+                    break
+                if mem_free_kib < min_free_mem_kib:
+                    logger.info(
+                        "Skipping MBM domain %d: %d KiB free, need %d KiB.",
+                        domain, mem_free_kib, min_free_mem_kib)
+
+            if selected_domain is None:
+                GLTCore.GLTTestResult.skip(
+                    "No MBM domain with online CPUs and at least "
+                    f"{min_free_mem_kib // 1024} MiB of free memory is "
+                    "available for a bound traffic test."
+                )
+
+            counter_path = os.path.join(
+                group_path, "mon_data",
+                f"mon_MB_{selected_domain:02d}",
+                MPAM_MBM_TOTAL_BYTES,
+            )
+            if not os.path.isfile(counter_path):
+                GLTCore.GLTTestResult.fail(
+                    f"MBM monitor file {counter_path} is missing.")
+
+            if original_states[selected_domain] == "_":
+                try:
+                    with open(assignment_path, "w", encoding="utf-8") as f:
+                        f.write(
+                            f"{MPAM_MBM_TOTAL_BYTES}:"
+                            f"{selected_domain}=e\n"
+                        )
+                except OSError as e:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to assign {MPAM_MBM_TOTAL_BYTES} domain "
+                        f"{selected_domain}: {e}"
+                    )
+
+                try:
+                    assigned_states = _read_mbm_assignment_states(
+                        assignment_path)
+                except (OSError, ValueError) as e:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to read back MBM assignments from "
+                        f"{assignment_path}: {e}"
+                    )
+                expected_states = original_states.copy()
+                expected_states[selected_domain] = "e"
+                if assigned_states != expected_states:
+                    GLTCore.GLTTestResult.fail(
+                        f"MBM assignment readback mismatch: expected "
+                        f"{expected_states}, read {assigned_states}."
+                    )
+
+            baseline = None
+            counter_value = ""
+            baseline_deadline = time.monotonic() + baseline_timeout_sec
+            while time.monotonic() < baseline_deadline:
+                try:
+                    counter_value = glt_utils.read_sysfs_value(counter_path)
+                except OSError as e:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to read MBM monitor file "
+                        f"{counter_path}: {e}"
+                    )
+
+                if counter_value.isdigit():
+                    baseline = int(counter_value)
+                    break
+                if counter_value != "Unavailable":
+                    GLTCore.GLTTestResult.fail(
+                        f"Assigned MBM monitor file {counter_path} did not "
+                        f"contain a non-negative integer "
+                        f"(read {counter_value!r})."
+                    )
+                time.sleep(0.5)
+
+            if baseline is None:
+                GLTCore.GLTTestResult.fail(
+                    f"MBM monitor file {counter_path} did not become numeric "
+                    f"within {baseline_timeout_sec} seconds "
+                    f"(last read {counter_value!r})."
+                )
+
+            # A root MON group only accepts tasks from the root CTRL group.
+            # Move the child before exec so every stress-ng worker inherits
+            # the selected PARTID/PMG without moving the GLT runner itself.
+            workload_wrapper = (
+                'printf "%s\\n" "$$" > "$1" && '
+                'printf "%s\\n" "$$" > "$2" && '
+                'exec numactl "--cpunodebind=$3" "--membind=$4" '
+                'stress-ng --stream "$5" --stream-l3-size "$6" '
+                '--stream-madvise hugepage --timeout "$7"'
+            )
+            proc = subprocess.Popen(  # pylint: disable=consider-using-with
+                [
+                    "/bin/sh", "-c", workload_wrapper, "glt-mbm-growth",
+                    root_tasks_path, group_tasks_path, str(selected_domain),
+                    str(selected_domain), str(stress_workers),
+                    stress_l3_size, f"{workload_duration_sec}s",
+                ],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            pgid = proc.pid
+
+            samples = [baseline]
+            for _sample in range(workload_duration_sec + 1):
+                time.sleep(sample_interval_sec)
+                try:
+                    counter_value = glt_utils.read_sysfs_value(counter_path)
+                except OSError as e:
+                    GLTCore.GLTTestResult.fail(
+                        f"Failed to read MBM monitor file "
+                        f"{counter_path}: {e}"
+                    )
+
+                if counter_value.isdigit():
+                    current = int(counter_value)
+                    if current < samples[-1]:
+                        GLTCore.GLTTestResult.fail(
+                            f"{MPAM_MBM_TOTAL_BYTES} decreased under traffic: "
+                            f"{samples[-1]} -> {current}."
+                        )
+                    samples.append(current)
+                elif counter_value != "Unavailable":
+                    GLTCore.GLTTestResult.fail(
+                        f"Assigned MBM monitor file {counter_path} became "
+                        f"unreadable under traffic (read {counter_value!r})."
+                    )
+
+                if proc.poll() is not None:
+                    break
+
+            try:
+                returncode = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                GLTCore.GLTTestResult.fail(
+                    "stress-ng workload did not exit within the expected "
+                    "duration."
+                )
+            # stress-ng distinguishes resource/implementation limitations
+            # from workload failures (status 2).
+            if returncode in (3, 4):
+                GLTCore.GLTTestResult.skip(
+                    "stress-ng could not run the memory traffic workload "
+                    f"due to unavailable resources or support (status {returncode})."
+                )
+            if returncode != 0:
+                GLTCore.GLTTestResult.fail(
+                    f"stress-ng workload exited with status {returncode}.")
+
+            if len(samples) < 2:
+                GLTCore.GLTTestResult.fail(
+                    f"{MPAM_MBM_TOTAL_BYTES} produced no numeric sample "
+                    "during memory traffic."
+                )
+            if samples[-1] <= baseline:
+                GLTCore.GLTTestResult.fail(
+                    f"{MPAM_MBM_TOTAL_BYTES} did not grow under memory "
+                    f"traffic ({baseline} -> {samples[-1]} across "
+                    f"{len(samples)} samples)."
+                )
+
+            logger.info(
+                "%s grew under memory traffic on MB domain %d: %d -> %d "
+                "across %d samples.",
+                MPAM_MBM_TOTAL_BYTES, selected_domain, baseline,
+                samples[-1], len(samples),
+            )
+        finally:
+            if proc is not None and proc.poll() is None:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(pgid, signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        message = (
+                            "Failed to stop MBM memory traffic process group "
+                            f"{pgid}."
+                        )
+                        logger.warning(message)
+                        cleanup_errors.append(message)
+
+            if os.path.isfile(assignment_path):
+                try:
+                    with open(assignment_path, "w", encoding="utf-8") as f:
+                        f.write(f"{MPAM_MBM_TOTAL_BYTES}:*=_\n")
+                except OSError as e:
+                    logger.warning(
+                        "Failed to release MBM counters from %s: %s",
+                        assignment_path, e)
+
+            try:
+                os.rmdir(group_path)
+            except OSError as e:
+                message = (
+                    f"Failed to remove temporary resctrl monitor group "
+                    f"{group_path}: {e}"
+                )
+                logger.warning(message)
+                cleanup_errors.append(message)
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
+
+
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
@@ -1295,7 +1649,14 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
         try:
             node_l3_ids = set()
             node_l3_size = None
-            for cpu in _cpus_of_node(node):
+            try:
+                node_cpus = _cpus_of_node(node)
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to read NUMA node CPU list from "
+                    f"/sys/devices/system/node/node{node}/cpulist: {e}"
+                )
+            for cpu in node_cpus:
                 for idx in glob.glob(
                         f"/sys/devices/system/cpu/cpu{cpu}/cache/index*"):
                     try:
