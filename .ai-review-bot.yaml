@@ -135,7 +135,7 @@ lenses:
       which anchor to the offending summary line or MR title.
   discriminator:
     model: grok
-    applies_to: [src/modules/**, external_tests/**]
+    applies_to: [src/modules/**, src/bin/**, external_tests/**]
     # Policy sources (YAML comments; not sent to the model):
     # - Passive historical diagnosis; patch link ≠ presence: !388#note_69138699
     #   and !388#note_69408274 (jszu)

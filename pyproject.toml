@@ -1,5 +1,5 @@
 [build-system]
-requires = ["poetry-core>=1.0.0"]
+requires = ["poetry-core>=1.9.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
@@ -13,7 +13,8 @@ packages = [
     {include = "greenlit", from = "src"},
     {include = "common", from = "src"},
     {include = "modules", from = "src"},
-    {include = "scripts", from = "src"}
+    {include = "scripts", from = "src"},
+    {include = "*", from = "src/bin", to = "greenlit/_runtime/bin"}
 ]
 
 # Include package data and configuration files
