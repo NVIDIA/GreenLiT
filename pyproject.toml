@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
 name = "greenlit"
-version = "3.0.2"
+version = "3.1.1"
 description = "Automates Base OS testing with scripts and patches"
 readme = "docs/user-guides/user-manual.md"
 authors = ["NVIDIA GreenLiT"]
