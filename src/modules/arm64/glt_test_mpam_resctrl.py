@@ -24,6 +24,7 @@ import os
 import platform
 import re
 import signal
+import stat
 import struct
 import subprocess
 import threading
@@ -569,6 +570,84 @@ def test_mpam_driver_init_registers(  # pylint: disable=too-many-branches,too-ma
             "MBW_MIN, or MBW_MAX. driver-init register validation is not "
             "applicable."
         )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_info")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_resctrl_mb_max_lim(_, logger):
+    """
+    Verify info/MB/max_lim capability reporting.
+
+    PATCH: NVIDIA SAUCE 3d3b9ca0419275e0c6992e25052fb7d719edf573
+    PATCH: NVIDIA SAUCE e2a11af3dfd0c2c12481c1b63ad3289f78b5fbe1
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip(
+            "This CPU does not expose the MB/max_lim capability interface."
+        )
+
+    max_lim_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim")
+    backport_hint = (
+        "Consider backporting NVIDIA SAUCE commits "
+        "3d3b9ca0419275e0c6992e25052fb7d719edf573 and "
+        "e2a11af3dfd0c2c12481c1b63ad3289f78b5fbe1."
+    )
+
+    cleanup_errors = []
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        try:
+            st = os.stat(max_lim_path)
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to stat {max_lim_path}: {e}. {backport_hint}"
+            )
+
+        if not stat.S_ISREG(st.st_mode):
+            GLTCore.GLTTestResult.fail(
+                f"{max_lim_path} exists but is not a regular file. {backport_hint}"
+            )
+
+        if st.st_mode & 0o222:
+            GLTCore.GLTTestResult.fail(
+                f"{max_lim_path} is writable (mode {oct(st.st_mode)}). "
+                f"It must be strictly read-only. {backport_hint}"
+            )
+
+        try:
+            with open(max_lim_path, "rb") as f:
+                content = f.read()
+        except OSError as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read {max_lim_path}: {e}. {backport_hint}"
+            )
+
+        try:
+            decoded = content.decode("ascii")
+        except UnicodeDecodeError:
+            GLTCore.GLTTestResult.fail(
+                f"{max_lim_path} contains non-ASCII characters: {content!r}. "
+                f"{backport_hint}"
+            )
+
+        if decoded not in ("0\n", "1\n", "2\n", "3\n"):
+            GLTCore.GLTTestResult.fail(
+                f"{max_lim_path} content {content!r} is not exactly one ASCII "
+                "decimal integer from 0 through 3 followed by a newline. "
+                f"{backport_hint}"
+            )
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_driver_init_registers")
