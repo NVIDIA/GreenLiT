@@ -16,6 +16,71 @@ from common import glt_core as GLTCore
 from src.modules.arm64 import glt_test_mpam_resctrl as mpam_resctrl
 
 
+class TestMpamMbaHardlimExposure(GLTTestBase):
+    """Check complete schemata parsing through the public exposure test."""
+
+    SCHEMATA = (
+        "\nL3:0=ffff;2=ffff\n\n"
+        "MB:0=100;2=100\n\n"
+        "MB_NODE:7=100\n"
+        "MB_HLIM:2=0;0=1\n\n"
+        "L2:0=ff\n\n"
+    )
+
+    def setUp(self):
+        super().setUp()
+        temp_dir = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.addCleanup(temp_dir.cleanup)
+        resctrl = Path(temp_dir.name)
+        mb_info = resctrl / "info" / "MB"
+        mb_info.mkdir(parents=True)
+        (mb_info / "max_lim").write_text("0\n", encoding="ascii")
+        (resctrl / "info" / "MB_HLIM").mkdir()
+        self.schemata = resctrl / "schemata"
+        nvdev = self.mock.Mock()
+        nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+        patches = (
+            self.mock.patch.object(mpam_resctrl, "NvDev", return_value=nvdev),
+            self.mock.patch.object(mpam_resctrl, "RESCTRL_MOUNT_POINT",
+                                   str(resctrl)),
+            self.mock.patch.object(mpam_resctrl, "_managed_resctrl_mount",
+                                   return_value=nullcontext((True, None))),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_late_duplicate_or_malformed_line_fails(self):
+        """A valid resource pair cannot hide later duplicate or malformed lines."""
+        for line in ("MB:0=100;2=100", "MB_HLIM:2=0;0=1", "MB", "MB_HLIM"):
+            with self.subTest(line=line):
+                self.schemata.write_text(self.SCHEMATA + line + "\n", encoding="ascii")
+
+                with self.assertRaisesRegex(GLTCore.GLTTestFail,
+                                            "Malformed or duplicate .* schemata line"):
+                    mpam_resctrl.test_mpam_mba_hardlim_exposure(None, self.mock_logger)
+
+    def test_late_malformed_domain_entries_fail(self):
+        """A valid MB line cannot hide malformed entries in the later MB_HLIM line."""
+        self.schemata.write_text(
+            self.SCHEMATA.replace("MB_HLIM:2=0;0=1", "MB_HLIM:2=0;broken"),
+            encoding="ascii")
+
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Malformed MB_HLIM domain entries"):
+            mpam_resctrl.test_mpam_mba_hardlim_exposure(None, self.mock_logger)
+
+    def test_separated_resources_pass_in_either_order(self):
+        """Matching domains pass with unrelated resources and blank lines around them."""
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                lines = self.SCHEMATA.splitlines()
+                if reverse:
+                    lines.reverse()
+                self.schemata.write_text("\n".join(lines) + "\n", encoding="ascii")
+
+                mpam_resctrl.test_mpam_mba_hardlim_exposure(None, self.mock_logger)
+
+
 class TestMpamMbmCounterGrowth(GLTTestBase):
     """Exercise MBM traffic resource decisions without touching hardware."""
 
