@@ -17,6 +17,7 @@
 # pylint: disable=too-many-lines
 
 from contextlib import contextmanager
+import errno
 import fnmatch
 import glob
 import mmap
@@ -58,6 +59,36 @@ MPAM_PLATFORM_CAPABILITIES = {
         "expected_mb_mon_features": (MPAM_MBM_TOTAL_BYTES,),
     },
 }
+
+
+def _read_mb_hlim_schemata(path):
+    """Read MB and MB_HLIM domain values, rejecting malformed schemata."""
+    with open(path, "r", encoding="ascii") as schemata_file:
+        content = schemata_file.read()
+
+    schemas = {}
+    for line in content.splitlines():
+        resource, separator, values = line.strip().partition(":")
+        resource = resource.strip()
+        if resource not in ("MB", "MB_HLIM"):
+            continue
+        if not separator or resource in schemas:
+            raise ValueError(f"Malformed or duplicate {resource} line in {path}: {line!r}")
+        domains = {}
+        for entry in values.split(";"):
+            if re.fullmatch(r"[0-9]+=[0-9]+", entry) is None:
+                raise ValueError(f"Malformed {resource} entry in {path}: {entry!r}")
+            domain, value = (int(field) for field in entry.split("="))
+            if domain in domains:
+                raise ValueError(f"Duplicate {resource} domain {domain} in {path}")
+            domains[domain] = value
+        schemas[resource] = domains
+
+    if set(schemas) != {"MB", "MB_HLIM"}:
+        raise ValueError(f"Missing MB or MB_HLIM resource in {path}")
+    if schemas["MB"].keys() != schemas["MB_HLIM"].keys():
+        raise ValueError(f"MB and MB_HLIM domains do not match in {path}")
+    return schemas
 
 
 def _resctrl_fs_supported() -> bool:
@@ -761,6 +792,138 @@ def test_mpam_mba_hardlim_exposure(  # pylint: disable=too-many-branches,too-man
                     f"MB_HLIM domains {sorted(schemas['MB_HLIM'])} do not match "
                     f"MB domains {sorted(schemas['MB'])}.")
             logger.info("MB_HLIM and MB share domains %s.", sorted(schemas["MB"]))
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_mba_hardlim_exposure")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mba_hardlim_validation_defaults(  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks,too-many-statements
+        _, logger):
+    """
+    Verify MB_HLIM rejects invalid values and initializes new groups to zero.
+
+    Use only a private, empty control group. Rejected writes must return
+    EINVAL and preserve MB and MB_HLIM, including a staged multi-domain
+    write when possible. Recreate the group after enabling hard limiting
+    and require zero defaults again. This checks the resctrl interface,
+    not physical HARDLIM programming.
+
+    JIRA: DGX-17720
+    PATCH: NVIDIA SAUCE 407fd9260213b8c16771755c9867dc4c42352ba3
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("MB_HLIM validation is Vera-specific.")
+
+    cleanup_errors = []
+    group = None
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        try:
+            with open(os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim"),
+                      "r", encoding="ascii") as info_file:
+                max_lim = info_file.read()
+            if max_lim not in ("0\n", "1\n", "2\n", "3\n"):
+                raise ValueError(f"Invalid max_lim content: {max_lim!r}")
+            if max_lim != "0\n":
+                GLTCore.GLTTestResult.skip(
+                    f"MB_HLIM is not writable with max_lim={max_lim.strip()}.")
+            with open(os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_HLIM",
+                                   "schema_format"), "r", encoding="ascii") as info_file:
+                schema_format = info_file.read()
+            if schema_format != "0/1\n":
+                raise ValueError(f"Unexpected MB_HLIM schema_format: {schema_format!r}")
+
+            root_schema = _read_mb_hlim_schemata(
+                os.path.join(RESCTRL_MOUNT_POINT, "schemata"))
+            domains = sorted(root_schema["MB_HLIM"])
+            group_path = os.path.join(
+                RESCTRL_MOUNT_POINT, f"glt_mb_hlim_{os.getpid()}_{time.time_ns()}")
+            schemata_path = os.path.join(group_path, "schemata")
+            # kstrtou32(..., 10, ...) accepts +1 and 01; they are not invalid.
+            invalid_values = ("2", "-1", "0x1", "abc", "1.0", "4294967296", "")
+
+            for generation in range(2):
+                os.mkdir(group_path)
+                group = group_path  # Own the group only after mkdir succeeds.
+                initial = _read_mb_hlim_schemata(schemata_path)
+                if initial["MB_HLIM"] != dict.fromkeys(domains, 0):
+                    GLTCore.GLTTestResult.fail(
+                        f"New group {group} must default all MB_HLIM domains to 0; "
+                        f"read {initial['MB_HLIM']}.")
+                logger.info("Group creation %d: MB_HLIM defaults to 0 on domains %s.",
+                            generation + 1, domains)
+                if generation:
+                    break
+
+                for baseline in (0, 1):
+                    payload = ("MB_HLIM:" + ";".join(
+                        f"{domain}={baseline}" for domain in domains) + "\n").encode("ascii")
+                    with open(schemata_path, "wb", buffering=0) as schemata_file:
+                        if schemata_file.write(payload) != len(payload):
+                            GLTCore.GLTTestResult.fail("Short MB_HLIM baseline write.")
+                    expected = {
+                        "MB": initial["MB"],
+                        "MB_HLIM": dict.fromkeys(domains, baseline),
+                    }
+                    if _read_mb_hlim_schemata(schemata_path) != expected:
+                        GLTCore.GLTTestResult.fail(
+                            f"Could not establish MB_HLIM={baseline} without changing MB.")
+
+                    invalid_assignments = [
+                        f"{domain}={value}" for domain in domains for value in invalid_values
+                    ]
+                    if len(domains) > 1:
+                        invalid_assignments.append(
+                            f"{domains[0]}={1 - baseline};{domains[1]}=2")
+                    else:
+                        logger.info("One MB_HLIM domain; multi-domain staging check not applicable.")
+
+                    for assignment in invalid_assignments:
+                        payload = f"MB_HLIM:{assignment}\n".encode("ascii")
+                        with open(schemata_path, "wb", buffering=0) as schemata_file:
+                            try:
+                                schemata_file.write(payload)
+                            except OSError as error:
+                                if error.errno != errno.EINVAL:
+                                    raise OSError(
+                                        error.errno, f"Expected EINVAL for {payload!r}: {error}"
+                                    ) from error
+                            else:
+                                GLTCore.GLTTestResult.fail(
+                                    f"Invalid MB_HLIM write was accepted: {payload!r}")
+                        actual = _read_mb_hlim_schemata(schemata_path)
+                        if actual != expected:
+                            GLTCore.GLTTestResult.fail(
+                                f"Rejected write {payload!r} changed configuration: "
+                                f"expected {expected}, read {actual}.")
+                        logger.debug("Rejected %r with EINVAL; MB and MB_HLIM unchanged.", payload)
+                    logger.info("MB_HLIM=%d: verified %d invalid writes preserve configuration.",
+                                baseline, len(invalid_assignments))
+
+                # Leave the old group's values at 1 to exercise reinitialization.
+                os.rmdir(group)
+                group = None
+        except (OSError, ValueError) as error:
+            GLTCore.GLTTestResult.fail(f"MB_HLIM validation failed: {error}")
+        finally:
+            if group is not None:
+                try:
+                    os.rmdir(group)
+                except OSError as error:
+                    message = f"Failed to remove test-owned resctrl group {group}: {error}"
+                    logger.warning("%s", message)
+                    cleanup_errors.append(message)
 
     if cleanup_errors:
         GLTCore.GLTTestResult.fail(cleanup_errors[0])
