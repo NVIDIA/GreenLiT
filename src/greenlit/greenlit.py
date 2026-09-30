@@ -119,14 +119,12 @@ def check_required_commands(logger):
 
 def check_required_files(logger):
     """Warn if required files are missing in the system."""
-    systemd_files = [
-        '/usr/local/lib/systemd/system/greenlit.service',
-        '/usr/local/lib/systemd/system/greenlit.timer'
-    ]
+    # install.sh puts the units in /usr/local, distribution packages in /usr/lib.
+    systemd_dirs = ['/usr/local/lib/systemd/system', '/usr/lib/systemd/system']
 
-    for file_path in systemd_files:
-        if not os.path.exists(file_path):
-            logger.warning(f"File {file_path} is missing.")
+    for unit in ('greenlit.service', 'greenlit.timer'):
+        if not any(os.path.exists(os.path.join(d, unit)) for d in systemd_dirs):
+            logger.warning(f"File {os.path.join(systemd_dirs[0], unit)} is missing.")
 
     linux_dir = '/usr/local/share/greenlit/linux'
     if not os.path.isdir(linux_dir):
