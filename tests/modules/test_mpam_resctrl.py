@@ -2,6 +2,7 @@
 # pylint: disable=wrong-import-position
 
 from contextlib import contextmanager, ExitStack, nullcontext
+import errno
 from io import StringIO
 from itertools import chain, repeat
 import sys
@@ -405,6 +406,61 @@ class TestMpamResctrlInfo(GLTTestBase):
             mock_run.call_args_list[1].args[0],
             ["umount", "/sys/fs/resctrl"],
         )
+
+
+class TestMpamResctrlMaxLim(GLTTestBase):
+    """Check write-access rejection through the public max_lim test."""
+
+    def setUp(self):
+        super().setUp()
+        temp_dir = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.addCleanup(temp_dir.cleanup)
+        resctrl = Path(temp_dir.name)
+        self.max_lim = resctrl / "info" / "MB" / "max_lim"
+        self.max_lim.parent.mkdir(parents=True)
+        self.max_lim.write_bytes(b"0\n")
+        self.max_lim.chmod(0o444)
+        nvdev = self.mock.Mock()
+        nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
+        patches = (
+            self.mock.patch.object(mpam_resctrl, "NvDev", return_value=nvdev),
+            self.mock.patch.object(mpam_resctrl, "RESCTRL_MOUNT_POINT",
+                                   str(resctrl)),
+            self.mock.patch.object(mpam_resctrl, "_managed_resctrl_mount",
+                                   return_value=nullcontext((True, None))),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_permission_errors_confirm_read_only(self):
+        """Permission and read-only filesystem denials confirm write rejection."""
+        for error_number in (errno.EACCES, errno.EPERM, errno.EROFS):
+            with self.subTest(errno=error_number), \
+                    self.mock.patch.object(mpam_resctrl.os, "open", side_effect=OSError(
+                        error_number, "Write access denied")) as mock_open:
+                mpam_resctrl.test_mpam_resctrl_mb_max_lim(None, self.mock_logger)
+
+                mock_open.assert_called_once_with(str(self.max_lim), mpam_resctrl.os.O_WRONLY)
+
+    def test_successful_write_open_fails_and_closes_descriptor(self):
+        """An unexpectedly writable file fails without leaking its descriptor."""
+        with self.mock.patch.object(mpam_resctrl.os, "open", return_value=123) as mock_open, \
+                self.mock.patch.object(mpam_resctrl.os, "close") as mock_close:
+            with self.assertRaisesRegex(GLTCore.GLTTestFail, "accepted write access"):
+                mpam_resctrl.test_mpam_resctrl_mb_max_lim(None, self.mock_logger)
+
+            mock_open.assert_called_once_with(str(self.max_lim), mpam_resctrl.os.O_WRONLY)
+            mock_close.assert_called_once_with(123)
+
+    def test_unexpected_open_errors_fail(self):
+        """Disappearing files or I/O errors cannot masquerade as write protection."""
+        for error_number in (errno.ENOENT, errno.ENODEV, errno.EIO):
+            with self.subTest(errno=error_number), \
+                    self.mock.patch.object(mpam_resctrl.os, "open", side_effect=OSError(
+                        error_number, "Unexpected open failure")):
+                with self.assertRaisesRegex(GLTCore.GLTTestFail, "Failed to check write protection"):
+                    mpam_resctrl.test_mpam_resctrl_mb_max_lim(None, self.mock_logger)
 
 
 if __name__ == "__main__":
