@@ -52,7 +52,8 @@ MPAM_PLATFORM_CAPABILITIES = {
         "expected_mb_mon_features": (),
     },
     "vera": {
-        "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM", "MB_MON"),
+        # MB_HLIM exposure is checked against max_lim by DGX-17719.
+        "expected_dirs": ("L3", "L3_MON", "MB", "MB_MON"),
         "expected_files": ("last_cmd_status",),
         "expected_mb_mon_features": (MPAM_MBM_TOTAL_BYTES,),
     },
@@ -661,6 +662,108 @@ def test_mpam_driver_init_registers(  # pylint: disable=too-many-branches,too-ma
             "MBW_MIN, or MBW_MAX. driver-init register validation is not "
             "applicable."
         )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mb_max_lim")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_mba_hardlim_exposure(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+        _, logger):
+    """
+    Verify Vera exposes MB_HLIM exactly when MBA max_lim is zero.
+
+    Compare the reported capability with the info directory and root
+    schemata. Exposed MB_HLIM and MB resources must have the same domains.
+    This checks exposure, not the hardware probe or HARDLIM programming.
+
+    JIRA: DGX-17719
+    PATCH: NVIDIA SAUCE f72a73016915fd1d429d244aeef45e68c92a0aba
+    PATCH: NVIDIA SAUCE 1046a99778640817a76d4a1b3f19258ec2141434
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("MB_HLIM exposure validation is Vera-specific.")
+
+    max_lim_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim")
+    hlim_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_HLIM")
+    schemata_path = os.path.join(RESCTRL_MOUNT_POINT, "schemata")
+    cleanup_errors = []
+
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        try:
+            with open(max_lim_path, "r", encoding="ascii") as f:
+                max_lim = f.read()
+            with open(schemata_path, "r", encoding="ascii") as f:
+                content = f.read()
+            try:
+                hlim_stat = os.lstat(hlim_path)
+            except FileNotFoundError:
+                hlim_stat = None
+        except (OSError, UnicodeError) as e:
+            GLTCore.GLTTestResult.fail(f"Failed to inspect MB_HLIM exposure: {e}")
+
+        if max_lim not in ("0\n", "1\n", "2\n", "3\n"):
+            GLTCore.GLTTestResult.fail(
+                f"Invalid max_lim content at {max_lim_path}: {max_lim!r}.")
+        max_lim = int(max_lim)
+
+        schemas = {}
+        for line in content.splitlines():
+            resource, separator, values = line.strip().partition(":")
+            resource = resource.strip()
+            if resource not in ("MB", "MB_HLIM"):
+                continue
+            if not separator or resource in schemas:
+                GLTCore.GLTTestResult.fail(
+                    f"Malformed or duplicate {resource} schemata line: {line!r}")
+            entries = values.split(";")
+            if any(re.fullmatch(r"[0-9]+=[0-9]+", entry) is None
+                   for entry in entries):
+                GLTCore.GLTTestResult.fail(
+                    f"Malformed {resource} domain entries: {values!r}")
+            domains = [int(entry.split("=", 1)[0]) for entry in entries]
+            if len(domains) != len(set(domains)):
+                GLTCore.GLTTestResult.fail(
+                    f"Duplicate {resource} domain IDs: {values!r}")
+            schemas[resource] = set(domains)
+
+        if "MB" not in schemas:
+            GLTCore.GLTTestResult.fail(
+                f"MB resource is missing from {schemata_path}.")
+
+        expected = max_lim == 0
+        info_present = hlim_stat is not None
+        schema_present = "MB_HLIM" in schemas
+        logger.info(
+            "MAX_LIM=%d, info/MB_HLIM present=%s, MB_HLIM schemata present=%s",
+            max_lim, info_present, schema_present)
+        if info_present != expected or schema_present != expected:
+            GLTCore.GLTTestResult.fail(
+                f"MB_HLIM exposure mismatch for max_lim={max_lim}: "
+                f"expected info directory and schemata entry "
+                f"{'present' if expected else 'absent'}, "
+                f"found info entry present={info_present}, "
+                f"schemata entry present={schema_present}.")
+        if expected:
+            if not stat.S_ISDIR(hlim_stat.st_mode):
+                GLTCore.GLTTestResult.fail(
+                    f"{hlim_path} exists but is not a directory.")
+            if schemas["MB_HLIM"] != schemas["MB"]:
+                GLTCore.GLTTestResult.fail(
+                    f"MB_HLIM domains {sorted(schemas['MB_HLIM'])} do not match "
+                    f"MB domains {sorted(schemas['MB'])}.")
+            logger.info("MB_HLIM and MB share domains %s.", sorted(schemas["MB"]))
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_info")
