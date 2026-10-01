@@ -41,6 +41,7 @@ RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
 PROC_FILESYSTEMS = "/proc/filesystems"
 PROC_MOUNTS = "/proc/mounts"
 MPAM_DEBUGFS_PATH = "/sys/kernel/debug/mpam"
+MPAMF_IDR_HAS_MBW_PART = 1 << 26
 MPAM_MON_FEATURES = "mon_features"
 MPAM_MBM_TOTAL_BYTES = "mbm_total_bytes"
 MPAM_PLATFORM_CAPABILITIES = {
@@ -136,6 +137,64 @@ def _managed_resctrl_mount(logger, *, cleanup_errors=None):
                     cleanup_errors.append(str(error))
 
 
+def _mb_control_resource() -> str:
+    """Return the MB control name that appears in a group's schemata.
+
+    info/MB/control_mode selects between the legacy "MB" line and the
+    native node-scoped "MB_NODE" line. Platforms without the emulated
+    control publish no control_mode and always use "MB". Raises
+    ValueError when the file marks neither mode active.
+    """
+    control_mode_path = os.path.join(
+        RESCTRL_MOUNT_POINT, "info", "MB", "control_mode")
+    if not os.path.isfile(control_mode_path):
+        return "MB"
+
+    modes = glt_utils.read_sysfs_value(control_mode_path).split()
+    if "[native]" in modes:
+        return "MB_NODE"
+    if "[legacy]" in modes:
+        return "MB"
+    raise ValueError(
+        f"MB control mode file {control_mode_path} has no active legacy "
+        f"or native mode (read {modes!r})."
+    )
+
+
+def _schemata_domains(resource):
+    """Return the set of domain IDs on a resource's schemata line.
+
+    resctrl right-aligns resource names, so each line is stripped before
+    it is matched. Returns None when the root schemata file carries no
+    line for the resource. Raises ValueError on a malformed entry.
+    """
+    schemata_path = os.path.join(RESCTRL_MOUNT_POINT, "schemata")
+    prefix = f"{resource}:"
+
+    with open(schemata_path, "r", encoding="utf-8") as schemata:
+        line = next(
+            (raw.strip() for raw in schemata
+             if raw.strip().startswith(prefix)),
+            None,
+        )
+    if line is None:
+        return None
+
+    domains = set()
+    for entry in line[len(prefix):].split(";"):
+        if not entry.strip():
+            continue
+        domain, separator, _value = entry.partition("=")
+        domain = domain.strip()
+        if not separator or not domain.isdigit():
+            raise ValueError(
+                f"Malformed {resource} schemata entry {entry!r} in "
+                f"{schemata_path}."
+            )
+        domains.add(int(domain))
+    return domains
+
+
 def _cpus_of_node(node) -> list:
     """Return the list of online CPU ids owned by a NUMA node.
 
@@ -171,6 +230,38 @@ def _mpam_debugfs_subdirs(path, pattern) -> list:
             entry.path for entry in entries
             if fnmatch.fnmatchcase(entry.name, pattern) and entry.is_dir()
         )
+
+
+def _mpam_class_mbw_part_components(class_level):
+    """Return the component IDs of a class whose RIS advertise MBW partitioning.
+
+    Reads MPAMF_IDR for every RIS the driver discovered under
+    class.<class_level> in debugfs and tests the architectural HAS_MBW_PART
+    bit. This is a proxy for the driver's MB gate, MPAMF_MBW_IDR.HAS_MAX
+    with BWA_WD > 0, which debugfs does not expose. Memory components are
+    keyed by NUMA node ID and cache components by cache ID. Returns None
+    when MPAM debugfs or the class is absent. Enumeration and read errors
+    propagate as OSError; a malformed entry raises ValueError.
+    """
+    class_path = os.path.join(MPAM_DEBUGFS_PATH, f"class.{class_level}")
+    try:
+        component_paths = _mpam_debugfs_subdirs(class_path, "comp.*")
+    except FileNotFoundError:
+        return None
+
+    components = set()
+    for component_path in component_paths:
+        component = os.path.basename(component_path).removeprefix("comp.")
+        if not component.isdigit():
+            raise ValueError(
+                f"Invalid MPAM component path: {component_path}")
+        for vmsc_path in _mpam_debugfs_subdirs(component_path, "vmsc.*"):
+            for ris_path in _mpam_debugfs_subdirs(vmsc_path, "msc.*_ris.*"):
+                idr_path = os.path.join(ris_path, "mpamf_idr")
+                idr = int(glt_utils.read_sysfs_value(idr_path), 16)
+                if idr & MPAMF_IDR_HAS_MBW_PART:
+                    components.add(int(component))
+    return components
 
 
 def _sum_l3_occupancy(occupancy_files) -> int:
@@ -1498,6 +1589,116 @@ def test_mpam_cpuless_numa_domains(_, logger):  # pylint: disable=too-many-branc
         GLTCore.GLTTestResult.skip(
             "No MPAM memory MSC belongs to a CPU-less NUMA node."
         )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_msc_domain_completeness(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify every discovered memory MPAM component has an MB domain.
+
+    Domain setup once kept only the first MSC component matching a CPU,
+    leaving the remaining components without a resctrl domain. Compare
+    the NUMA-keyed component IDs under MPAM debugfs class.255 with the
+    domains the MB control publishes. This inventory is populated before
+    resctrl domain creation, so it includes components domain setup lost.
+    Skip when fewer than two components exist or their inventory is
+    unavailable. A missing MB line is inconclusive: HAS_MBW_PART does
+    not prove the class supports the HAS_MAX and BWA_WD requirements for
+    MB allocation. Legacy MB domains matching L3 skip when cache backing
+    cannot be excluded, even if those IDs also match the memory nodes.
+    Native MB_NODE control is node-scoped and has no such ambiguity.
+
+    PATCH: 2eacf36cf734 NVIDIA: VR: SAUCE: arm_mpam: Include all MSC components during domain setup
+    JIRA: DGX-17724
+    """
+    class_path = os.path.join(MPAM_DEBUGFS_PATH, "class.255")
+    try:
+        component_paths = _mpam_debugfs_subdirs(class_path, "comp.*")
+        expected_nodes = set()
+        for component_path in component_paths:
+            component = os.path.basename(component_path).removeprefix("comp.")
+            if not component.isdigit():
+                raise ValueError(
+                    f"Invalid MPAM component path: {component_path}")
+            expected_nodes.add(int(component))
+    except FileNotFoundError:
+        GLTCore.GLTTestResult.skip(
+            f"MPAM memory component inventory at {class_path} is unavailable."
+        )
+    except (OSError, ValueError) as e:
+        GLTCore.GLTTestResult.fail(
+            f"Failed to read the MPAM memory component inventory: {e}")
+
+    if len(expected_nodes) < 2:
+        GLTCore.GLTTestResult.skip(
+            "MPAM debugfs exposes fewer than two memory components "
+            f"{sorted(expected_nodes)}; this topology cannot distinguish "
+            "domain setup that keeps only the first CPU-matching component."
+        )
+
+    cleanup_errors = []
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        try:
+            mb_resource = _mb_control_resource()
+            mb_domains = _schemata_domains(mb_resource)
+            l3_domains = _schemata_domains("L3")
+        except (OSError, ValueError) as e:
+            GLTCore.GLTTestResult.fail(
+                f"Failed to read the resctrl schemata domains: {e}")
+
+        if mb_domains is None:
+            GLTCore.GLTTestResult.skip(
+                f"resctrl publishes no {mb_resource} control. "
+                "MPAMF_IDR.HAS_MBW_PART alone does not establish the "
+                "MPAMF_MBW_IDR.HAS_MAX and BWA_WD requirements for MB "
+                "allocation, so unsupported control and incomplete domain "
+                "setup cannot be distinguished."
+            )
+        if (mb_resource == "MB" and l3_domains is not None
+                and mb_domains == l3_domains):
+            # A cache class backs MB only if the L3 RIS implement MBW
+            # partitioning. Without that, treat equal domain sets as
+            # memory-backed and compare them with the expected nodes.
+            try:
+                l3_mbw_part = _mpam_class_mbw_part_components(3)
+            except (OSError, ValueError) as e:
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to inspect the L3 MSC capabilities in "
+                    f"{MPAM_DEBUGFS_PATH}: {e}")
+            l3_can_back_mb = bool(l3_mbw_part) or (
+                l3_mbw_part is None and not os.path.isdir(MPAM_DEBUGFS_PATH))
+            if l3_can_back_mb:
+                GLTCore.GLTTestResult.skip(
+                    f"{mb_resource} domains {sorted(mb_domains)} match the L3 "
+                    "cache domains and cache backing cannot be excluded, "
+                    "so memory MSC domain completeness cannot be determined "
+                    f"through {mb_resource}."
+                )
+
+        # The driver selects one class using capabilities intersected
+        # across all its components; it does not expose only the subset
+        # whose individual RIS advertise bandwidth partitioning.
+        if mb_domains != expected_nodes:
+            GLTCore.GLTTestResult.fail(
+                f"{mb_resource} exposes domain(s) {sorted(mb_domains)} "
+                f"but MPAM debugfs discovered memory component(s) "
+                f"{sorted(expected_nodes)}. "
+                "Check kernel commit 2eacf36cf734."
+            )
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")

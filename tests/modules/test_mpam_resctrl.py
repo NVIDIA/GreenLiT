@@ -5,6 +5,7 @@ from contextlib import contextmanager, ExitStack, nullcontext
 from io import StringIO
 from itertools import chain, repeat
 import sys
+import tempfile
 from pathlib import Path
 
 from tests.test_base import GLTTestBase
@@ -169,6 +170,74 @@ class TestMpamMbmCounterGrowth(GLTTestBase):
         with self._growth_environment(returncode=2):
             with self.assertRaisesRegex(GLTCore.GLTTestFail, "status 2"):
                 mpam_resctrl.test_mpam_mbm_counter_growth(None, self.mock_logger)
+
+
+class TestMpamMscDomainCompleteness(GLTTestBase):
+    """Check domain validation results when an owned mount cannot be removed."""
+
+    def setUp(self):
+        super().setUp()
+        temp_dir = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.addCleanup(temp_dir.cleanup)
+        root = Path(temp_dir.name)
+        debugfs = root / "mpam"
+        for component in (0, 2):
+            (debugfs / "class.255" / f"comp.{component}").mkdir(parents=True)
+        resctrl = root / "resctrl"
+        resctrl.mkdir()
+        self.schemata = resctrl / "schemata"
+        mounts = root / "mounts"
+        mounts.write_text("", encoding="utf-8")
+
+        def run_command(command, failure_message):
+            if command == ["mount", "-t", "resctrl", "resctrl", str(resctrl)]:
+                mounts.write_text(
+                    f"resctrl {resctrl} resctrl rw 0 0\n", encoding="utf-8")
+                return ""
+            self.assertEqual(command, ["umount", str(resctrl)])
+            raise RuntimeError(failure_message)
+
+        patches = (
+            self.mock.patch.multiple(
+                mpam_resctrl, MPAM_DEBUGFS_PATH=str(debugfs),
+                RESCTRL_MOUNT_POINT=str(resctrl), PROC_MOUNTS=str(mounts)),
+            self.mock.patch.object(mpam_resctrl.glt_utils, "is_cli_available",
+                                   return_value=True),
+            self.mock.patch.object(mpam_resctrl.glt_utils, "run_command",
+                                   side_effect=run_command),
+            self.mock.patch.object(mpam_resctrl.subprocess, "run",
+                                   side_effect=AssertionError("Unexpected subprocess")),
+        )
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_cleanup_failure_fails_matching_domains(self):
+        """Successful validation must not pass when its resctrl mount leaks."""
+        self.schemata.write_text("MB:0=100;2=100\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Failed to unmount resctrl"):
+            mpam_resctrl.test_mpam_msc_domain_completeness(None, self.mock_logger)
+
+        self.mock_logger.warning.assert_called_once_with("Failed to unmount resctrl.")
+
+    def test_cleanup_failure_preserves_domain_mismatch(self):
+        """A cleanup error must not replace the original missing-domain failure."""
+        self.schemata.write_text("\nL3:0=ffff;2=ffff\n\nMB:0=100\n\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Check kernel commit 2eacf36cf734"):
+            mpam_resctrl.test_mpam_msc_domain_completeness(None, self.mock_logger)
+
+        self.mock_logger.warning.assert_called_once_with("Failed to unmount resctrl.")
+
+    def test_cleanup_failure_preserves_missing_control_skip(self):
+        """An unavailable MB control stays inconclusive when cleanup also fails."""
+        self.schemata.write_text("L3:0=ffff;2=ffff\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(GLTCore.GLTTestSkip, "resctrl publishes no MB control"):
+            mpam_resctrl.test_mpam_msc_domain_completeness(None, self.mock_logger)
+
+        self.mock_logger.warning.assert_called_once_with("Failed to unmount resctrl.")
 
 
 class TestMpamResctrlInfo(GLTTestBase):
