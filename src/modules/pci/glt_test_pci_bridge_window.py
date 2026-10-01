@@ -1,0 +1,258 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""PCI bridge window type check for pbus_select_window_for_type()."""
+
+import os
+import platform
+import re
+import subprocess
+
+from common import glt_core as GLTCore
+from common import glt_utils
+
+# include/linux/ioport.h
+IORESOURCE_TYPE_BITS = 0x00001F00
+IORESOURCE_DISABLED = 0x10000000
+IORESOURCE_STARTALIGN = 0x00080000
+IORESOURCE_UNSET = 0x20000000
+
+_CLAIMED_BITS = IORESOURCE_DISABLED | IORESOURCE_STARTALIGN | IORESOURCE_UNSET
+_UPSTREAM_SHA = "e5f72cb9cea599dc9f5a9b80a33560a1d06f01cc"
+_NVIDIA_SHA = "96f42087b05801263b1f4c1129f525c0bbcfa3eb"
+_MAKE_TIMEOUT_SECS = 120
+_MODULE_TIMEOUT_SECS = 30
+_PROBE_MODULE = "bridge_window_probe"
+_PROBE_PROC = "/proc/greenlit_pci_bridge_window"
+_PROBE_LINE = re.compile(
+    r"^(?P<bdf>\S+) (?P<name>io|mem) (?P<flags>0x[0-9a-fA-F]+)$"
+)
+
+
+def classify_untyped_window(flags):
+    """Classify one bridge-window flags word.
+
+    A window that already has IORESOURCE_IO or IORESOURCE_MEM is typed.
+    A typeless window that sizing claimed has IORESOURCE_DISABLED,
+    IORESOURCE_STARTALIGN, or IORESOURCE_UNSET. Anything else was left
+    alone.
+    """
+    if flags & IORESOURCE_TYPE_BITS:
+        return "typed"
+    if flags & _CLAIMED_BITS:
+        return "claimed"
+    return "clear"
+
+
+def parse_probe_report(text):
+    """Return (bdf, slot, flags) rows from the probe proc file."""
+    windows = []
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        line = raw.strip()
+        if not line:
+            continue
+        match = _PROBE_LINE.match(line)
+        if match is None:
+            raise ValueError(
+                f"Unreadable bridge-window probe line {line_no}: {raw}"
+            )
+        windows.append((
+            match.group("bdf"),
+            match.group("name"),
+            int(match.group("flags"), 16),
+        ))
+    return windows
+
+
+def bridge_window_verdict(windows):
+    """Return ``(result, detail)`` for probe rows.
+
+    ``result`` is ``fail``, ``skip``, or ``pass``.
+    """
+    if not windows:
+        return "skip", "No PCI-to-PCI bridge found."
+
+    claimed = []
+    clear = []
+    for bdf, name, flags in windows:
+        kind = classify_untyped_window(flags)
+        label = f"{bdf} {name} {flags:#x}"
+        if kind == "claimed":
+            claimed.append(label)
+        elif kind == "clear":
+            clear.append(label)
+
+    if claimed:
+        return (
+            "fail",
+            "Untyped I/O bridge window was sized "
+            f"(missing upstream {_UPSTREAM_SHA} / "
+            f"linux-nvidia-6.18-next {_NVIDIA_SHA}): "
+            + ", ".join(claimed),
+        )
+    if not clear:
+        return (
+            "skip",
+            "No PCI bridge has an untyped I/O window; "
+            "the window type check is not observable.",
+        )
+    return (
+        "pass",
+        f"Left {len(clear)} untyped I/O bridge window(s) unsized: "
+        + ", ".join(clear),
+    )
+
+
+def _run_probe_command(args, timeout):
+    """Run a probe command and turn a timeout into a failed result."""
+    try:
+        return subprocess.run(
+            args,
+            capture_output=True,
+            check=False,
+            shell=False,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            args, 124, "", f"timed out after {timeout}s"
+        )
+
+
+def _unload_bridge_window_probe(logger):
+    """Unload the probe if it is still loaded."""
+    if not os.path.exists(f"/sys/module/{_PROBE_MODULE}"):
+        return
+    result = _run_probe_command(["rmmod", _PROBE_MODULE], _MODULE_TIMEOUT_SECS)
+    if result.returncode != 0:
+        logger.error(
+            "Failed to unload %s: %s",
+            _PROBE_MODULE,
+            result.stderr.strip() or result.stdout.strip() or "rmmod failed",
+        )
+
+
+def _bridge_window_tooling_skip_reason():
+    """Return why this host cannot build the probe, or None."""
+    for command in ("make", "insmod", "rmmod"):
+        if not glt_utils.is_cli_available(command):
+            return (
+                f"{command} is unavailable; cannot build or load the "
+                "bridge-window probe."
+            )
+    kernel_build_dir = os.path.join(
+        "/lib/modules", platform.uname().release, "build"
+    )
+    if not os.path.isdir(kernel_build_dir):
+        return (
+            "Matching running-kernel headers are unavailable: "
+            f"{kernel_build_dir}"
+        )
+    return None
+
+
+def _build_and_load_bridge_window_probe(logger):
+    """Build, sign, and load the probe.
+
+    Return a skip reason when the toolchain or loader cannot run the probe.
+    """
+    result = _run_probe_command(["make"], _MAKE_TIMEOUT_SECS)
+    if result.returncode != 0:
+        return (
+            "Cannot build the bridge-window probe: "
+            + (result.stderr.strip() or result.stdout.strip() or "make failed")
+        )
+
+    module_ko = f"{_PROBE_MODULE}.ko"
+    if not glt_utils.sign_kernel_module(module_ko, logger):
+        return (
+            f"Cannot sign {module_ko} for Secure Boot. "
+            "See docs/user-guides/secure-boot.md for setup."
+        )
+
+    result = _run_probe_command(
+        ["insmod", module_ko], _MODULE_TIMEOUT_SECS
+    )
+    if result.returncode != 0:
+        return (
+            "Cannot load the bridge-window probe: "
+            + (result.stderr.strip() or result.stdout.strip() or "insmod failed")
+        )
+    return None
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_pci_bridge_window_type(_, logger):
+    """
+    Untyped I/O bridge windows must not be sized.
+
+    pbus_select_window_for_type() returned the I/O slot even when the
+    resource had no IORESOURCE_IO. Bridge sizing then set
+    IORESOURCE_DISABLED or IORESOURCE_STARTALIGN, and a failed
+    assignment left IORESOURCE_UNSET. Non-prefetch and prefetch windows
+    are typed before sizing, so only the I/O slot is observable. The
+    sysfs resource file hides DISABLED and UNSET, so the flags come
+    from a probe module.
+
+    PATCH: https://git.kernel.org/torvalds/c/e5f72cb9cea5
+           linux-nvidia-6.18-next: 96f42087b058
+           PCI: Validate window resource type in pbus_select_window_for_type()
+    """
+    tooling_skip = _bridge_window_tooling_skip_reason()
+    if tooling_skip:
+        GLTCore.GLTTestResult.skip(tooling_skip)
+
+    module_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        _PROBE_MODULE,
+    )
+    if not os.path.isdir(module_dir):
+        GLTCore.GLTTestResult.fail(
+            f"Bridge window probe sources are missing at {module_dir}."
+        )
+
+    module_loaded = False
+    windows = []
+    with glt_utils.chdir_managed(module_dir):
+        try:
+            _unload_bridge_window_probe(logger)
+            load_skip = _build_and_load_bridge_window_probe(logger)
+            if load_skip:
+                GLTCore.GLTTestResult.skip(load_skip)
+            module_loaded = True
+            try:
+                with open(_PROBE_PROC, encoding="utf-8") as handle:
+                    windows = parse_probe_report(handle.read())
+            except (OSError, ValueError) as error:
+                GLTCore.GLTTestResult.fail(
+                    "Cannot read bridge window flags from the probe: "
+                    f"{error}"
+                )
+        except OSError as error:
+            GLTCore.GLTTestResult.fail(f"Bridge window probe failed: {error}")
+        finally:
+            if module_loaded:
+                _unload_bridge_window_probe(logger)
+            _run_probe_command(["make", "clean"], _MAKE_TIMEOUT_SECS)
+
+    result, detail = bridge_window_verdict(windows)
+    if result == "fail":
+        GLTCore.GLTTestResult.fail(detail)
+    if result == "skip":
+        GLTCore.GLTTestResult.skip(detail)
+    logger.info("%s", detail)
