@@ -124,7 +124,10 @@ def check_required_files(logger):
 
     for unit in ('greenlit.service', 'greenlit.timer'):
         if not any(os.path.exists(os.path.join(d, unit)) for d in systemd_dirs):
-            logger.warning(f"File {os.path.join(systemd_dirs[0], unit)} is missing.")
+            logger.warning(
+                f"File {unit} is missing from all checked systemd directories: "
+                f"{', '.join(systemd_dirs)}."
+            )
 
     linux_dir = '/usr/local/share/greenlit/linux'
     if not os.path.isdir(linux_dir):

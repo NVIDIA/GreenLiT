@@ -1,4 +1,5 @@
 """Unit tests for greenlit/greenlit.py helper functions."""
+# pylint: disable=too-many-lines
 
 import argparse
 import io
@@ -34,6 +35,78 @@ def _summary(test_tags=None, categories=None, test_cases=None, verbose=False):
 
 class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test pure helper functions used by glt-test-suite."""
+
+    def test_check_required_files_accepts_systemd_unit_locations(self):
+        """Local, packaged, and mixed installations do not warn about units."""
+        systemd_dirs = (
+            "/usr/local/lib/systemd/system", "/usr/lib/systemd/system")
+        locations = (
+            ("local", systemd_dirs[0], systemd_dirs[0]),
+            ("packaged", systemd_dirs[1], systemd_dirs[1]),
+            ("local_service", systemd_dirs[0], systemd_dirs[1]),
+            ("packaged_service", systemd_dirs[1], systemd_dirs[0]),
+        )
+
+        for installation, service_dir, timer_dir in locations:
+            with self.subTest(installation=installation):
+                present_paths = {
+                    os.path.join(service_dir, "greenlit.service"),
+                    os.path.join(timer_dir, "greenlit.timer"),
+                }
+                self.mock_logger.reset_mock()
+                with mock.patch.object(
+                        greenlit.os.path, "exists",
+                        side_effect=present_paths.__contains__), \
+                        mock.patch.object(
+                            greenlit.os.path, "isdir", return_value=True):
+                    greenlit.check_required_files(self.mock_logger)
+
+                self.mock_logger.warning.assert_not_called()
+
+    def test_check_required_files_warns_for_each_missing_systemd_unit(self):
+        """Each absent unit warns once and lists both checked directories."""
+        installations = (
+            (("greenlit.timer",), ("greenlit.service",)),
+            (("greenlit.service",), ("greenlit.timer",)),
+            ((), ("greenlit.service", "greenlit.timer")),
+        )
+
+        for present_units, missing_units in installations:
+            with self.subTest(missing_units=missing_units):
+                present_paths = {
+                    os.path.join("/usr/lib/systemd/system", unit)
+                    for unit in present_units
+                }
+                self.mock_logger.reset_mock()
+                with mock.patch.object(
+                        greenlit.os.path, "exists",
+                        side_effect=present_paths.__contains__), \
+                        mock.patch.object(
+                            greenlit.os.path, "isdir", return_value=True):
+                    greenlit.check_required_files(self.mock_logger)
+
+                expected_warnings = [
+                    mock.call(
+                        f"File {unit} is missing from all checked systemd "
+                        "directories: /usr/local/lib/systemd/system, "
+                        "/usr/lib/systemd/system.")
+                    for unit in missing_units
+                ]
+                self.assertCountEqual(
+                    self.mock_logger.warning.call_args_list, expected_warnings)
+
+    def test_check_required_files_warns_for_missing_linux_source(self):
+        """The Linux-source warning remains independent of unit checks."""
+        linux_dir = "/usr/local/share/greenlit/linux"
+        with mock.patch.object(
+                greenlit.os.path, "exists", return_value=True), \
+                mock.patch.object(
+                    greenlit.os.path, "isdir",
+                    side_effect=lambda path: path != linux_dir):
+            greenlit.check_required_files(self.mock_logger)
+
+        self.mock_logger.warning.assert_called_once_with(
+            f"Linux source code is not in {linux_dir}.")
 
     def test_get_active_plan_tags_defaults_to_standard(self):
         """No explicit plan selects standard and its nested external tests."""
