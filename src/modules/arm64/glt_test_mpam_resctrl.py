@@ -801,6 +801,108 @@ def test_mpam_mba_hardlim_exposure(  # pylint: disable=too-many-branches,too-man
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
+def test_mpam_mba_hardlim_valid_values(  # pylint: disable=too-many-branches,too-many-locals,too-many-statements
+        _, logger):
+    """
+    Verify per-domain MB_HLIM 0/1 writes preserve all other MBA controls.
+
+    Establish a zero baseline in a private, empty group, enable domains
+    individually, then disable them individually. Repeat each per-domain
+    write to exercise valid no-op updates. Read back all MB and MB_HLIM
+    values after every write. This validates cached resctrl configuration,
+    not physical HARDLIM programming.
+
+    JIRA: DGX-17722
+    PATCH: NVIDIA SAUCE 407fd9260213b8c16771755c9867dc4c42352ba3
+    PATCH: NVIDIA SAUCE 442299b435c3a0bb459d62df990968b1db9869b6
+    PATCH: NVIDIA SAUCE a3f61fa60cfc25ae781c282fac15a2ba0e7cf0a7
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip("MB_HLIM valid-value validation is Vera-specific.")
+
+    cleanup_errors = []
+    group = None
+    with _managed_resctrl_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
+
+        try:
+            with open(os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim"),
+                      "r", encoding="ascii") as info_file:
+                max_lim = info_file.read()
+            if max_lim not in ("0\n", "1\n", "2\n", "3\n"):
+                raise ValueError(f"Invalid max_lim content: {max_lim!r}")
+            if max_lim != "0\n":
+                GLTCore.GLTTestResult.skip(
+                    f"MB_HLIM is not writable with max_lim={max_lim.strip()}.")
+
+            root_schema = _read_mb_hlim_schemata(
+                os.path.join(RESCTRL_MOUNT_POINT, "schemata"))
+            group_path = os.path.join(
+                RESCTRL_MOUNT_POINT, f"glt_mb_hlim_valid_{os.getpid()}_{time.time_ns()}")
+            os.mkdir(group_path)
+            group = group_path  # Never adopt or remove a pre-existing group.
+            schemata_path = os.path.join(group, "schemata")
+            initial = _read_mb_hlim_schemata(schemata_path)
+            if initial["MB_HLIM"].keys() != root_schema["MB_HLIM"].keys():
+                raise ValueError("Private-group MB_HLIM domains differ from the root group.")
+            domains = sorted(initial["MB_HLIM"])
+            expected = {"MB": initial["MB"], "MB_HLIM": dict(initial["MB_HLIM"])}
+
+            # Defaults are covered separately by DGX-17720; set our own baseline.
+            write_steps = [(dict.fromkeys(domains, 0), 1)]
+            for value in (1, 0):
+                write_steps.extend(({domain: value}, 2) for domain in domains)
+            if len(domains) == 1:
+                logger.info("One MB_HLIM domain; cross-domain isolation cannot be checked.")
+
+            for updates, repetitions in write_steps:
+                expected["MB_HLIM"].update(updates)
+                payload = ("MB_HLIM:" + ";".join(
+                    f"{domain}={value}" for domain, value in updates.items()) + "\n").encode("ascii")
+                for attempt in range(repetitions):
+                    try:
+                        with open(schemata_path, "wb", buffering=0) as schemata_file:
+                            written = schemata_file.write(payload)
+                    except OSError as error:
+                        raise OSError(
+                            error.errno, f"Valid MB_HLIM write {payload!r} failed: {error}"
+                        ) from error
+                    if written != len(payload):
+                        GLTCore.GLTTestResult.fail(
+                            f"Short MB_HLIM write for {payload!r}: "
+                            f"expected {len(payload)} bytes, wrote {written}.")
+                    actual = _read_mb_hlim_schemata(schemata_path)
+                    if actual != expected:
+                        GLTCore.GLTTestResult.fail(
+                            f"After valid write {payload!r}, expected {expected}, read {actual}.")
+                    logger.info(
+                        "Verified %r (write %d/%d); other MB_HLIM domains and MB unchanged.",
+                        payload, attempt + 1, repetitions)
+        except (OSError, ValueError) as error:
+            GLTCore.GLTTestResult.fail(f"MB_HLIM valid-value validation failed: {error}")
+        finally:
+            if group is not None:
+                try:
+                    os.rmdir(group)
+                except OSError as error:
+                    message = f"Failed to remove test-owned resctrl group {group}: {error}"
+                    logger.warning("%s", message)
+                    cleanup_errors.append(message)
+
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(cleanup_errors[0])
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_mba_hardlim_exposure")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_mpam_mba_hardlim_validation_defaults(  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks,too-many-statements
         _, logger):
     """
@@ -933,9 +1035,9 @@ def test_mpam_mba_hardlim_validation_defaults(  # pylint: disable=too-many-branc
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
-def test_mpam_resctrl_mb_max_lim(_, logger):
+def test_mpam_resctrl_mb_max_lim(_, logger):  # pylint: disable=too-many-branches
     """
-    Verify info/MB/max_lim capability reporting.
+    Verify info/MB/max_lim is read-only and reports a valid capability.
 
     PATCH: NVIDIA SAUCE 3d3b9ca0419275e0c6992e25052fb7d719edf573
     PATCH: NVIDIA SAUCE e2a11af3dfd0c2c12481c1b63ad3289f78b5fbe1
@@ -1002,6 +1104,19 @@ def test_mpam_resctrl_mb_max_lim(_, logger):
                 "decimal integer from 0 through 3 followed by a newline. "
                 f"{backport_hint}"
             )
+
+        try:
+            descriptor = os.open(max_lim_path, os.O_WRONLY)
+        except OSError as error:
+            if error.errno not in (errno.EACCES, errno.EPERM, errno.EROFS):
+                GLTCore.GLTTestResult.fail(
+                    f"Failed to check write protection for {max_lim_path}: "
+                    f"{error}. {backport_hint}")
+        else:
+            os.close(descriptor)
+            GLTCore.GLTTestResult.fail(
+                f"{max_lim_path} accepted write access. "
+                f"It must be strictly read-only. {backport_hint}")
 
     if cleanup_errors:
         GLTCore.GLTTestResult.fail(cleanup_errors[0])
