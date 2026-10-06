@@ -199,6 +199,68 @@ def natural_sort_key(path: Path):
     )
 
 
+ARM_PMU_EVENT_SOURCE_PATH = Path("/sys/bus/event_source/devices")
+BRBE_ALLOWED_BRANCH_RECORD_COUNTS = frozenset((8, 16, 32, 64))
+
+
+def read_brbe_capabilities(event_source_path=ARM_PMU_EVENT_SOURCE_PATH):
+    """Return BRBE branch-record counts for all visible Arm PMUv3 devices."""
+    event_source_path = Path(event_source_path)
+    try:
+        pmu_devices = sorted(
+            (
+                path for path in event_source_path.glob("armv8_pmuv3*")
+                if path.is_dir()
+            ),
+            key=natural_sort_key,
+        )
+    except OSError as err:
+        raise ValueError(
+            f"Unable to inspect Arm PMUv3 devices under {event_source_path}: {err}"
+        ) from err
+
+    if not pmu_devices:
+        raise ValueError(
+            f"No armv8_pmuv3 PMU devices found under {event_source_path}"
+        )
+
+    capabilities = {}
+    missing_devices = []
+    for pmu_device in pmu_devices:
+        capability_path = pmu_device / "caps" / "branches"
+        try:
+            raw_count = capability_path.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            missing_devices.append(pmu_device.name)
+            continue
+        except OSError as err:
+            raise ValueError(
+                f"Unable to read BRBE capability {capability_path}: {err}"
+            ) from err
+
+        try:
+            branch_count = int(raw_count, 0)
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid BRBE branch-record count in {capability_path}: "
+                f"{raw_count!r}"
+            ) from err
+        if branch_count not in BRBE_ALLOWED_BRANCH_RECORD_COUNTS:
+            raise ValueError(
+                f"Unsupported BRBE branch-record count in {capability_path}: "
+                f"{branch_count}; expected one of "
+                f"{sorted(BRBE_ALLOWED_BRANCH_RECORD_COUNTS)}"
+            )
+        capabilities[pmu_device.name] = branch_count
+
+    if missing_devices:
+        raise ValueError(
+            "BRBE caps/branches is missing for Arm PMUv3 devices: "
+            + ", ".join(missing_devices)
+        )
+    return capabilities
+
+
 def _get_perf_candidates():
     """Return perf command candidates without requiring them to exist."""
     candidates = ["perf"]
