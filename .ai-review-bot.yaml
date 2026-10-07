@@ -37,6 +37,11 @@ lenses:
     # - Parser/shared-helper/framework coverage: guardrail so the !363 behavior
     #   rule does not drop tests/modules, tests/common, or tests/greenlit coverage.
     #   Not a quoted human comment.
+    # - Keep one-caller flows and mutate/verify/restore in the testcase, report
+    #   skip/fail directly, restore in finally: !392#note_73017297 and
+    #   !392#note_73017302 (achi)
+    # - Use must_pass instead of repeating prerequisite checks:
+    #   !392#note_73017293 and !392#note_73017295 (achi)
     instructions: |
       Review every changed artifact for GreenLiT conventions and language
       idioms. Discover rules from, in descending authority: repo docs and tool
@@ -95,6 +100,28 @@ lenses:
       prerequisites before module loading, mutation, or expensive collection.
       Do not move a gate earlier if that discards historical evidence required
       by an explicitly accepted diagnostic contract.
+
+      Test flow: judge each helper by its interface, not its caller count. A
+      helper is justified when it has a generic, testcase-independent interface
+      with clear inputs, outputs, and error behavior, and the author places it
+      deliberately as module-private, shared in `src/common/`, or inline in the
+      decorated testcase. Flag a helper when it only fragments a
+      testcase-specific inspect/mutate/verify/restore flow or only forwards to
+      another helper. Do not flag a helper on caller count alone. Report
+      skip/fail directly as soon as the condition is known rather than
+      returning status/reason tuples solely for the caller to dispatch. Keep
+      in-process restoration in `finally` and collect cleanup errors only when
+      needed; preserve documented post-hook and reboot/resume cleanup
+      contracts.
+
+      Test dependencies: look for follow-up testcases that repeat prerequisite
+      checks already established by another testcase. When the follow-up
+      requires that testcase to pass, it MUST use
+      `@GLTCore.GLTRequires.must_pass(category, testcase)` and remove only checks
+      guaranteed by its PASS. Check skip/fail propagation and retain
+      follow-up-specific or mutable-state checks. Do not add dependencies that
+      suppress independently useful coverage or diagnostics needed after a
+      prerequisite fails or skips.
 
       Import-time and UAPI: `src/modules/**` must not raise for ABI size,
       endianness, or similar static checks at import (suite discovery
@@ -257,6 +284,13 @@ lenses:
   common-helper-contracts:
     model: gemini-flash
     applies_to: [src/**, tests/**]
+    # Policy sources (YAML comments; not sent to the model):
+    # - Call helpers directly and mock where looked up; drop test-only callable
+    #   parameters (read_file/write_file/module probes), keep meaningful inputs
+    #   like workqueue_roots: !392#note_73017288, !392#note_73017294,
+    #   !392#note_73017299, !392#note_73017301 and !392#note_73017305 (achi)
+    # - Check helper return contracts before extra normalization, e.g.
+    #   read_sysfs_value() already strips: !392#note_73017308 (achi)
     instructions: |
       Review shared-helper safety, API contracts, and carve-outs across
       `src/**` and `tests/**`—including module-local helpers that belong in
@@ -266,9 +300,23 @@ lenses:
       (sysfs/log/`setpci`/CPU-list parsing, route/mount isolation probes, etc.)
       that already exists in `glt_utils`/`pci_utils`/`perf_utils` or that a
       second module already duplicates, recommend moving or reusing the shared
-      helper. Do not demand extraction for one-caller, test-contract-specific
-      logic. Prefer promoting to `src/common/` when a second real caller appears
-      or when PCI/CXL copies have already drifted.
+      helper. Prefer promoting to `src/common/` when a second real caller
+      appears or when PCI/CXL copies have already drifted.
+
+      Test hooks: call existing helpers directly and mock them where they are
+      looked up in unit tests. Prefer removing callable parameters/defaults
+      introduced solely for test injection when no production caller needs
+      alternative behavior, regardless of what they wrap. Retain meaningful
+      inputs such as paths or search roots and dependency injection with a real
+      runtime use or documented contract.
+
+      Helper return contracts: for every helper call, inspect the implementation
+      or documented contract before judging how its result is used. Check
+      return types, normalization, sentinel values, and error behavior against
+      the caller's handling. Remove repeated normalization or validation already
+      guaranteed by the helper; retain checks required by the caller's own
+      contract. Apply this to all helpers, not only I/O helpers. Do not infer
+      behavior from a helper's name or demand redundant checks on every result.
 
       Fail-closed probes: helpers that feed destructive or isolation-sensitive
       operations (FLR, vfio bind, kexec, firmware reset, DPC blast-radius
