@@ -1,7 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the Vera LS64 userspace ABI checks."""
 # pylint: disable=wrong-import-position,protected-access
 
 import sys
+import subprocess
+import tempfile
 from pathlib import Path
 
 from tests.test_base import GLTTestBase
@@ -92,6 +97,259 @@ class TestVeraLs64UserspaceAbi(GLTTestBase):
         self.mock_logger.info.assert_called_once_with(
             "Vera LS64 userspace ABI checks passed."
         )
+
+
+class TestLs64NativeMetadata(GLTTestBase):
+    """Verify plans and dependency metadata for native LS64 runtime tests."""
+
+    def test_runtime_case_plans_and_userspace_abi_dependency(self):
+        """Runtime cases use standard/stress plans and require the ABI check."""
+        cases = (
+            ls64_kvm.test_vera_ls64_normal_memory,
+            ls64_kvm.test_vera_ls64_alignment,
+            ls64_kvm.test_vera_ls64_kvm_exit,
+        )
+        for test_case in cases:
+            with self.subTest(test_case=test_case.__name__):
+                self.assertEqual(
+                    set(test_case.plans), {"standard", "stress"}
+                )
+                self.assertIn(
+                    "arm64:test_vera_ls64_userspace_abi",
+                    test_case.__wrapped__.requires.all_true,
+                )
+
+
+class TestLs64NativeProbe(GLTTestBase):
+    """Verify native probe build, invocation, and cleanup."""
+
+    def test_execute_probe_uses_common_kvm_source_and_removes_binary(self):
+        """Build one mode in the session without leaving a native artifact."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scheduler = self.mock.Mock(log_dir=temp_dir)
+            probe_path = Path(temp_dir) / "test_case.probe"
+
+            def complete_build(command, *_args, **_kwargs):
+                probe_path.write_text("binary", encoding="ascii")
+                probe_path.chmod(0o755)
+                return subprocess.CompletedProcess(command, 0)
+
+            with self.mock.patch.object(
+                ls64_kvm.glt_utils, "is_cli_available", return_value=True
+            ), self.mock.patch.object(
+                ls64_kvm.glt_utils, "run_command", side_effect=complete_build
+            ) as mock_build, self.mock.patch.object(
+                ls64_kvm.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [str(probe_path), "normal-memory"],
+                    ls64_kvm.LS64_PROBE_SIGBUS,
+                    stderr="SIGBUS",
+                ),
+            ) as mock_run:
+                result, reason = ls64_kvm._execute_ls64_probe(
+                    scheduler, "test_case", "normal-memory", self.mock_logger
+                )
+
+            self.assertEqual(reason, "")
+            self.assertEqual(result.returncode, ls64_kvm.LS64_PROBE_SIGBUS)
+            self.assertFalse(probe_path.exists())
+            self.assertEqual(
+                mock_build.call_args.args[0],
+                [
+                    "make", "-C", str(ls64_kvm.LS64_PROBE_SOURCE_DIR),
+                    f"OUTPUT={probe_path}",
+                    f"KVM_MICROVM_DIR={ls64_kvm.KVM_MICROVM_SOURCE_DIR}",
+                ],
+            )
+            self.assertEqual(
+                mock_run.call_args.args[0],
+                [str(probe_path), "normal-memory"],
+            )
+
+    def test_execute_probe_reports_build_and_execution_errors(self):
+        """Native failures return reasons for decorated tests to report."""
+        scheduler = self.mock.Mock(log_dir="/session")
+        for expected in ("compiler failed", "timed out"):
+            with self.subTest(expected=expected), self.mock.patch.object(
+                ls64_kvm.glt_utils, "is_cli_available", return_value=True
+            ), self.mock.patch.object(
+                ls64_kvm.Path, "is_file", return_value=True
+            ), self.mock.patch.object(
+                ls64_kvm.glt_utils, "run_command",
+                side_effect=RuntimeError(expected),
+            ):
+                result, reason = ls64_kvm._execute_ls64_probe(
+                    scheduler, "test_case", "normal-memory", self.mock_logger
+                )
+
+            self.assertIsNone(result)
+            self.assertIn(expected, reason)
+
+        with self.mock.patch.object(
+            ls64_kvm.glt_utils, "is_cli_available", return_value=True
+        ), self.mock.patch.object(
+            ls64_kvm.Path, "is_file", return_value=True
+        ), self.mock.patch.object(
+            ls64_kvm.Path, "unlink"
+        ), self.mock.patch.object(
+            ls64_kvm.glt_utils,
+            "run_command",
+            return_value=subprocess.CompletedProcess(["make"], 0),
+        ), self.mock.patch.object(
+            ls64_kvm.os, "access", return_value=True
+        ), self.mock.patch.object(
+            ls64_kvm.subprocess, "run", side_effect=OSError("permission denied")
+        ):
+            result, reason = ls64_kvm._execute_ls64_probe(
+                scheduler, "test_case", "normal-memory", self.mock_logger
+            )
+
+        self.assertIsNone(result)
+        self.assertIn("permission denied", reason)
+
+
+class TestLs64NativeResults(GLTTestBase):
+    """Verify native GreenLiT result mapping for every LS64 mode."""
+
+    def setUp(self):
+        super().setUp()
+        self.mock_sd.log_dir = "/session"
+
+    def test_normal_memory_accepts_sigbus_or_success(self):
+        """Both base LS64 and optional LS64_WB behavior are valid."""
+        for returncode in (0, ls64_kvm.LS64_PROBE_SIGBUS):
+            result = subprocess.CompletedProcess(["probe"], returncode)
+            with self.subTest(returncode=returncode), self.mock.patch.object(
+                ls64_kvm, "_execute_ls64_probe", return_value=(result, "")
+            ):
+                ls64_kvm.test_vera_ls64_normal_memory(
+                    self.mock_sd, self.mock_logger
+                )
+
+    def test_normal_memory_rejects_sigill_and_probe_errors(self):
+        """Reported LS64 support cannot coexist with SIGILL or setup failure."""
+        cases = (
+            (ls64_kvm.LS64_PROBE_SIGILL, "SIGILL"),
+            (1, "unexpected status"),
+        )
+        for returncode, expected in cases:
+            result = subprocess.CompletedProcess(["probe"], returncode)
+            with self.subTest(returncode=returncode), self.mock.patch.object(
+                ls64_kvm, "_execute_ls64_probe", return_value=(result, "")
+            ), self.assertRaisesRegex(GLTCore.GLTTestFail, expected):
+                ls64_kvm.test_vera_ls64_normal_memory(
+                    self.mock_sd, self.mock_logger
+                )
+
+    def test_alignment_skips_without_ls64_wb(self):
+        """An aligned SIGBUS makes the misalignment oracle unobservable."""
+        normal = subprocess.CompletedProcess(
+            ["probe"], ls64_kvm.LS64_PROBE_SIGBUS
+        )
+        with self.mock.patch.object(
+            ls64_kvm, "_execute_ls64_probe", return_value=(normal, "")
+        ), self.assertRaisesRegex(GLTCore.GLTTestSkip, "LS64_WB"):
+            ls64_kvm.test_vera_ls64_alignment(
+                self.mock_sd, self.mock_logger
+            )
+
+    def test_alignment_requires_misaligned_sigbus(self):
+        """When normal memory works, only SIGBUS proves alignment checking."""
+        normal = subprocess.CompletedProcess(["probe"], 0)
+        misaligned = subprocess.CompletedProcess(
+            ["probe"], ls64_kvm.LS64_PROBE_SIGBUS
+        )
+        with self.mock.patch.object(
+            ls64_kvm, "_execute_ls64_probe",
+            side_effect=((normal, ""), (misaligned, "")),
+        ):
+            ls64_kvm.test_vera_ls64_alignment(
+                self.mock_sd, self.mock_logger
+            )
+
+        with self.mock.patch.object(
+            ls64_kvm, "_execute_ls64_probe",
+            side_effect=((normal, ""), (normal, "")),
+        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "did not raise SIGBUS"):
+            ls64_kvm.test_vera_ls64_alignment(
+                self.mock_sd, self.mock_logger
+            )
+
+    def test_kvm_exit_requires_access_and_success(self):
+        """The KVM case fails closed on access or harness errors."""
+        result = subprocess.CompletedProcess(["probe"], 0)
+        with self.mock.patch.object(
+            ls64_kvm.os, "access", return_value=True
+        ), self.mock.patch.object(
+            ls64_kvm, "_execute_ls64_probe", return_value=(result, "")
+        ):
+            ls64_kvm.test_vera_ls64_kvm_exit(
+                self.mock_sd, self.mock_logger
+            )
+
+        with self.mock.patch.object(
+            ls64_kvm.os, "access", return_value=False
+        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "/dev/kvm"):
+            ls64_kvm.test_vera_ls64_kvm_exit(
+                self.mock_sd, self.mock_logger
+            )
+
+        failed = subprocess.CompletedProcess(["probe"], 1, stderr="bad exit")
+        with self.mock.patch.object(
+            ls64_kvm.os, "access", return_value=True
+        ), self.mock.patch.object(
+            ls64_kvm, "_execute_ls64_probe", return_value=(failed, "")
+        ), self.assertRaisesRegex(GLTCore.GLTTestFail, "bad exit"):
+            ls64_kvm.test_vera_ls64_kvm_exit(
+                self.mock_sd, self.mock_logger
+            )
+
+    def test_kvm_setup_and_run_errors_do_not_claim_missing_patches(self):
+        """Generic nonzero probe statuses carry diagnostics, not provenance."""
+        errors = (
+            "sysconf(_SC_PAGESIZE) failed",
+            "mmap(guest memory) failed",
+            "KVM_CREATE_VM failed",
+            "KVM_RUN timed out after 5 seconds",
+        )
+        for error in errors:
+            with self.subTest(error=error), self.mock.patch.object(
+                ls64_kvm.os, "access", return_value=True
+            ), self.mock.patch.object(
+                ls64_kvm, "_execute_ls64_probe",
+                return_value=(
+                    subprocess.CompletedProcess(["probe"], 1, "", error), ""
+                ),
+            ):
+                with self.assertRaises(GLTCore.GLTTestFail) as context:
+                    ls64_kvm.test_vera_ls64_kvm_exit(
+                        self.mock.Mock(), self.mock_logger
+                    )
+                reason = str(context.exception)
+                self.assertIn(error, reason)
+                self.assertNotIn("f174a9ffcd48", reason)
+                self.assertNotIn("151b92c92a45", reason)
+
+    def test_kvm_preserves_the_probes_observed_exit_patch_guidance(self):
+        """An exit-specific diagnostic from the C probe remains actionable."""
+        diagnostic = (
+            "Expected KVM_EXIT_ARM_LDST64B (42); check kernel patches "
+            "f174a9ffcd48 and 151b92c92a45"
+        )
+        with self.mock.patch.object(
+            ls64_kvm.os, "access", return_value=True
+        ), self.mock.patch.object(
+            ls64_kvm, "_execute_ls64_probe",
+            return_value=(
+                subprocess.CompletedProcess(["probe"], 1, "", diagnostic), ""
+            ),
+        ):
+            with self.assertRaises(GLTCore.GLTTestFail) as context:
+                ls64_kvm.test_vera_ls64_kvm_exit(self.mock.Mock(), self.mock_logger)
+        reason = str(context.exception)
+        self.assertIn(diagnostic, reason)
+        self.assertNotIn("consider checking kernel patches", reason)
 
 
 if __name__ == "__main__":

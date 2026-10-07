@@ -26,6 +26,7 @@ include = [
     "external_tests/**/*",
     "src/common/virt/kvm_microvm/*",
     "src/modules/arm64/brbe_nvhe/*",
+    "src/modules/arm64/ls64/*",
     "src/modules/cpu/cppc_cpc_read_probe/*",
     "src/modules/i2c/kretprobes/*",
     "src/modules/iommu/cmdqv_hyp_own/*",
