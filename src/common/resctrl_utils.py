@@ -22,8 +22,10 @@ calling test decides whether a condition is a skip or a failure.
 """
 
 from contextlib import contextmanager
+import errno
 import os
 import re
+import time
 
 from common import glt_utils
 
@@ -33,6 +35,7 @@ PROC_FILESYSTEMS = "/proc/filesystems"
 PROC_MOUNTS = "/proc/mounts"
 MON_FEATURES = "mon_features"
 MBM_TOTAL_BYTES = "mbm_total_bytes"
+MON_GROUP_RETRY_INTERVAL_SEC = 0.5
 
 
 def fs_supported() -> bool:
@@ -131,6 +134,56 @@ def managed_mount(logger, *, cleanup_errors=None):
                 logger.warning("Failed to unmount resctrl.")
                 if cleanup_errors is not None:
                     cleanup_errors.append(str(error))
+
+
+def make_mon_group(path, timeout_sec=10.0, *, logger=None):
+    """Create a resctrl monitor group, waiting for a monitor ID if needed.
+
+    resctrl parks a deleted group's monitor ID (RMID) in a limbo list and
+    only returns it to the free pool on a periodic check, about once per
+    second. On MPAM with few PMGs a control group may own a single spare
+    RMID, so mkdir right after a sibling group was removed fails with
+    ENOSPC ("Out of RMIDs") or EBUSY. Retry those two errors every
+    MON_GROUP_RETRY_INTERVAL_SEC until timeout_sec has elapsed since the
+    first failure. Any other OSError propagates unchanged.
+
+    On timeout raise OSError carrying the last errno and the kernel's
+    info/last_cmd_status text. When logger is given, log the wait.
+    """
+    status_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "last_cmd_status")
+    deadline = None
+    while True:
+        try:
+            os.mkdir(path)
+        except OSError as error:
+            if error.errno not in (errno.ENOSPC, errno.EBUSY):
+                raise
+            try:
+                status = glt_utils.read_sysfs_value(status_path)
+            except OSError:
+                status = "unavailable"
+            now = time.monotonic()
+            if deadline is None:
+                deadline = now + timeout_sec
+                if logger is not None:
+                    logger.info(
+                        "Waiting up to %gs for a free resctrl monitor ID to "
+                        "create %s (last_cmd_status: %s).",
+                        timeout_sec, path, status)
+            if now >= deadline:
+                raise OSError(
+                    error.errno,
+                    f"{error.strerror} after waiting {timeout_sec:g}s for a "
+                    f"free resctrl monitor ID (last_cmd_status: {status})",
+                ) from error
+            time.sleep(min(MON_GROUP_RETRY_INTERVAL_SEC, deadline - now))
+        else:
+            if deadline is not None and logger is not None:
+                waited = time.monotonic() - (deadline - timeout_sec)
+                logger.info(
+                    "Created resctrl monitor group %s after waiting %.1fs.",
+                    path, waited)
+            return
 
 
 def _parse_schemata_entries(resource, values, path, value_pattern):
