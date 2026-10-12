@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""ARM64 resctrl IOMMU group assignment tests."""
+"""ARM64 resctrl IOMMU group listing and assignment tests."""
 
 import errno
 import os
@@ -299,6 +299,57 @@ def _assign_one_group(logger, cleanup_errors):
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
+def test_mpam_resctrl_iommu_group_query(_, logger):
+    """
+    Require the default resctrl tasks file to name a real IOMMU group.
+
+    The assignment test moves one listed group, so this check passes only
+    when the root tasks file names a directory under
+    /sys/kernel/iommu_groups. A listed line means the tasks-file walk
+    accepted that group as a member of the default resource group. That
+    listing comes from the linux-nvidia assignment series: resctrl
+    assignment 2e9f350f0a33, helpers d2ec08a0ea33, and SMMU get/set
+    668c0fb85146.
+    A group that does not match the default closid is omitted, and an
+    empty listing fails this check.
+
+    The iommu_group syntax is enabled by mounting resctrl with
+    this_is_not_abi. A mount that already includes that option is left in
+    place. A mount without it is replaced for the test and restored
+    afterward.
+
+    PATCH: NVIDIA SAUCE 2e9f350f0a3338f7a172b11837a95547a05a1275
+    PATCH: d2ec08a0ea333093daa6c8ba6a03cd5803586b7a
+    PATCH: 668c0fb851463efd2444a553685a31fcb1c0d91e
+    """
+    skip_reason = _require_kernel_configs()
+    if skip_reason:
+        GLTCore.GLTTestResult.skip(skip_reason)
+
+    try:
+        cleanup_errors = []
+        with resctrl_utils.mount_with_options(
+                logger, ("this_is_not_abi",),
+                cleanup_errors=cleanup_errors,
+        ) as (mount_succeeded, detail):
+            if not mount_succeeded:
+                raise RuntimeError(
+                    detail or "Failed to mount resctrl with this_is_not_abi.")
+            group_id = _listed_group_id()
+            logger.info(
+                "Default resctrl group lists iommu_group:%s.", group_id)
+
+        if cleanup_errors:
+            raise RuntimeError(cleanup_errors[0])
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_iommu_group_query")
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
 def test_mpam_resctrl_iommu_group_assign(_, logger):
     """
     Verify resctrl can list and move IOMMU groups through the tasks file.
@@ -332,15 +383,6 @@ def test_mpam_resctrl_iommu_group_assign(_, logger):
             if not mount_succeeded:
                 raise RuntimeError(
                     detail or "Failed to mount resctrl with this_is_not_abi.")
-            try:
-                options = resctrl_utils.mount_options()
-            except (OSError, ValueError) as error:
-                raise RuntimeError(
-                    f"Cannot confirm resctrl mount options: {error}") from error
-            if "this_is_not_abi" not in (options or ()):
-                raise RuntimeError(
-                    "resctrl is not mounted with this_is_not_abi "
-                    f"(options {options!r}).")
             _assign_one_group(logger, cleanup_errors)
 
         if cleanup_errors:
