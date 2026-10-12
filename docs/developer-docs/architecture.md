@@ -43,6 +43,7 @@ greenlit/
 │   ├── common/             # Unit tests for common helpers
 │   └── modules/            # Unit tests for module test logic
 ├── LICENSE                 # Apache License 2.0
+├── LICENSES/               # License texts for GPL-2.0-only components
 ├── README.md               # Project README
 └── VERSION                 # Project version
 ```

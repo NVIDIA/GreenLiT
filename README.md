@@ -92,4 +92,6 @@ GreenLiT also supports Poetry for development installation. See the [Development
 - **How to get help:** Please report bugs or request features via [GitHub Issues](https://github.com/NVIDIA/greenlit/issues/new).
 
 ## License
-This project is licensed under the Apache 2.0 License - see the [`LICENSE`](LICENSE) file for details.
+GreenLiT is licensed under Apache-2.0 except where individual files specify another license. See [`LICENSE`](LICENSE) for the Apache-2.0 license text.
+
+Files marked `SPDX-License-Identifier: GPL-2.0-only` are covered by [`LICENSES/GPL-2.0-only.txt`](LICENSES/GPL-2.0-only.txt).
