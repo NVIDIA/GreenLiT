@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-License-Identifier: Apache-2.0
 #
 # Verify patch PCI: Use downstream bridges for distributing resources
 # at systems with NVIDIA BF3 switch or CX8 DMA controller
