@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <linux/kernel.h>

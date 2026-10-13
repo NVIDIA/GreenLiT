@@ -1,5 +1,6 @@
 #!/bin/bash
-# SPDX-License-Identifier: GPL-2.0
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Tegra410 I2C Functional Test Script
 #

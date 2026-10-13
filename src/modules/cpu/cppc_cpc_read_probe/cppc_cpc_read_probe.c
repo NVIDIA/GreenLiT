@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: GPL-2.0-only
-// Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 #include <linux/cpu.h>
 #include <linux/errno.h>
