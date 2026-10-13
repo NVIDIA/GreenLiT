@@ -14,6 +14,7 @@ from tests.test_base import GLTTestBase
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from common import glt_core as GLTCore
+from common import resctrl_utils
 from src.modules.arm64 import glt_test_mpam_resctrl as mpam_resctrl
 
 
@@ -42,9 +43,9 @@ class TestMpamMbaHardlimExposure(GLTTestBase):
         nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
         patches = (
             self.mock.patch.object(mpam_resctrl, "NvDev", return_value=nvdev),
-            self.mock.patch.object(mpam_resctrl, "RESCTRL_MOUNT_POINT",
+            self.mock.patch.object(resctrl_utils, "RESCTRL_MOUNT_POINT",
                                    str(resctrl)),
-            self.mock.patch.object(mpam_resctrl, "_managed_resctrl_mount",
+            self.mock.patch.object(resctrl_utils, "managed_mount",
                                    return_value=nullcontext((True, None))),
         )
         for patch in patches:
@@ -58,7 +59,7 @@ class TestMpamMbaHardlimExposure(GLTTestBase):
                 self.schemata.write_text(self.SCHEMATA + line + "\n", encoding="ascii")
 
                 with self.assertRaisesRegex(GLTCore.GLTTestFail,
-                                            "Malformed or duplicate .* schemata line"):
+                                            "Malformed or duplicate .* line"):
                     mpam_resctrl.test_mpam_mba_hardlim_exposure(None, self.mock_logger)
 
     def test_late_malformed_domain_entries_fail(self):
@@ -67,7 +68,7 @@ class TestMpamMbaHardlimExposure(GLTTestBase):
             self.SCHEMATA.replace("MB_HLIM:2=0;0=1", "MB_HLIM:2=0;broken"),
             encoding="ascii")
 
-        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Malformed MB_HLIM domain entries"):
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Malformed MB_HLIM entry"):
             mpam_resctrl.test_mpam_mba_hardlim_exposure(None, self.mock_logger)
 
     def test_separated_resources_pass_in_either_order(self):
@@ -89,7 +90,7 @@ class TestMpamMbmCounterGrowth(GLTTestBase):
     def _growth_environment(self, *, free_kib=(2048 * 1024,),
                             returncode=0, samples=(100, 200), poll_sequence=()):
         """Mock MBM hardware and assert resource cleanup after each scenario."""
-        group = f"{mpam_resctrl.RESCTRL_MOUNT_POINT}/mon_groups/glt_mbm_growth_123_456"
+        group = f"{resctrl_utils.RESCTRL_MOUNT_POINT}/mon_groups/glt_mbm_growth_123_456"
         states = dict.fromkeys(range(len(free_kib)), "_")
         sample_values = iter(samples)
         mock_files = self.mock.mock_open()
@@ -134,7 +135,7 @@ class TestMpamMbmCounterGrowth(GLTTestBase):
         mock_files.return_value.write.side_effect = write_assignment
         patches = (
             self.mock.patch("builtins.open", mock_files),
-            self.mock.patch.object(mpam_resctrl, "_managed_resctrl_mount",
+            self.mock.patch.object(resctrl_utils, "managed_mount",
                                    return_value=nullcontext((True, None))),
             self.mock.patch.object(mpam_resctrl, "_cpus_of_node", return_value=[0]),
             self.mock.patch.object(mpam_resctrl.glt_utils, "is_cli_available",
@@ -264,9 +265,9 @@ class TestMpamMscDomainCompleteness(GLTTestBase):
             raise RuntimeError(failure_message)
 
         patches = (
+            self.mock.patch.object(mpam_resctrl, "MPAM_DEBUGFS_PATH", str(debugfs)),
             self.mock.patch.multiple(
-                mpam_resctrl, MPAM_DEBUGFS_PATH=str(debugfs),
-                RESCTRL_MOUNT_POINT=str(resctrl), PROC_MOUNTS=str(mounts)),
+                resctrl_utils, RESCTRL_MOUNT_POINT=str(resctrl), PROC_MOUNTS=str(mounts)),
             self.mock.patch.object(mpam_resctrl.glt_utils, "is_cli_available",
                                    return_value=True),
             self.mock.patch.object(mpam_resctrl.glt_utils, "run_command",
@@ -321,7 +322,7 @@ class TestMpamResctrlInfo(GLTTestBase):
             return True
 
         return (
-            self.mock.patch.object(mpam_resctrl, "_resctrl_is_mounted",
+            self.mock.patch.object(resctrl_utils, "is_mounted",
                                    return_value=True),
             self.mock.patch.object(mpam_resctrl.os.path, "isdir",
                                    side_effect=isdir),
@@ -381,7 +382,7 @@ class TestMpamResctrlInfo(GLTTestBase):
             mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
 
         mock_open.assert_called_once_with(
-            f"{mpam_resctrl.RESCTRL_MOUNT_POINT}/info/MB_MON/mon_features",
+            f"{resctrl_utils.RESCTRL_MOUNT_POINT}/info/MB_MON/mon_features",
             "r",
             encoding="utf-8",
         )
@@ -392,7 +393,7 @@ class TestMpamResctrlInfo(GLTTestBase):
                 self.mock.patch.object(mpam_resctrl.glt_utils, "is_cli_available",
                                        return_value=True), \
                 self.mock.patch.object(mpam_resctrl, "NvDev"), \
-                self.mock.patch.object(mpam_resctrl, "_resctrl_is_mounted",
+                self.mock.patch.object(resctrl_utils, "is_mounted",
                                        side_effect=(False, False)):
             with self.assertRaises(GLTCore.GLTTestFail):
                 mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
@@ -424,9 +425,9 @@ class TestMpamResctrlMaxLim(GLTTestBase):
         nvdev.is_cpu_type.side_effect = lambda name: name == "vera"
         patches = (
             self.mock.patch.object(mpam_resctrl, "NvDev", return_value=nvdev),
-            self.mock.patch.object(mpam_resctrl, "RESCTRL_MOUNT_POINT",
+            self.mock.patch.object(resctrl_utils, "RESCTRL_MOUNT_POINT",
                                    str(resctrl)),
-            self.mock.patch.object(mpam_resctrl, "_managed_resctrl_mount",
+            self.mock.patch.object(resctrl_utils, "managed_mount",
                                    return_value=nullcontext((True, None))),
         )
         for patch in patches:

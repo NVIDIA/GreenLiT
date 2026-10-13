@@ -16,7 +16,6 @@
 """ARM64 MPAM and resctrl validation tests."""
 # pylint: disable=too-many-lines
 
-from contextlib import contextmanager
 import errno
 import fnmatch
 import glob
@@ -33,19 +32,14 @@ import time
 
 from common import glt_core as GLTCore
 from common import glt_utils
+from common import resctrl_utils
 from common.nv_device import NvDev
 from scripts import check_kernel_config
 
 
 PROC_IOMEM = "/proc/iomem"
-RESCTRL_FS_TYPE = "resctrl"
-RESCTRL_MOUNT_POINT = "/sys/fs/resctrl"
-PROC_FILESYSTEMS = "/proc/filesystems"
-PROC_MOUNTS = "/proc/mounts"
 MPAM_DEBUGFS_PATH = "/sys/kernel/debug/mpam"
 MPAMF_IDR_HAS_MBW_PART = 1 << 26
-MPAM_MON_FEATURES = "mon_features"
-MPAM_MBM_TOTAL_BYTES = "mbm_total_bytes"
 MPAM_PLATFORM_CAPABILITIES = {
     "grace": {
         "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM"),
@@ -56,176 +50,19 @@ MPAM_PLATFORM_CAPABILITIES = {
         # MB_HLIM exposure is checked against max_lim by DGX-17719.
         "expected_dirs": ("L3", "L3_MON", "MB", "MB_MON"),
         "expected_files": ("last_cmd_status",),
-        "expected_mb_mon_features": (MPAM_MBM_TOTAL_BYTES,),
+        "expected_mb_mon_features": (resctrl_utils.MBM_TOTAL_BYTES,),
     },
 }
 
 
 def _read_mb_hlim_schemata(path):
     """Read MB and MB_HLIM domain values, rejecting malformed schemata."""
-    with open(path, "r", encoding="ascii") as schemata_file:
-        content = schemata_file.read()
-
-    schemas = {}
-    for line in content.splitlines():
-        resource, separator, values = line.strip().partition(":")
-        resource = resource.strip()
-        if resource not in ("MB", "MB_HLIM"):
-            continue
-        if not separator or resource in schemas:
-            raise ValueError(f"Malformed or duplicate {resource} line in {path}: {line!r}")
-        domains = {}
-        for entry in values.split(";"):
-            if re.fullmatch(r"[0-9]+=[0-9]+", entry) is None:
-                raise ValueError(f"Malformed {resource} entry in {path}: {entry!r}")
-            domain, value = (int(field) for field in entry.split("="))
-            if domain in domains:
-                raise ValueError(f"Duplicate {resource} domain {domain} in {path}")
-            domains[domain] = value
-        schemas[resource] = domains
-
+    schemas = resctrl_utils.read_schemata(path, ("MB", "MB_HLIM"))
     if set(schemas) != {"MB", "MB_HLIM"}:
         raise ValueError(f"Missing MB or MB_HLIM resource in {path}")
     if schemas["MB"].keys() != schemas["MB_HLIM"].keys():
         raise ValueError(f"MB and MB_HLIM domains do not match in {path}")
     return schemas
-
-
-def _resctrl_fs_supported() -> bool:
-    """Return True if the kernel registers the resctrl filesystem type."""
-    try:
-        with open(PROC_FILESYSTEMS, "r", encoding="utf-8") as f:
-            return any(line.split()[-1] == RESCTRL_FS_TYPE
-                       for line in f if line.strip())
-    except OSError:
-        return False
-
-
-def _resctrl_mount_points():
-    """Return every mount point currently using the resctrl filesystem."""
-    with open(PROC_MOUNTS, "r", encoding="utf-8") as f:
-        return [
-            fields[1] for line in f
-            if len(fields := line.split()) >= 3
-            and fields[2] == RESCTRL_FS_TYPE
-        ]
-
-
-def _resctrl_is_mounted() -> bool:
-    """Return True if resctrl is mounted at RESCTRL_MOUNT_POINT."""
-    try:
-        return RESCTRL_MOUNT_POINT in _resctrl_mount_points()
-    except OSError:
-        return False
-
-
-@contextmanager
-def _managed_resctrl_mount(logger, *, cleanup_errors=None):
-    """Yield resctrl mount state and clean up only a test-owned mount.
-
-    Yields (mount_succeeded, missing_cli). missing_cli is the first of
-    mount/umount that is not on PATH when a mount is required, else None.
-    Callers skip when missing_cli is set and fail when mount_succeeded is
-    False.
-
-    Unmount failures are logged. When cleanup_errors is a list, the failure
-    message is also appended so a decorated caller can fail after a
-    successful body without replacing an earlier skip or fail.
-    """
-    mounted_by_test = False
-    missing_cli = None
-    mount_succeeded = _resctrl_is_mounted()
-
-    if not mount_succeeded:
-        missing_cli = next(
-            (cli for cli in ("mount", "umount")
-             if not glt_utils.is_cli_available(cli)),
-            None,
-        )
-        if missing_cli is None:
-            try:
-                glt_utils.run_command(
-                    ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE,
-                     RESCTRL_MOUNT_POINT],
-                    "Failed to mount resctrl.",
-                )
-            except RuntimeError:
-                pass
-            else:
-                mounted_by_test = True
-                mount_succeeded = _resctrl_is_mounted()
-
-    try:
-        yield mount_succeeded, missing_cli
-    finally:
-        if mounted_by_test:
-            try:
-                glt_utils.run_command(
-                    ["umount", RESCTRL_MOUNT_POINT],
-                    "Failed to unmount resctrl.",
-                )
-            except RuntimeError as error:
-                logger.warning("Failed to unmount resctrl.")
-                if cleanup_errors is not None:
-                    cleanup_errors.append(str(error))
-
-
-def _mb_control_resource() -> str:
-    """Return the MB control name that appears in a group's schemata.
-
-    info/MB/control_mode selects between the legacy "MB" line and the
-    native node-scoped "MB_NODE" line. Platforms without the emulated
-    control publish no control_mode and always use "MB". Raises
-    ValueError when the file marks neither mode active.
-    """
-    control_mode_path = os.path.join(
-        RESCTRL_MOUNT_POINT, "info", "MB", "control_mode")
-    if not os.path.isfile(control_mode_path):
-        return "MB"
-
-    modes = glt_utils.read_sysfs_value(control_mode_path).split()
-    if "[native]" in modes:
-        return "MB_NODE"
-    if "[legacy]" in modes:
-        return "MB"
-    raise ValueError(
-        f"MB control mode file {control_mode_path} has no active legacy "
-        f"or native mode (read {modes!r})."
-    )
-
-
-def _schemata_domains(resource):
-    """Return the set of domain IDs on a resource's schemata line.
-
-    resctrl right-aligns resource names, so each line is stripped before
-    it is matched. Returns None when the root schemata file carries no
-    line for the resource. Raises ValueError on a malformed entry.
-    """
-    schemata_path = os.path.join(RESCTRL_MOUNT_POINT, "schemata")
-    prefix = f"{resource}:"
-
-    with open(schemata_path, "r", encoding="utf-8") as schemata:
-        line = next(
-            (raw.strip() for raw in schemata
-             if raw.strip().startswith(prefix)),
-            None,
-        )
-    if line is None:
-        return None
-
-    domains = set()
-    for entry in line[len(prefix):].split(";"):
-        if not entry.strip():
-            continue
-        domain, separator, _value = entry.partition("=")
-        domain = domain.strip()
-        if not separator or not domain.isdigit():
-            raise ValueError(
-                f"Malformed {resource} schemata entry {entry!r} in "
-                f"{schemata_path}."
-            )
-        domains.add(int(domain))
-    return domains
 
 
 def _cpus_of_node(node) -> list:
@@ -297,15 +134,6 @@ def _mpam_class_mbw_part_components(class_level):
     return components
 
 
-def _sum_l3_occupancy(occupancy_files) -> int:
-    """Return total llc_occupancy summed across the given mon_L3 domains."""
-    total = 0
-    for occ in occupancy_files:
-        with open(occ, "r", encoding="utf-8") as f:
-            total += int(f.read().strip())
-    return total
-
-
 def _mpam_msc_regions():
     """Return MPAM MSC MMIO regions from /proc/iomem."""
     msc_iomem_re = re.compile(
@@ -345,58 +173,6 @@ def _mpam_read_idr(registers):
 def _mpam_write32(registers, offset, value):
     """Write a little-endian 32-bit value to an MSC register view."""
     struct.pack_into("<I", registers, offset, value & 0xFFFFFFFF)
-
-
-def _read_mbm_assignment_states(path):
-    """Return mbm_total_bytes domain assignment states from a resctrl file."""
-    content = glt_utils.read_sysfs_value(path)
-    states = None
-    for line in content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        event, sep, rest = line.partition(":")
-        if not sep:
-            raise ValueError(
-                f"Malformed MBM assignment line {line!r} in {path}")
-        if event != MPAM_MBM_TOTAL_BYTES:
-            continue
-        if states is not None:
-            raise ValueError(
-                f"Duplicate {MPAM_MBM_TOTAL_BYTES} assignment line in {path}")
-        states = {}
-        for entry in rest.split(";"):
-            match = re.fullmatch(r"([0-9]+)=([e_])", entry)
-            if match is None:
-                raise ValueError(
-                    f"Malformed MBM assignment entry {entry!r} in {path}")
-            domain = int(match.group(1))
-            if domain in states:
-                raise ValueError(
-                    f"Duplicate MBM domain {domain} in {path}")
-            states[domain] = match.group(2)
-    if not states:
-        raise ValueError(
-            f"No {MPAM_MBM_TOTAL_BYTES} assignment states in {path}")
-    return states
-
-
-def _read_mbm_counter_counts(path):
-    """Return domain-to-count mapping from an MBM counter info file."""
-    content = glt_utils.read_sysfs_value(path)
-    if not content:
-        raise ValueError(f"MBM counter information file {path} is empty")
-    counts = {}
-    for entry in content.split(";"):
-        match = re.fullmatch(r"([0-9]+)=([0-9]+)", entry)
-        if match is None:
-            raise ValueError(
-                f"Malformed MBM counter entry {entry!r} in {path}")
-        domain = int(match.group(1))
-        if domain in counts:
-            raise ValueError(f"Duplicate MBM domain {domain} in {path}")
-        counts[domain] = int(match.group(2))
-    return counts
 
 
 def _validate_mpam_init_registers(  # pylint: disable=too-many-branches,too-many-locals,too-many-nested-blocks
@@ -609,10 +385,10 @@ def test_mpam_driver_init_registers(  # pylint: disable=too-many-branches,too-ma
         )
 
     try:
-        resctrl_mounts = _resctrl_mount_points()
+        resctrl_mounts = resctrl_utils.mount_points()
     except OSError as error:
         GLTCore.GLTTestResult.fail(
-            f"Cannot determine resctrl mount state from {PROC_MOUNTS}: "
+            f"Cannot determine resctrl mount state from {resctrl_utils.PROC_MOUNTS}: "
             f"{error}"
         )
     if resctrl_mounts:
@@ -715,12 +491,12 @@ def test_mpam_mba_hardlim_exposure(  # pylint: disable=too-many-branches,too-man
     if not NvDev().is_cpu_type("vera"):
         GLTCore.GLTTestResult.skip("MB_HLIM exposure validation is Vera-specific.")
 
-    max_lim_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim")
-    hlim_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_HLIM")
-    schemata_path = os.path.join(RESCTRL_MOUNT_POINT, "schemata")
+    max_lim_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB", "max_lim")
+    hlim_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB_HLIM")
+    schemata_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "schemata")
     cleanup_errors = []
 
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -732,39 +508,20 @@ def test_mpam_mba_hardlim_exposure(  # pylint: disable=too-many-branches,too-man
         try:
             with open(max_lim_path, "r", encoding="ascii") as f:
                 max_lim = f.read()
-            with open(schemata_path, "r", encoding="ascii") as f:
-                content = f.read()
+            schemas = resctrl_utils.read_schemata(schemata_path, ("MB", "MB_HLIM"))
             try:
                 hlim_stat = os.lstat(hlim_path)
             except FileNotFoundError:
                 hlim_stat = None
         except (OSError, UnicodeError) as e:
             GLTCore.GLTTestResult.fail(f"Failed to inspect MB_HLIM exposure: {e}")
+        except ValueError as e:
+            GLTCore.GLTTestResult.fail(f"Malformed resctrl schemata: {e}")
 
         if max_lim not in ("0\n", "1\n", "2\n", "3\n"):
             GLTCore.GLTTestResult.fail(
                 f"Invalid max_lim content at {max_lim_path}: {max_lim!r}.")
         max_lim = int(max_lim)
-
-        schemas = {}
-        for line in content.splitlines():
-            resource, separator, values = line.strip().partition(":")
-            resource = resource.strip()
-            if resource not in ("MB", "MB_HLIM"):
-                continue
-            if not separator or resource in schemas:
-                GLTCore.GLTTestResult.fail(
-                    f"Malformed or duplicate {resource} schemata line: {line!r}")
-            entries = values.split(";")
-            if any(re.fullmatch(r"[0-9]+=[0-9]+", entry) is None
-                   for entry in entries):
-                GLTCore.GLTTestResult.fail(
-                    f"Malformed {resource} domain entries: {values!r}")
-            domains = [int(entry.split("=", 1)[0]) for entry in entries]
-            if len(domains) != len(set(domains)):
-                GLTCore.GLTTestResult.fail(
-                    f"Duplicate {resource} domain IDs: {values!r}")
-            schemas[resource] = set(domains)
 
         if "MB" not in schemas:
             GLTCore.GLTTestResult.fail(
@@ -787,7 +544,7 @@ def test_mpam_mba_hardlim_exposure(  # pylint: disable=too-many-branches,too-man
             if not stat.S_ISDIR(hlim_stat.st_mode):
                 GLTCore.GLTTestResult.fail(
                     f"{hlim_path} exists but is not a directory.")
-            if schemas["MB_HLIM"] != schemas["MB"]:
+            if schemas["MB_HLIM"].keys() != schemas["MB"].keys():
                 GLTCore.GLTTestResult.fail(
                     f"MB_HLIM domains {sorted(schemas['MB_HLIM'])} do not match "
                     f"MB domains {sorted(schemas['MB'])}.")
@@ -822,7 +579,7 @@ def test_mpam_mba_hardlim_valid_values(  # pylint: disable=too-many-branches,too
 
     cleanup_errors = []
     group = None
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -832,7 +589,7 @@ def test_mpam_mba_hardlim_valid_values(  # pylint: disable=too-many-branches,too
             GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
 
         try:
-            with open(os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim"),
+            with open(os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB", "max_lim"),
                       "r", encoding="ascii") as info_file:
                 max_lim = info_file.read()
             if max_lim not in ("0\n", "1\n", "2\n", "3\n"):
@@ -842,9 +599,9 @@ def test_mpam_mba_hardlim_valid_values(  # pylint: disable=too-many-branches,too
                     f"MB_HLIM is not writable with max_lim={max_lim.strip()}.")
 
             root_schema = _read_mb_hlim_schemata(
-                os.path.join(RESCTRL_MOUNT_POINT, "schemata"))
+                os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "schemata"))
             group_path = os.path.join(
-                RESCTRL_MOUNT_POINT, f"glt_mb_hlim_valid_{os.getpid()}_{time.time_ns()}")
+                resctrl_utils.RESCTRL_MOUNT_POINT, f"glt_mb_hlim_valid_{os.getpid()}_{time.time_ns()}")
             os.mkdir(group_path)
             group = group_path  # Never adopt or remove a pre-existing group.
             schemata_path = os.path.join(group, "schemata")
@@ -922,7 +679,7 @@ def test_mpam_mba_hardlim_validation_defaults(  # pylint: disable=too-many-branc
 
     cleanup_errors = []
     group = None
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -932,7 +689,7 @@ def test_mpam_mba_hardlim_validation_defaults(  # pylint: disable=too-many-branc
             GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
 
         try:
-            with open(os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim"),
+            with open(os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB", "max_lim"),
                       "r", encoding="ascii") as info_file:
                 max_lim = info_file.read()
             if max_lim not in ("0\n", "1\n", "2\n", "3\n"):
@@ -940,17 +697,17 @@ def test_mpam_mba_hardlim_validation_defaults(  # pylint: disable=too-many-branc
             if max_lim != "0\n":
                 GLTCore.GLTTestResult.skip(
                     f"MB_HLIM is not writable with max_lim={max_lim.strip()}.")
-            with open(os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_HLIM",
+            with open(os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB_HLIM",
                                    "schema_format"), "r", encoding="ascii") as info_file:
                 schema_format = info_file.read()
             if schema_format != "0/1\n":
                 raise ValueError(f"Unexpected MB_HLIM schema_format: {schema_format!r}")
 
             root_schema = _read_mb_hlim_schemata(
-                os.path.join(RESCTRL_MOUNT_POINT, "schemata"))
+                os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "schemata"))
             domains = sorted(root_schema["MB_HLIM"])
             group_path = os.path.join(
-                RESCTRL_MOUNT_POINT, f"glt_mb_hlim_{os.getpid()}_{time.time_ns()}")
+                resctrl_utils.RESCTRL_MOUNT_POINT, f"glt_mb_hlim_{os.getpid()}_{time.time_ns()}")
             schemata_path = os.path.join(group_path, "schemata")
             # kstrtou32(..., 10, ...) accepts +1 and 01; they are not invalid.
             invalid_values = ("2", "-1", "0x1", "abc", "1.0", "4294967296", "")
@@ -1047,7 +804,7 @@ def test_mpam_resctrl_mb_max_lim(_, logger):  # pylint: disable=too-many-branche
             "This CPU does not expose the MB/max_lim capability interface."
         )
 
-    max_lim_path = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB", "max_lim")
+    max_lim_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB", "max_lim")
     backport_hint = (
         "Consider backporting NVIDIA SAUCE commits "
         "3d3b9ca0419275e0c6992e25052fb7d719edf573 and "
@@ -1055,7 +812,7 @@ def test_mpam_resctrl_mb_max_lim(_, logger):  # pylint: disable=too-many-branche
     )
 
     cleanup_errors = []
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -1161,12 +918,18 @@ def test_mpam_resctrl_mount(_, logger):
             "resctrl filesystem unavailable."
         )
 
-    if not _resctrl_fs_supported():
+    try:
+        fs_registered = resctrl_utils.fs_supported()
+    except OSError as e:
         GLTCore.GLTTestResult.fail(
-            f"'{RESCTRL_FS_TYPE}' filesystem not registered in {PROC_FILESYSTEMS}."
+            f"Cannot read {resctrl_utils.PROC_FILESYSTEMS} to check for the "
+            f"'{resctrl_utils.RESCTRL_FS_TYPE}' filesystem: {e}")
+    if not fs_registered:
+        GLTCore.GLTTestResult.fail(
+            f"'{resctrl_utils.RESCTRL_FS_TYPE}' filesystem not registered in {resctrl_utils.PROC_FILESYSTEMS}."
         )
 
-    with _managed_resctrl_mount(logger) as (mount_succeeded, missing_cli):
+    with resctrl_utils.managed_mount(logger) as (mount_succeeded, missing_cli):
         if missing_cli:
             GLTCore.GLTTestResult.skip(
                 f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
@@ -1184,9 +947,9 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
 
     JIRA: DGX-16760
     """
-    info_dir = os.path.join(RESCTRL_MOUNT_POINT, "info")
+    info_dir = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info")
 
-    with _managed_resctrl_mount(logger) as (mount_succeeded, missing_cli):
+    with resctrl_utils.managed_mount(logger) as (mount_succeeded, missing_cli):
         if missing_cli:
             GLTCore.GLTTestResult.skip(
                 f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
@@ -1234,13 +997,13 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
 
         expected_mb_mon_features = platform_capabilities["expected_mb_mon_features"]
         if expected_mb_mon_features:
-            mon_features = os.path.join(info_dir, "MB_MON", MPAM_MON_FEATURES)
+            mon_features = os.path.join(info_dir, "MB_MON", resctrl_utils.MON_FEATURES)
             try:
                 with open(mon_features, "r", encoding="utf-8") as f:
                     features = f.read().split()
             except OSError as e:
                 GLTCore.GLTTestResult.fail(
-                    f"Cannot read MB_MON {MPAM_MON_FEATURES} at {mon_features}: {e}."
+                    f"Cannot read MB_MON {resctrl_utils.MON_FEATURES} at {mon_features}: {e}."
                 )
             missing_features = tuple(
                 feature for feature in expected_mb_mon_features
@@ -1248,7 +1011,7 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
             )
             if missing_features:
                 GLTCore.GLTTestResult.fail(
-                    f"MB_MON {MPAM_MON_FEATURES} is missing expected "
+                    f"MB_MON {resctrl_utils.MON_FEATURES} is missing expected "
                     f"features: {', '.join(missing_features)}."
                 )
 
@@ -1264,7 +1027,7 @@ def test_mpam_mbm_assignment_mode(_, logger):
     PATCH: NVIDIA SAUCE db33ffbdf1ce
     """
     mode_path = os.path.join(
-        RESCTRL_MOUNT_POINT, "info", "MB_MON", "mbm_assign_mode")
+        resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB_MON", "mbm_assign_mode")
 
     if not NvDev().is_cpu_type("vera"):
         GLTCore.GLTTestResult.skip(
@@ -1273,7 +1036,7 @@ def test_mpam_mbm_assignment_mode(_, logger):
         )
 
     cleanup_errors = []
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -1317,7 +1080,7 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
 
     PATCH: NVIDIA SAUCE db33ffbdf1ce
     """
-    monitor_info = os.path.join(RESCTRL_MOUNT_POINT, "info", "MB_MON")
+    monitor_info = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB_MON")
     counter_paths = {
         "num_mbm_cntrs": os.path.join(monitor_info, "num_mbm_cntrs"),
         "available_mbm_cntrs": os.path.join(
@@ -1325,7 +1088,7 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
     }
 
     cleanup_errors = []
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -1344,7 +1107,7 @@ def test_mpam_mbm_counter_info(_, logger):  # pylint: disable=too-many-branches
                 )
 
             try:
-                counts = _read_mbm_counter_counts(path)
+                counts = resctrl_utils.read_mbm_counter_counts(path)
             except OSError as e:
                 GLTCore.GLTTestResult.fail(
                     f"Failed to read MBM counter information file {path}: {e}")
@@ -1402,17 +1165,17 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
     JIRA: DGX-17560
     PATCH: NVIDIA SAUCE db33ffbdf1ce
     """
-    mon_groups_path = os.path.join(RESCTRL_MOUNT_POINT, "mon_groups")
+    mon_groups_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "mon_groups")
     group_path = os.path.join(
         mon_groups_path,
         f"glt_mbm_assignments_{os.getpid()}_{time.time_ns()}",
     )
     assignment_path = os.path.join(group_path, "mbm_MB_assignments")
     available_path = os.path.join(
-        RESCTRL_MOUNT_POINT, "info", "MB_MON", "available_mbm_cntrs")
+        resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB_MON", "available_mbm_cntrs")
 
     cleanup_errors = []
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -1444,8 +1207,8 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
                 )
 
             try:
-                original_states = _read_mbm_assignment_states(assignment_path)
-                available_counts = _read_mbm_counter_counts(available_path)
+                original_states = resctrl_utils.read_mbm_assignment_states(assignment_path)
+                available_counts = resctrl_utils.read_mbm_counter_counts(available_path)
             except (OSError, ValueError) as e:
                 GLTCore.GLTTestResult.fail(
                     f"Failed to read valid MBM assignment information: {e}"
@@ -1466,7 +1229,7 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
                 counter_path = os.path.join(
                     group_path, "mon_data",
                     f"mon_MB_{selected_domain:02d}",
-                    MPAM_MBM_TOTAL_BYTES,
+                    resctrl_utils.MBM_TOTAL_BYTES,
                 )
                 if not os.path.isfile(counter_path):
                     GLTCore.GLTTestResult.fail(
@@ -1488,17 +1251,17 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
                     try:
                         with open(assignment_path, "w", encoding="utf-8") as f:
                             f.write(
-                                f"{MPAM_MBM_TOTAL_BYTES}:"
+                                f"{resctrl_utils.MBM_TOTAL_BYTES}:"
                                 f"{selected_domain}={expected_state}\n"
                             )
                     except OSError as e:
                         GLTCore.GLTTestResult.fail(
-                            f"Failed to set {MPAM_MBM_TOTAL_BYTES} domain "
+                            f"Failed to set {resctrl_utils.MBM_TOTAL_BYTES} domain "
                             f"{selected_domain} to {expected_state!r}: {e}"
                         )
 
                     try:
-                        states = _read_mbm_assignment_states(assignment_path)
+                        states = resctrl_utils.read_mbm_assignment_states(assignment_path)
                     except (OSError, ValueError) as e:
                         GLTCore.GLTTestResult.fail(
                             f"Failed to read back MBM assignments from "
@@ -1508,7 +1271,7 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
                     if states != expected_states:
                         GLTCore.GLTTestResult.fail(
                             f"MBM assignment readback mismatch after "
-                            f"setting {MPAM_MBM_TOTAL_BYTES} domain "
+                            f"setting {resctrl_utils.MBM_TOTAL_BYTES} domain "
                             f"{selected_domain} to {expected_state!r}: "
                             f"expected {expected_states}, read {states}."
                         )
@@ -1575,19 +1338,19 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
     # the configured L3 size divided among workers. Allow 128 MiB overhead.
     min_free_mem_kib = (12 * stress_l3_size_mib + 128) * 1024
 
-    mon_groups_path = os.path.join(RESCTRL_MOUNT_POINT, "mon_groups")
+    mon_groups_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "mon_groups")
     group_path = os.path.join(
         mon_groups_path,
         f"glt_mbm_growth_{os.getpid()}_{time.time_ns()}",
     )
     assignment_path = os.path.join(group_path, "mbm_MB_assignments")
     available_path = os.path.join(
-        RESCTRL_MOUNT_POINT, "info", "MB_MON", "available_mbm_cntrs")
-    root_tasks_path = os.path.join(RESCTRL_MOUNT_POINT, "tasks")
+        resctrl_utils.RESCTRL_MOUNT_POINT, "info", "MB_MON", "available_mbm_cntrs")
+    root_tasks_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "tasks")
     group_tasks_path = os.path.join(group_path, "tasks")
 
     cleanup_errors = []
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -1627,8 +1390,8 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
                 )
 
             try:
-                original_states = _read_mbm_assignment_states(assignment_path)
-                available_counts = _read_mbm_counter_counts(available_path)
+                original_states = resctrl_utils.read_mbm_assignment_states(assignment_path)
+                available_counts = resctrl_utils.read_mbm_counter_counts(available_path)
             except (OSError, ValueError) as e:
                 GLTCore.GLTTestResult.fail(
                     f"Failed to read valid MBM assignment information: {e}"
@@ -1709,7 +1472,7 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
             counter_path = os.path.join(
                 group_path, "mon_data",
                 f"mon_MB_{selected_domain:02d}",
-                MPAM_MBM_TOTAL_BYTES,
+                resctrl_utils.MBM_TOTAL_BYTES,
             )
             if not os.path.isfile(counter_path):
                 GLTCore.GLTTestResult.fail(
@@ -1719,17 +1482,17 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
                 try:
                     with open(assignment_path, "w", encoding="utf-8") as f:
                         f.write(
-                            f"{MPAM_MBM_TOTAL_BYTES}:"
+                            f"{resctrl_utils.MBM_TOTAL_BYTES}:"
                             f"{selected_domain}=e\n"
                         )
                 except OSError as e:
                     GLTCore.GLTTestResult.fail(
-                        f"Failed to assign {MPAM_MBM_TOTAL_BYTES} domain "
+                        f"Failed to assign {resctrl_utils.MBM_TOTAL_BYTES} domain "
                         f"{selected_domain}: {e}"
                     )
 
                 try:
-                    assigned_states = _read_mbm_assignment_states(
+                    assigned_states = resctrl_utils.read_mbm_assignment_states(
                         assignment_path)
                 except (OSError, ValueError) as e:
                     GLTCore.GLTTestResult.fail(
@@ -1812,7 +1575,7 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
                     current = int(counter_value)
                     if current < samples[-1]:
                         GLTCore.GLTTestResult.fail(
-                            f"{MPAM_MBM_TOTAL_BYTES} decreased under traffic: "
+                            f"{resctrl_utils.MBM_TOTAL_BYTES} decreased under traffic: "
                             f"{samples[-1]} -> {current}."
                         )
                     samples.append(current)
@@ -1845,12 +1608,12 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
 
             if len(samples) < 2:
                 GLTCore.GLTTestResult.fail(
-                    f"{MPAM_MBM_TOTAL_BYTES} produced no numeric sample "
+                    f"{resctrl_utils.MBM_TOTAL_BYTES} produced no numeric sample "
                     "during memory traffic."
                 )
             if samples[-1] <= baseline:
                 GLTCore.GLTTestResult.fail(
-                    f"{MPAM_MBM_TOTAL_BYTES} did not grow under memory "
+                    f"{resctrl_utils.MBM_TOTAL_BYTES} did not grow under memory "
                     f"traffic ({baseline} -> {samples[-1]} across "
                     f"{len(samples)} samples)."
                 )
@@ -1858,7 +1621,7 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
             logger.info(
                 "%s grew under memory traffic on MB domain %d: %d -> %d "
                 "across %d samples.",
-                MPAM_MBM_TOTAL_BYTES, selected_domain, baseline,
+                resctrl_utils.MBM_TOTAL_BYTES, selected_domain, baseline,
                 samples[-1], len(samples),
             )
         finally:
@@ -1887,7 +1650,7 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
             if os.path.isfile(assignment_path):
                 try:
                     with open(assignment_path, "w", encoding="utf-8") as f:
-                        f.write(f"{MPAM_MBM_TOTAL_BYTES}:*=_\n")
+                        f.write(f"{resctrl_utils.MBM_TOTAL_BYTES}:*=_\n")
                 except OSError as e:
                     logger.warning(
                         "Failed to release MBM counters from %s: %s",
@@ -1917,10 +1680,10 @@ def test_mpam_resctrl_schemata(_, logger):
 
     JIRA: DGX-16761
     """
-    schemata_path = os.path.join(RESCTRL_MOUNT_POINT, "schemata")
+    schemata_path = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "schemata")
     schemata_line_re = re.compile(r"^\s*\S+:\d+=\S+")
 
-    with _managed_resctrl_mount(logger) as (mount_succeeded, missing_cli):
+    with resctrl_utils.managed_mount(logger) as (mount_succeeded, missing_cli):
         if missing_cli:
             GLTCore.GLTTestResult.skip(
                 f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
@@ -2100,7 +1863,7 @@ def test_mpam_msc_domain_completeness(_, logger):  # pylint: disable=too-many-br
         )
 
     cleanup_errors = []
-    with _managed_resctrl_mount(
+    with resctrl_utils.managed_mount(
             logger, cleanup_errors=cleanup_errors
     ) as (mount_succeeded, missing_cli):
         if missing_cli:
@@ -2110,9 +1873,9 @@ def test_mpam_msc_domain_completeness(_, logger):  # pylint: disable=too-many-br
             GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
 
         try:
-            mb_resource = _mb_control_resource()
-            mb_domains = _schemata_domains(mb_resource)
-            l3_domains = _schemata_domains("L3")
+            mb_resource = resctrl_utils.mb_control_resource()
+            mb_domains = resctrl_utils.schemata_domains(mb_resource)
+            l3_domains = resctrl_utils.schemata_domains("L3")
         except (OSError, ValueError) as e:
             GLTCore.GLTTestResult.fail(
                 f"Failed to read the resctrl schemata domains: {e}")
@@ -2171,12 +1934,12 @@ def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
 
     JIRA: DGX-16762
     """
-    schemata_path = RESCTRL_MOUNT_POINT + "/schemata"
+    schemata_path = resctrl_utils.RESCTRL_MOUNT_POINT + "/schemata"
     l3_line_re = re.compile(r"^\s*L3:")
-    l3_mon_features = RESCTRL_MOUNT_POINT + "/info/L3_MON/mon_features"
+    l3_mon_features = resctrl_utils.RESCTRL_MOUNT_POINT + "/info/L3_MON/mon_features"
     l3_monitor_glob = "mon_data/mon_L3_*"
 
-    with _managed_resctrl_mount(logger) as (mount_succeeded, missing_cli):
+    with resctrl_utils.managed_mount(logger) as (mount_succeeded, missing_cli):
         if missing_cli:
             GLTCore.GLTTestResult.skip(
                 f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
@@ -2207,7 +1970,7 @@ def test_mpam_l3_occupancy(_, logger):  # pylint: disable=too-many-branches
         # Every L3 monitoring domain must expose a readable occupancy counter.
         monitor_dirs = [
             path for path in glob.glob(
-                os.path.join(RESCTRL_MOUNT_POINT, l3_monitor_glob))
+                os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, l3_monitor_glob))
             if os.path.isdir(path)
         ]
         if not monitor_dirs:
@@ -2259,7 +2022,7 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
     stress_workers = 4
     stress_vm_bytes = "256M"
 
-    with _managed_resctrl_mount(logger) as (mount_succeeded, missing_cli):
+    with resctrl_utils.managed_mount(logger) as (mount_succeeded, missing_cli):
         if missing_cli:
             GLTCore.GLTTestResult.skip(
                 f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
@@ -2286,7 +2049,7 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
             except OSError:
                 continue
 
-        group = RESCTRL_MOUNT_POINT + "/glt_l3_occ_" + str(os.getpid())
+        group = resctrl_utils.RESCTRL_MOUNT_POINT + "/glt_l3_occ_" + str(os.getpid())
         try:
             os.mkdir(group)
         except FileExistsError:
@@ -2347,7 +2110,7 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
                 )
 
             try:
-                baseline = _sum_l3_occupancy(occupancy_files)
+                baseline = resctrl_utils.sum_l3_occupancy(occupancy_files)
             except (OSError, ValueError) as e:
                 GLTCore.GLTTestResult.fail(
                     f"Could not read baseline L3 occupancy from "
@@ -2357,10 +2120,10 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
             # Derive L3 geometry so the allocation cap can be expressed in
             # bytes.
             try:
-                with open(RESCTRL_MOUNT_POINT + "/info/L3/cbm_mask",
+                with open(resctrl_utils.RESCTRL_MOUNT_POINT + "/info/L3/cbm_mask",
                           "r", encoding="utf-8") as f:
                     total_ways = bin(int(f.read().strip(), 16)).count("1")
-                with open(RESCTRL_MOUNT_POINT + "/info/L3/min_cbm_bits",
+                with open(resctrl_utils.RESCTRL_MOUNT_POINT + "/info/L3/min_cbm_bits",
                           "r", encoding="utf-8") as f:
                     min_cbm_bits = int(f.read().strip())
                 if node_l3_size is None:
@@ -2440,7 +2203,7 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
                 )
                 pgid = proc.pid
             finally:
-                with open(RESCTRL_MOUNT_POINT + "/tasks", "w",
+                with open(resctrl_utils.RESCTRL_MOUNT_POINT + "/tasks", "w",
                           encoding="utf-8") as f:
                     f.write(f"{threading.get_native_id()}\n")
 
@@ -2450,7 +2213,7 @@ def test_mpam_l3_occupancy_workload(_, logger):  # pylint: disable=too-many-bran
             for _i in range(workload_duration_sec + 1):
                 exited = proc.poll() is not None
                 try:
-                    peak = max(peak, _sum_l3_occupancy(occupancy_files))
+                    peak = max(peak, resctrl_utils.sum_l3_occupancy(occupancy_files))
                 except (OSError, ValueError):
                     pass
                 if exited:
@@ -2526,14 +2289,14 @@ def test_mpam_mba_schemata(_, logger):  # pylint: disable=too-many-branches,too-
     """
     group = None
 
-    with _managed_resctrl_mount(logger) as (mount_succeeded, missing_cli):
+    with resctrl_utils.managed_mount(logger) as (mount_succeeded, missing_cli):
         if missing_cli:
             GLTCore.GLTTestResult.skip(
                 f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
         if not mount_succeeded:
             GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
         try:
-            info_mb = RESCTRL_MOUNT_POINT + "/info/MB"
+            info_mb = resctrl_utils.RESCTRL_MOUNT_POINT + "/info/MB"
             try:
                 with open(info_mb + "/schema_format", "r", encoding="utf-8") as f:
                     schema_format = f.read().strip()
@@ -2562,7 +2325,7 @@ def test_mpam_mba_schemata(_, logger):  # pylint: disable=too-many-branches,too-
                     "Expected a percentage between 0 and 100.")
 
             # Create a private control group
-            group = RESCTRL_MOUNT_POINT + "/glt_mba_" + str(os.getpid())
+            group = resctrl_utils.RESCTRL_MOUNT_POINT + "/glt_mba_" + str(os.getpid())
             try:
                 os.mkdir(group)
             except FileExistsError:
@@ -2578,22 +2341,20 @@ def test_mpam_mba_schemata(_, logger):  # pylint: disable=too-many-branches,too-
                     f"Could not create resctrl group {group}: {e}"
                 )
 
-            # Parse the MB domains from the new group's schemata.
+            # Parse the MB control domains from the new group's schemata.
+            # Native control mode publishes the line as MB_NODE, not MB.
+            group_schemata = group + "/schemata"
             try:
-                with open(group + "/schemata", "r", encoding="utf-8") as f:
-                    mb_line = next(
-                        (ln for ln in f.read().splitlines()
-                         if ln.strip().startswith("MB:")), "")
-            except OSError as e:
+                mb_resource = resctrl_utils.mb_control_resource()
+                domains = sorted(resctrl_utils.read_schemata(
+                    group_schemata, (mb_resource,)).get(mb_resource, {}))
+            except (OSError, ValueError) as e:
                 GLTCore.GLTTestResult.fail(
                     f"Could not read MB schemata from {group}: {e}"
                 )
-            domains = [entry.split("=", 1)[0].strip()
-                       for entry in mb_line.strip()[len("MB:"):].split(";")
-                       if "=" in entry]
             if not domains:
                 GLTCore.GLTTestResult.fail(
-                    "no MB domains parsed from group schemata.")
+                    f"no {mb_resource} domains parsed from group schemata.")
 
             # Valid steps are min_bw + N*gran; pick first, middle, and last so
             # coarse granularity still exercises distinct levels (e.g. 0/50/100).
@@ -2603,24 +2364,19 @@ def test_mpam_mba_schemata(_, logger):  # pylint: disable=too-many-branches,too-
             levels = sorted(valid[i] for i in pick)
 
             for level in levels:
-                write_line = "MB:" + ";".join(
+                write_line = f"{mb_resource}:" + ";".join(
                     f"{dom}={level}" for dom in domains)
                 try:
-                    with open(group + "/schemata", "w", encoding="utf-8") as f:
+                    with open(group_schemata, "w", encoding="utf-8") as f:
                         f.write(write_line + "\n")
-                    with open(group + "/schemata", "r", encoding="utf-8") as f:
-                        readback = next(
-                            (ln for ln in f.read().splitlines()
-                             if ln.strip().startswith("MB:")), "")
-                    applied = {entry.split("=", 1)[0].strip():
-                               entry.split("=", 1)[1].strip()
-                               for entry in readback.strip()[len("MB:"):].split(";")
-                               if "=" in entry}
+                    applied = resctrl_utils.read_schemata(
+                        group_schemata, (mb_resource,)).get(mb_resource, {})
                     for dom in domains:
-                        if int(applied.get(dom, "-1")) != level:
+                        if applied.get(dom) != level:
                             GLTCore.GLTTestResult.fail(
                                 f"MBA domain {dom}: wrote {level}, read back "
-                                f"{applied.get(dom)!r} (line {readback.strip()!r})"
+                                f"{applied.get(dom)!r} ({mb_resource} line "
+                                f"read {applied!r})"
                             )
                 except (OSError, ValueError) as e:
                     GLTCore.GLTTestResult.fail(
