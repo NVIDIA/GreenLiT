@@ -1,6 +1,7 @@
 """Unit tests for common/resctrl_utils.py."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+import errno
 import tempfile
 from pathlib import Path
 
@@ -259,6 +260,82 @@ class TestMonitoringFiles(GLTTestBase):
         self.assertEqual(resctrl_utils.sum_l3_occupancy([]), 0)
         with self.assertRaises(ValueError):
             resctrl_utils.sum_l3_occupancy([self._file("occ2", "Unavailable\n")])
+
+
+class TestMakeMonGroup(GLTTestBase):
+    """Monitor-group creation that waits out resctrl RMID limbo."""
+
+    def setUp(self):
+        super().setUp()
+        temp_dir = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.addCleanup(temp_dir.cleanup)
+        self.root = Path(temp_dir.name)
+        (self.root / "info").mkdir()
+        (self.root / "mon_groups").mkdir()
+        self.status = self.root / "info" / "last_cmd_status"
+        self.status.write_text("Out of RMIDs\n", encoding="utf-8")
+        self.group = str(self.root / "mon_groups" / "glt_probe")
+        patcher = self.mock.patch.object(
+            resctrl_utils, "RESCTRL_MOUNT_POINT", str(self.root))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @contextmanager
+    def _mocks(self, mkdir_effects, clock):
+        """Fake mkdir outcomes and the monotonic clock; capture sleeps."""
+        with ExitStack() as stack:
+            mock_mkdir = stack.enter_context(self.mock.patch.object(
+                resctrl_utils.os, "mkdir", side_effect=mkdir_effects))
+            mock_sleep = stack.enter_context(self.mock.patch.object(
+                resctrl_utils.time, "sleep"))
+            stack.enter_context(self.mock.patch.object(
+                resctrl_utils.time, "monotonic", side_effect=clock))
+            yield mock_mkdir, mock_sleep
+
+    def test_creates_group_without_waiting(self):
+        """A free monitor ID creates the group at once with no sleep or log."""
+        resctrl_utils.make_mon_group(self.group, logger=self.mock_logger)
+        self.assertTrue(Path(self.group).is_dir())
+        self.mock_logger.info.assert_not_called()
+
+    def test_retries_enospc_and_ebusy_until_the_id_is_free(self):
+        """Transient ENOSPC and EBUSY are retried at the poll interval and logged."""
+        effects = [OSError(errno.ENOSPC, "No space left on device"),
+                   OSError(errno.EBUSY, "Device or resource busy"), None]
+        with self._mocks(effects, clock=[0.0, 0.5, 1.0]) as (mock_mkdir, mock_sleep):
+            resctrl_utils.make_mon_group(self.group, logger=self.mock_logger)
+        self.assertEqual(mock_mkdir.call_count, 3)
+        self.assertEqual([call.args[0] for call in mock_sleep.call_args_list], [0.5, 0.5])
+        self.assertEqual(self.mock_logger.info.call_count, 2)
+        self.assertIn("Out of RMIDs", str(self.mock_logger.info.call_args_list[0]))
+
+    def test_times_out_with_kernel_status_in_message(self):
+        """A persistent ENOSPC fails after the window and names last_cmd_status."""
+        effects = [OSError(errno.ENOSPC, "No space left on device")] * 3
+        with self._mocks(effects, clock=[0.0, 11.0]) as (mock_mkdir, _):
+            with self.assertRaises(OSError) as context:
+                resctrl_utils.make_mon_group(self.group, logger=self.mock_logger)
+        self.assertEqual(mock_mkdir.call_count, 2)
+        self.assertEqual(context.exception.errno, errno.ENOSPC)
+        self.assertIn("Out of RMIDs", str(context.exception))
+        self.assertIn("10s", str(context.exception))
+
+    def test_unreadable_status_is_reported_as_unavailable(self):
+        """A missing last_cmd_status does not hide the timeout failure."""
+        self.status.unlink()
+        effects = [OSError(errno.ENOSPC, "No space left on device")] * 2
+        with self._mocks(effects, clock=[0.0, 11.0]):
+            with self.assertRaisesRegex(OSError, "last_cmd_status: unavailable"):
+                resctrl_utils.make_mon_group(self.group)
+
+    def test_other_errors_raise_immediately(self):
+        """Errors other than ENOSPC and EBUSY are not retried."""
+        with self._mocks([OSError(errno.EEXIST, "File exists")], clock=[]) as (_, mock_sleep):
+            with self.assertRaises(OSError) as context:
+                resctrl_utils.make_mon_group(self.group, logger=self.mock_logger)
+        self.assertEqual(context.exception.errno, errno.EEXIST)
+        mock_sleep.assert_not_called()
+        self.mock_logger.info.assert_not_called()
 
 
 if __name__ == "__main__":

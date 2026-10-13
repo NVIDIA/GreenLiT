@@ -1191,7 +1191,7 @@ def test_mpam_mbm_assignments(_, logger):  # pylint: disable=too-many-branches,t
             )
 
         try:
-            os.mkdir(group_path)
+            resctrl_utils.make_mon_group(group_path, logger=logger)
         except OSError as e:
             GLTCore.GLTTestResult.fail(
                 f"Failed to create temporary resctrl monitor group "
@@ -1370,7 +1370,7 @@ def test_mpam_mbm_counter_growth(  # pylint: disable=too-many-branches,too-many-
                 "missing."
             )
         try:
-            os.mkdir(group_path)
+            resctrl_utils.make_mon_group(group_path, logger=logger)
         except OSError as e:
             GLTCore.GLTTestResult.fail(
                 f"Failed to create temporary resctrl monitor group "
