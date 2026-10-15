@@ -12,6 +12,8 @@ When adding new features or making significant changes, please also update all d
 
 Commits should follow the standard [Conventional Commits](https://www.conventionalcommits.org/) format.
 
+Line-length checks are defined in [.gitlint](.gitlint).
+
 **Summary line** (max 120 characters, ideally under 50):
 ```text
 <type>(<scope>): [<Optional-Internal-Ticket>] <short-summary-text>
@@ -28,7 +30,7 @@ feat: [DGX-8676] add support for new platform detection
 style: [nv#0000000] whitespace cleanup
 ```
 
-**Description** (for non-trivial changes, wrap at 72 chars):
+**Description** (for non-trivial changes):
 ```text
 fix(pci): resolve null pointer exception during reset
 

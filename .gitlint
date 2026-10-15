@@ -1,7 +1,7 @@
 
 [general]
 # Ignore the following rules
-ignore=title-trailing-punctuation,body-max-line-length
+ignore=title-trailing-punctuation
 
 verbosity = 3
 
@@ -11,6 +11,9 @@ contrib=contrib-title-conventional-commits
 # Enable extra linting rules. 
 # Enables the custom regex check for NVBug and Jira tickets in the summary
 extra-path=/tmp/extra_commit_rules.py
+
+[body-max-line-length]
+line-length=120
 
 [title-max-length]
 # Default is ~80, we have much larger screens now
