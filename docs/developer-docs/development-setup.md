@@ -45,13 +45,39 @@ running the checks below.
 
 ## Running Local Checks
 
+Before an agent finishes any task, it must run the contract check after its
+final edits, including documentation-only edits. This run enforces **GLT001**:
+`GLTTestResult.fail()`, `.skip()`, and `.warn()` may exist only in a function
+decorated with `@GLTCore.GLTTestAttr(...)`.
+
+```bash
+python3 tools/check_glt_contracts.py
+```
+
+This standard-library-only check must not be skipped. It parses all Python
+files under the checkout's `src/` without importing or executing them.
+Exit status **0** means no contract violations, **1** means violations were
+found, and **2** means checking failed (for example, unreadable or unparseable
+source). Checking failures take precedence if violations are also found.
+Fix findings introduced by your changes and rerun; explicitly report any
+unrelated findings or environment blockers that prevent a clean result.
+
+For faster feedback while editing, pass individual files or directories:
+`python3 tools/check_glt_contracts.py src/modules/cpu/`.
+The final check must still use the default full-source scan.
+`tests/test_glt_contracts.py` also runs this scan as part of the ordinary unit
+tests, so CI jobs running `pytest tests/` enforce the same contract.
+See [the result-call contract](writing-test-cases.md#result-call-contract-glt001)
+for its scope and limitations.
+
 Run these before creating a commit or MR. Skip any check whose tool isn't
-installed. `shellcheck` and `jq` are system tools; `pylint` and `pytest` come
+installed, except the mandatory contract check above. `shellcheck` and `jq` are system tools; `pylint` and `pytest` come
 from the `gltenv` venv set up above. [AGENTS.md](../../AGENTS.md) points here
 for the canonical local-check commands.
 
 | Tool | Command |
 |------|---------|
+| Contract check | `python3 tools/check_glt_contracts.py` |
 | Python lint | `source gltenv/bin/activate && find . -not -path "./gltenv/*" -name "*.py" -print0 \| xargs -0 pylint --init-hook="import sys; sys.path.extend(['src', '.'])"` |
 | Shell lint | `find . -name "*.sh" -print0 \| xargs -0 shellcheck` |
 | JSON validation | `find . -name "*.json" -print0 \| xargs -0 jq -r . > /dev/null` |

@@ -38,3 +38,6 @@ AGENTS.md
 
 # Unit tests
 tests/
+
+# Development tools
+tools/

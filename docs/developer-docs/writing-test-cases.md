@@ -400,6 +400,45 @@ Use `warn()` when the test detects an advisory condition — something worth sur
 
 **By default**, if none of the conditions required to skip, fail, or warn are met, the test case **passes**.
 
+#### Result-call contract (GLT001)
+
+`python3 tools/check_glt_contracts.py` enforces that `GLTTestResult.fail()`,
+`.skip()`, and `.warn()` are called directly in the body of a function
+decorated with `@GLTTestAttr(...)`. Conditional blocks, loops, and `try` blocks
+inside that body are allowed. Undecorated helpers, nested helper functions,
+lambdas, comprehensions, class/module bodies, and function defaults,
+annotations, or decorator expressions are not test bodies. A `test_` name or
+an explicit `func=` argument does not grant permission.
+
+These methods inspect their immediate caller to find the test's result
+attributes. Helpers should return information and let the decorated test
+choose the result:
+
+```python
+from common import glt_core as GLTCore
+
+def device_available():
+    return False  # Replace with the actual prerequisite check.
+
+@GLTCore.GLTTestAttr()
+def test_device(_, logger):
+    if not device_available():
+        GLTCore.GLTTestResult.skip("Required device is unavailable")
+```
+
+The checker scans `src/` by default. Unit tests under `tests/` deliberately
+exercise result APIs and are not included in that policy scan. The sole
+production exception is `_generate_test_func.test_func` in
+`src/common/glt_ext_launcher.py`: discovery decorates it dynamically, and its
+result calls explicitly supply `func=test_func`. Other functions in that file
+remain checked.
+
+Analysis recognizes absolute imports from `common.glt_core`, module aliases,
+and directly imported aliases of `GLTTestAttr` and `GLTTestResult`. It does not
+follow assignment aliases, re-exports, dynamic access such as `getattr()`, or
+calls through parameters. Keep result calls explicit so they can be checked.
+The checker reads source only; it never imports tests or accesses hardware.
+
 **See also**: [Appendix: Allowing test result exceptions](#appendix-allowing-test-result-exceptions) for how to dynamically allow certain cases to be skipped and failed cases to not count towards fails. Note that these circumstances are usually special-case scenarios where the fail/skip criteria is not a long term logic that should go into the main test case function (e.g., ignore failure during bug fix period).
 
 ### Managing Test Case Dependencies
