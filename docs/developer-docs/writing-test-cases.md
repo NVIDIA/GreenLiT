@@ -386,6 +386,20 @@ Guidelines:
 - The helper manages host-side libvirt only. Do not add guest command execution
   APIs until a real test case needs them and the guest access method is clear.
 
+#### Direct KVM micro-guests
+
+Use the common Arm64 sources under `src/common/virt/kvm_microvm/` instead of
+libvirt when a test must control the thread that calls `KVM_RUN`, inspect a raw
+KVM exit, or execute a small guest payload at deterministic addresses. Compile
+the common source into a test-specific executable on the target; do not install
+a shared object or load native code into the GreenLiT Python process.
+
+Keep the common layer limited to VM/vCPU creation, memory-slot registration,
+register setup, timed execution, and cleanup. Guest instructions, device or
+MMIO interpretation, perf sampling, output schemas, and PASS/FAIL/SKIP policy
+belong to the consuming native test. Prefer `GLTLibvirt` for complete guest
+kernels, virtual devices, multi-VM lifecycle, or long-running VM stress.
+
 ### Test Results: FAILED, SKIPPED, or WARNING
 
 Use `glt_core`'s test result methods to tell GreenLiT to fail, skip, or warn from a test:

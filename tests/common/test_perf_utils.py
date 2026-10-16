@@ -20,6 +20,7 @@ from common.perf_utils import (
     get_perf_version,
     has_coresight_fallback_evidence,
     natural_sort_key,
+    read_brbe_capabilities,
     resolve_perf_command,
     run_perf_test_candidates,
 )
@@ -879,6 +880,99 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
         self.assertIsNone(command)
         self.assertIn("no perf binary", reason)
         self.assertIn("7.0.0-64k", reason)
+
+
+class TestBrbeCapabilities(GLTTestBase):
+    """Validate the shared Arm PMUv3 BRBE sysfs contract."""
+
+    def test_read_capabilities_accepts_architected_record_counts(self):
+        """Accept every BRBE record count supported by the kernel driver."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            event_sources = Path(temp_dir)
+            expected = {}
+            for index, branch_count in enumerate((8, 16, 32, 64)):
+                pmu_name = f"armv8_pmuv3_{index}"
+                capability_dir = event_sources / pmu_name / "caps"
+                capability_dir.mkdir(parents=True)
+                (capability_dir / "branches").write_text(
+                    f"{branch_count}\n", encoding="utf-8")
+                expected[pmu_name] = branch_count
+
+            self.assertEqual(
+                read_brbe_capabilities(event_sources),
+                expected,
+            )
+
+    def test_read_capabilities_fails_without_arm_pmu(self):
+        """Fail clearly when no Arm PMUv3 event source is visible."""
+        with tempfile.TemporaryDirectory() as temp_dir, self.assertRaisesRegex(
+            ValueError, "No armv8_pmuv3 PMU devices"
+        ):
+            read_brbe_capabilities(temp_dir)
+
+    def test_read_capabilities_fails_when_attribute_is_missing(self):
+        """A PMUv3 device without caps/branches identifies a missing driver ABI."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            (Path(temp_dir) / "armv8_pmuv3_0" / "caps").mkdir(parents=True)
+
+            with self.assertRaisesRegex(ValueError, "caps/branches is missing"):
+                read_brbe_capabilities(temp_dir)
+
+    def test_read_capabilities_fails_on_malformed_count(self):
+        """Malformed caps/branches contents fail instead of hiding the problem."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capability_dir = Path(temp_dir) / "armv8_pmuv3_0" / "caps"
+            capability_dir.mkdir(parents=True)
+            (capability_dir / "branches").write_text(
+                "unknown\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Invalid BRBE"):
+                read_brbe_capabilities(temp_dir)
+
+    def test_read_capabilities_fails_on_unsupported_count(self):
+        """Reject BRBE NUMREC values the kernel driver does not support."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            capability_dir = Path(temp_dir) / "armv8_pmuv3_0" / "caps"
+            capability_dir.mkdir(parents=True)
+            (capability_dir / "branches").write_text(
+                "12\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Unsupported BRBE"):
+                read_brbe_capabilities(temp_dir)
+
+
+
+    def test_read_capabilities_sorts_pmu_names_naturally(self):
+        """Stable device order is independent of sysfs enumeration order."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ("armv8_pmuv3_10", "armv8_pmuv3_2"):
+                caps = Path(tmpdir) / name / "caps"
+                caps.mkdir(parents=True)
+                (caps / "branches").write_text("32\n", encoding="utf-8")
+            result = read_brbe_capabilities(tmpdir)
+        self.assertEqual(list(result), ["armv8_pmuv3_2", "armv8_pmuv3_10"])
+
+    def test_read_capabilities_distinguishes_unreadable_from_missing(self):
+        """Read errors retain a specific diagnostic rather than becoming absent."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / "armv8_pmuv3_0").mkdir()
+            with self.mock.patch.object(
+                Path, "read_text", side_effect=PermissionError("permission denied")
+            ):
+                with self.assertRaisesRegex(ValueError, "Unable to read BRBE capability"):
+                    read_brbe_capabilities(tmpdir)
+
+    def test_read_capabilities_reports_all_missing_devices_in_order(self):
+        """An absent driver ABI is reported for every affected PMU."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for name in ("armv8_pmuv3_10", "armv8_pmuv3_2"):
+                (Path(tmpdir) / name).mkdir()
+            with self.assertRaises(ValueError) as context:
+                read_brbe_capabilities(tmpdir)
+        self.assertIn(
+            "caps/branches is missing for Arm PMUv3 devices: armv8_pmuv3_2, armv8_pmuv3_10",
+            str(context.exception),
+        )
 
 
 if __name__ == "__main__":

@@ -17,8 +17,12 @@
 
 import ctypes
 import os
+import subprocess
+from pathlib import Path
 
 from common import glt_core as GLTCore
+from common import glt_utils
+from common import virt as glt_virt
 from common.nv_device import NvDev
 
 
@@ -32,6 +36,89 @@ LS64_PATCH_SERIES = (
     "https://lore.kernel.org/all/"
     "20260119022928.149358-1-wangzhou1@hisilicon.com/"
 )
+LS64_PROBE_BUILD_TIMEOUT_SECONDS = 60
+LS64_PROBE_RUN_TIMEOUT_SECONDS = 10
+LS64_PROBE_SIGBUS = 2
+LS64_PROBE_SIGILL = 3
+LS64_PROBE_SOURCE_DIR = Path(__file__).resolve().parent / "ls64"
+LS64_PROBE_MAKEFILE = LS64_PROBE_SOURCE_DIR / "Makefile"
+KVM_MICROVM_SOURCE_DIR = (
+    Path(glt_virt.__file__).resolve().parent / "kvm_microvm"
+)
+LS64_PROBE_REQUIRED_FILES = (
+    LS64_PROBE_MAKEFILE,
+    LS64_PROBE_SOURCE_DIR / "ls64_probe.c",
+    KVM_MICROVM_SOURCE_DIR / "glt_arm64_kvm.c",
+    KVM_MICROVM_SOURCE_DIR / "glt_arm64_kvm.h",
+)
+
+
+def _execute_ls64_probe(sd, test_name, mode, logger):
+    """Build, run, and remove one LS64 probe executable."""
+    probe_path = Path(sd.log_dir) / f"{test_name}.probe"
+    result = None
+    failure_reason = ""
+
+    if not glt_utils.is_cli_available("make"):
+        return None, "Please install 'make' to build the LS64 probe"
+    missing_files = [
+        str(path) for path in LS64_PROBE_REQUIRED_FILES
+        if not path.is_file()
+    ]
+    if missing_files:
+        return None, "LS64 probe source is missing: " + ", ".join(missing_files)
+
+    try:
+        probe_path.unlink(missing_ok=True)
+        build_command = [
+            "make", "-C", str(LS64_PROBE_SOURCE_DIR),
+            f"OUTPUT={probe_path}",
+            f"KVM_MICROVM_DIR={KVM_MICROVM_SOURCE_DIR}",
+        ]
+        try:
+            build_result = glt_utils.run_command(
+                build_command,
+                "LS64 probe build failed",
+                timeout=LS64_PROBE_BUILD_TIMEOUT_SECONDS,
+            )
+        except RuntimeError as error:
+            failure_reason = str(error)
+        else:
+            if build_result.stdout:
+                logger.debug(
+                    "LS64 probe build output:\n%s",
+                    build_result.stdout.rstrip(),
+                )
+        if not failure_reason and (
+            not probe_path.is_file() or not os.access(probe_path, os.X_OK)
+        ):
+            failure_reason = f"LS64 probe build did not create {probe_path}"
+        if not failure_reason:
+            result = subprocess.run(
+                [str(probe_path), mode],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=LS64_PROBE_RUN_TIMEOUT_SECONDS,
+            )
+            if result.stdout:
+                logger.debug("LS64 %s stdout:\n%s", mode, result.stdout.rstrip())
+            if result.stderr:
+                logger.debug("LS64 %s stderr:\n%s", mode, result.stderr.rstrip())
+    except subprocess.TimeoutExpired as error:
+        failure_reason = f"LS64 {mode} operation timed out after {error.timeout} seconds"
+    except OSError as error:
+        failure_reason = f"Unable to execute LS64 {mode} operation: {error}"
+
+    try:
+        probe_path.unlink(missing_ok=True)
+    except OSError as error:
+        cleanup_reason = f"Unable to remove LS64 probe {probe_path}: {error}"
+        failure_reason = (
+            f"{failure_reason}; additionally, {cleanup_reason}"
+            if failure_reason else cleanup_reason
+        )
+    return result, failure_reason
 
 
 def _read_cpu_features(cpuinfo_path=CPUINFO_PATH):
@@ -81,10 +168,10 @@ def test_vera_ls64_userspace_abi(_, logger):
     REFERENCE TEST:
         https://git.kernel.org/torvalds/c/57a96356bb69
 
-    This native test checks both userspace interfaces added by 58ce78667a64.
-    The companion external LS64 executable opens /dev/kvm, creates an EL1 guest,
-    and covers the outside-memslot KVM_EXIT_ARM_LDST64B behavior. It does not
-    cover the valid-memslot exception injection added by 2937aeec9dc5.
+    This test checks the two userspace reporting interfaces added by
+    58ce78667a64. Separate native cases exercise instructions and the
+    outside-memslot KVM_EXIT_ARM_LDST64B behavior. They do not cover the
+    valid-memslot exception injection added by 2937aeec9dc5.
     """
     nvdev = NvDev()
     if not nvdev.is_cpu_type("vera"):
@@ -116,3 +203,105 @@ def test_vera_ls64_userspace_abi(_, logger):
             )
 
     logger.info("Vera LS64 userspace ABI checks passed.")
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_vera_ls64_userspace_abi")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_vera_ls64_normal_memory(sd, logger):
+    """Verify LS64 instructions produce a valid normal-memory result.
+
+    PATCH: https://git.kernel.org/torvalds/c/58ce78667a64
+    """
+    result, reason = _execute_ls64_probe(
+        sd, test_vera_ls64_normal_memory.__name__, "normal-memory", logger
+    )
+    if reason:
+        GLTCore.GLTTestResult.fail(reason)
+    if result.returncode == LS64_PROBE_SIGILL:
+        GLTCore.GLTTestResult.fail(
+            "HWCAP3_LS64 is set but LS64 instructions raised SIGILL"
+        )
+    if result.returncode not in (0, LS64_PROBE_SIGBUS):
+        GLTCore.GLTTestResult.fail(
+            "LS64 normal-memory probe returned unexpected status "
+            f"{result.returncode}: {(result.stderr or '').strip()[-1000:]}"
+        )
+    if result.returncode == LS64_PROBE_SIGBUS:
+        logger.info(
+            "LS64 instructions raised SIGBUS on normal memory; "
+            "FEAT_LS64_WB is not exposed"
+        )
+    else:
+        logger.info(
+            "LS64 instructions completed on normal memory; "
+            "FEAT_LS64_WB may be available"
+        )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_vera_ls64_userspace_abi")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_vera_ls64_alignment(sd, logger):
+    """Require a misaligned ST64B to raise SIGBUS when normal memory works.
+
+    This is architectural coverage, not a discriminator for the userspace
+    reporting ABI patch. That ABI is checked by test_vera_ls64_userspace_abi.
+    """
+    normal_result, reason = _execute_ls64_probe(
+        sd, test_vera_ls64_alignment.__name__, "normal-memory", logger
+    )
+    if reason:
+        GLTCore.GLTTestResult.fail(reason)
+    if normal_result.returncode == LS64_PROBE_SIGBUS:
+        GLTCore.GLTTestResult.skip(
+            "FEAT_LS64_WB is unavailable, so an aligned normal-memory fault "
+            "prevents isolating the misalignment behavior"
+        )
+    if normal_result.returncode != 0:
+        GLTCore.GLTTestResult.fail(
+            "LS64 alignment prerequisite returned unexpected status "
+            f"{normal_result.returncode}: "
+            f"{(normal_result.stderr or '').strip()[-1000:]}"
+        )
+
+    result, reason = _execute_ls64_probe(
+        sd, test_vera_ls64_alignment.__name__, "misaligned", logger
+    )
+    if reason:
+        GLTCore.GLTTestResult.fail(reason)
+    if result.returncode != LS64_PROBE_SIGBUS:
+        GLTCore.GLTTestResult.fail(
+            "Misaligned ST64B did not raise SIGBUS: "
+            f"returncode={result.returncode}, "
+            f"stderr={(result.stderr or '').strip()[-1000:]}"
+        )
+    logger.info("Misaligned ST64B raised SIGBUS as required")
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_vera_ls64_userspace_abi")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_vera_ls64_kvm_exit(sd, logger):
+    """Verify an outside-memslot LD64B exits to userspace through KVM.
+
+    PATCH: https://git.kernel.org/torvalds/c/f174a9ffcd48
+    PATCH: https://git.kernel.org/torvalds/c/151b92c92a45
+    """
+    if not os.access("/dev/kvm", os.R_OK | os.W_OK):
+        GLTCore.GLTTestResult.fail("Read/write access to /dev/kvm is required")
+
+    result, reason = _execute_ls64_probe(
+        sd, test_vera_ls64_kvm_exit.__name__, "kvm-exit", logger
+    )
+    if reason:
+        GLTCore.GLTTestResult.fail(reason)
+    if result.returncode != 0:
+        GLTCore.GLTTestResult.fail(
+            f"LS64 KVM probe failed: returncode={result.returncode}, "
+            f"stderr={(result.stderr or '').strip()}"
+        )
+    logger.info("LS64 guest produced the expected KVM_EXIT_ARM_LDST64B")
