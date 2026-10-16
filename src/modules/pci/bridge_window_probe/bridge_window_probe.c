@@ -1,5 +1,5 @@
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: GPL-2.0-only
-// Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 /*
  * Print raw I/O bridge-window flags for bridges sizing actually walks.

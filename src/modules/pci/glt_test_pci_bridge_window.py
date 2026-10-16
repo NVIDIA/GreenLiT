@@ -76,45 +76,6 @@ def parse_probe_report(text):
     return windows
 
 
-def bridge_window_verdict(windows):
-    """Return ``(result, detail)`` for probe rows.
-
-    ``result`` is ``fail``, ``skip``, or ``pass``.
-    """
-    if not windows:
-        return "skip", "No PCI-to-PCI bridge found."
-
-    claimed = []
-    clear = []
-    for bdf, name, flags in windows:
-        kind = classify_untyped_window(flags)
-        label = f"{bdf} {name} {flags:#x}"
-        if kind == "claimed":
-            claimed.append(label)
-        elif kind == "clear":
-            clear.append(label)
-
-    if claimed:
-        return (
-            "fail",
-            "Untyped I/O bridge window was sized "
-            f"(missing upstream {_UPSTREAM_SHA} / "
-            f"linux-nvidia-6.18-next {_NVIDIA_SHA}): "
-            + ", ".join(claimed),
-        )
-    if not clear:
-        return (
-            "skip",
-            "No PCI bridge has an untyped I/O window; "
-            "the window type check is not observable.",
-        )
-    return (
-        "pass",
-        f"Left {len(clear)} untyped I/O bridge window(s) unsized: "
-        + ", ".join(clear),
-    )
-
-
 def _run_probe_command(args, timeout):
     """Run a probe command and turn a timeout into a failed result."""
     try:
@@ -233,7 +194,7 @@ def test_pci_bridge_window_type(_, logger):
             _unload_bridge_window_probe(logger)
             load_skip = _build_and_load_bridge_window_probe(logger)
             if load_skip:
-                GLTCore.GLTTestResult.skip(load_skip)
+                GLTCore.GLTTestResult.warn(load_skip)
             module_loaded = True
             try:
                 with open(_PROBE_PROC, encoding="utf-8") as handle:
@@ -250,9 +211,31 @@ def test_pci_bridge_window_type(_, logger):
                 _unload_bridge_window_probe(logger)
             _run_probe_command(["make", "clean"], _MAKE_TIMEOUT_SECS)
 
-    result, detail = bridge_window_verdict(windows)
-    if result == "fail":
-        GLTCore.GLTTestResult.fail(detail)
-    if result == "skip":
-        GLTCore.GLTTestResult.skip(detail)
-    logger.info("%s", detail)
+    if not windows:
+        GLTCore.GLTTestResult.skip("No PCI-to-PCI bridge found.")
+
+    grouped = {"claimed": [], "clear": []}
+    for bdf, name, flags in windows:
+        kind = classify_untyped_window(flags)
+        if kind in grouped:
+            grouped[kind].append(f"{bdf} {name} {flags:#x}")
+    claimed = grouped["claimed"]
+    clear = grouped["clear"]
+
+    if claimed:
+        GLTCore.GLTTestResult.fail(
+            "Untyped I/O bridge window was sized "
+            f"(missing upstream {_UPSTREAM_SHA} / "
+            f"linux-nvidia-6.18-next {_NVIDIA_SHA}): "
+            + ", ".join(claimed)
+        )
+    if not clear:
+        GLTCore.GLTTestResult.skip(
+            "No PCI bridge has an untyped I/O window; "
+            "the window type check is not observable."
+        )
+    logger.info(
+        "Left %s untyped I/O bridge window(s) unsized: %s",
+        len(clear),
+        ", ".join(clear),
+    )
