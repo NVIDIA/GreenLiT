@@ -16,16 +16,19 @@
 """Unit tests for nested STE hitless-update helpers."""
 # pylint: disable=protected-access,wrong-import-position
 
+import errno
+import stat
 import sys
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 from tests.test_base import GLTTestBase
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
-from common.glt_core import GLTTestResult, GLTTestSkip
+from common.glt_core import GLTTestFail, GLTTestResult, GLTTestSkip
 from modules.iommu.nested_ste import trigger as nested_ste_trigger
 from modules.iommu import glt_test_nested_ste as nested_ste
 
@@ -295,7 +298,7 @@ class TestNestedSteHelpers(GLTTestBase):
         )
         for name, driver, reset, boot_vga, group, framebuffers, expected in cases:
             with self.subTest(name=name), self.mock.patch(
-                "modules.iommu.glt_test_nested_ste._current_driver",
+                "common.pci_utils.get_pci_driver",
                 return_value=driver,
             ), self.mock.patch(
                 "modules.iommu.glt_test_nested_ste.os.path.isfile",
@@ -331,13 +334,13 @@ class TestNestedSteHelpers(GLTTestBase):
             "modules.iommu.glt_test_nested_ste.os.path.islink",
             return_value=True,
         ), self.mock.patch(
-            "modules.iommu.glt_test_nested_ste._is_arm_smmu_v3_backed",
+            "common.pci_utils.is_arm_smmu_v3_backed",
             return_value=True,
         ), self.mock.patch(
             "modules.iommu.glt_test_nested_ste.pci_utils.get_pci_class",
             return_value="0x020000",
         ), self.mock.patch(
-            "modules.iommu.glt_test_nested_ste._current_driver",
+            "common.pci_utils.get_pci_driver",
             return_value="mlx5_core",
         ):
             result = nested_ste._discover_candidate_bdfs(
@@ -361,13 +364,13 @@ class TestNestedSteHelpers(GLTTestBase):
             "modules.iommu.glt_test_nested_ste.os.path.islink",
             return_value=True,
         ), self.mock.patch(
-            "modules.iommu.glt_test_nested_ste._is_arm_smmu_v3_backed",
+            "common.pci_utils.is_arm_smmu_v3_backed",
             return_value=True,
         ), self.mock.patch(
             "modules.iommu.glt_test_nested_ste.pci_utils.get_pci_class",
             return_value="0x020000",
         ), self.mock.patch(
-            "modules.iommu.glt_test_nested_ste._current_driver",
+            "common.pci_utils.get_pci_driver",
             return_value="mlx5_core",
         ):
             result = nested_ste._discover_candidate_bdfs(
@@ -633,6 +636,262 @@ class TestNestedSteTrigger(GLTTestBase):
                 nested_ste_trigger.run_trigger("0004:01:00.0", 0, timeout=0.05)
 
         self.assertIn("timed out", str(ctx.exception))
+
+
+
+
+class TestNestedSteProbeInspection(GLTTestBase):
+    """Fault real shared probes at lower I/O, before any unverified GPU mutation."""
+
+    _ready_prechecks = TestNestedSteHelpers._ready_prechecks
+
+    def setUp(self):
+        super().setUp()
+        self.bdf = '0004:01:00.0'
+        self.path = '/sys/bus/pci/devices/' + self.bdf
+        self.guards = ExitStack()
+        self.addCleanup(self.guards.close)
+        for target in ('os.open', 'os.kill', 'subprocess.run', 'subprocess.Popen'):
+            self.guards.enter_context(self.mock.patch(
+                target, side_effect=AssertionError('unmocked mutation: ' + target)))
+
+    def _verdict(self):
+        try:
+            nested_ste.test_nested_ste_hitless_update(self.mock_sd, self.mock_logger)
+        except (OSError, GLTTestFail, GLTTestSkip) as error:
+            return error
+        return None
+
+    def test_display_driver_inspection_fault_refuses_real_probe(self):
+        """An unreadable driver link cannot make an otherwise idle display GPU safe."""
+        with self.mock.patch('os.lstat', side_effect=PermissionError(errno.EACCES, 'driver probe denied')), \
+                self.mock.patch('os.path.isfile', return_value=True), \
+                self.mock.patch('os.path.realpath', side_effect=lambda path, **_: path), \
+                self.mock.patch.object(nested_ste.glt_utils, 'read_sysfs_value', return_value='0'), \
+                self.mock.patch('glob.glob', side_effect=lambda pattern:
+                                [self.path] if pattern.endswith('/iommu_group/devices/*') else []):
+            self.assertFalse(nested_ste._display_device_is_safe(self.bdf))
+
+    def test_driver_discovery_fault_is_decorated_fail(self):
+        """Non-display driver inspection errors fail discovery before candidate binding."""
+        def lstat(path, **_):
+            if str(path).endswith('/driver'):
+                raise OSError(errno.EIO, 'driver probe denied')
+            return SimpleNamespace(st_mode=stat.S_IFLNK)
+
+        with self._ready_prechecks(), \
+                self.mock.patch('glob.glob', side_effect=lambda pattern:
+                                [self.path] if pattern == '/sys/bus/pci/devices/*' else ['arm-smmu-v3.0']), \
+                self.mock.patch('os.lstat', side_effect=lstat), \
+                self.mock.patch.object(nested_ste.pci_utils, 'unsafe_pci_bdfs', return_value=set()), \
+                self.mock.patch.object(nested_ste.pci_utils, 'is_arm_smmu_v3_backed', return_value=True), \
+                self.mock.patch.object(nested_ste.pci_utils, 'get_pci_class', return_value='0x020000'), \
+                self.mock.patch.object(nested_ste, '_bind_usable_candidate', return_value=(None, [])) as bind:
+            outcome = self._verdict()
+        self.assertIsInstance(outcome, GLTTestFail)
+        self.assertIn('discovery', str(outcome).lower())
+        self.assertIn('driver probe denied', str(outcome))
+        bind.assert_not_called()
+
+    def test_save_and_bind_real_probe_errors_precede_gpu_writes(self):
+        """Save must not store uncertain state; bind may modprobe but cannot write GPU state."""
+        for operation in ('save', 'bind'):
+            with self.subTest(operation=operation), \
+                    self.mock.patch('os.lstat', side_effect=OSError(errno.EIO, 'driver probe denied')), \
+                    self.mock.patch('os.path.isfile', return_value=False), \
+                    self.mock.patch('os.path.isdir', return_value=True), \
+                    self.mock.patch.object(nested_ste.pci_utils, 'get_pci_class', return_value='0x020000'), \
+                    self.mock.patch('subprocess.run') as module, \
+                    self.mock.patch('builtins.open', self.mock.mock_open(read_data='vfio-pci')) as opened:
+                store = {}
+                with self.assertRaises(OSError):
+                    if operation == 'save':
+                        nested_ste._save_driver_state(store, self.bdf)
+                    else:
+                        nested_ste._bind_vfio_pci(self.bdf, self.mock_logger)
+                self.assertEqual(store, {})
+                opened.assert_not_called()
+                if operation == 'bind':
+                    module.assert_called_once_with(['modprobe', 'vfio-pci'], check=False, shell=False)
+                else:
+                    module.assert_not_called()
+
+    def test_smmu_scan_fault_after_platform_gate_is_decorated_fail(self):
+        """Only a later scan fault is covered; the retained first platform gate passes."""
+        real_glob = nested_ste.glob.glob
+        scans = []
+        entry = SimpleNamespace(name='arm-smmu-v3.0', path='/sys/devices/platform/arm-smmu-v3.0')
+
+        def scandir(path):
+            scans.append(str(path))
+            if len(scans) > 1:
+                raise PermissionError(errno.EACCES, 'later SMMU scan denied')
+            context = self.mock.MagicMock()
+            context.__enter__.return_value = iter([entry])
+            return context
+
+        def glob(pattern):
+            return [self.path] if pattern == '/sys/bus/pci/devices/*' else real_glob(pattern)
+
+        with self._ready_prechecks(), self.mock.patch('glob.glob', side_effect=glob), \
+                self.mock.patch('os.scandir', side_effect=scandir), \
+                self.mock.patch('os.lstat', return_value=SimpleNamespace(st_mode=stat.S_IFLNK)), \
+                self.mock.patch('os.path.realpath', return_value=entry.path + '/iommu'), \
+                self.mock.patch.object(nested_ste.pci_utils, 'unsafe_pci_bdfs', return_value=set()), \
+                self.mock.patch.object(nested_ste, '_bind_usable_candidate', return_value=(None, [])) as bind:
+            outcome = self._verdict()
+        self.assertEqual(scans, ['/sys/devices/platform', '/sys/devices/platform'])
+        self.assertIsInstance(outcome, GLTTestFail)
+        self.assertIn('discovery', str(outcome).lower())
+        self.assertIn('later SMMU scan denied', str(outcome))
+        bind.assert_not_called()
+
+
+class TestNestedSteRestoration(GLTTestBase):
+    """Keep acquisition failures and uncertain restoration visible without retries."""
+
+    _ready_prechecks = TestNestedSteHelpers._ready_prechecks
+    _verdict = TestNestedSteProbeInspection._verdict
+
+    def setUp(self):
+        super().setUp()
+        self.bdf = '0004:01:00.0'
+        self.guards = ExitStack()
+        self.addCleanup(self.guards.close)
+        for target in ('os.open', 'os.kill', 'subprocess.run', 'subprocess.Popen'):
+            self.guards.enter_context(self.mock.patch(
+                target, side_effect=AssertionError('unmocked mutation: ' + target)))
+
+    def test_acquisition_io_errors_are_operation_labeled_failures(self):
+        """Save/bind inspection, modprobe and override-read errors must become explicit FAIL."""
+        for operation in ('save-probe', 'bind-probe', 'modprobe', 'override-read'):
+            with self.subTest(operation=operation), self._ready_prechecks(), ExitStack() as stack:
+                diagnostic = operation + ' denied ' + self.bdf
+                stack.enter_context(self.mock.patch.object(
+                    nested_ste, '_discover_candidate_bdfs', return_value=[self.bdf]))
+                stack.enter_context(self.mock.patch.object(
+                    nested_ste, '_start_tracing', return_value=(None, 'unexpected tracing')))
+                opened = stack.enter_context(self.mock.patch('builtins.open', self.mock.mock_open()))
+                if operation != 'override-read':
+                    stack.enter_context(self.mock.patch.object(nested_ste, '_save_driver_state',
+                        side_effect=OSError(diagnostic) if operation == 'save-probe' else None))
+                else:
+                    opened.side_effect = OSError(diagnostic)
+                    stack.enter_context(self.mock.patch('os.path.isfile', return_value=True))
+                if operation != 'modprobe':
+                    stack.enter_context(self.mock.patch.object(nested_ste, '_bind_vfio_pci',
+                        side_effect=OSError(diagnostic) if operation == 'bind-probe' else None))
+                else:
+                    stack.enter_context(self.mock.patch.object(
+                        nested_ste.pci_utils, 'get_pci_class', return_value='0x020000'))
+                    stack.enter_context(self.mock.patch('subprocess.run', side_effect=FileNotFoundError(diagnostic)))
+                outcome = self._verdict()
+                self.assertIsInstance(outcome, GLTTestFail)
+                self.assertIn('acquisition', str(outcome).lower())
+                self.assertIn(diagnostic, str(outcome))
+                self.assertIsNone(nested_ste.test_nested_ste_hitless_update.attr.nested_ste_bdf)
+                self.assertFalse(any('w' in call.args[1] for call in opened.call_args_list))
+
+    def test_restore_probe_errors_and_mismatch_are_boolean_and_cached(self):
+        """Uncertain initial state writes nothing; final verification logs once without reprobing."""
+        for phase in ('initial', 'final', 'mismatch', 'post-hook'):
+            with self.subTest(phase=phase):
+                probes = []
+
+                def lstat(path, phase=phase, record_probe=probes.append,
+                          probe_count=probes.__len__, **_):
+                    record_probe(str(path))
+                    if phase in ('initial', 'post-hook') or (phase == 'final' and probe_count() > 1):
+                        raise OSError(errno.EIO, 'restore probe denied')
+                    return SimpleNamespace(st_mode=stat.S_IFLNK)
+
+                def resolved(_path, probe_count=probes.__len__, **_):
+                    return '/sys/bus/pci/drivers/' + ('vfio-pci' if probe_count() == 1 else 'wrong')
+
+                store = {self.bdf: {'orig_driver': 'nvidia', 'orig_override': ''}}
+                attr = SimpleNamespace(nested_ste_bdf=self.bdf, driver_state=store)
+                self.mock_logger.reset_mock()
+                with self.mock.patch('os.path.exists', return_value=True), \
+                        self.mock.patch('os.lstat', side_effect=lstat), \
+                        self.mock.patch('os.path.realpath', side_effect=resolved), \
+                        self.mock.patch('builtins.open', self.mock.mock_open()) as opened:
+                    if phase == 'post-hook':
+                        self.assertIsNone(nested_ste._nested_ste_cleanup(
+                            None, attr, self.mock_logger))
+                    else:
+                        self.assertIs(nested_ste._restore_driver_state(
+                            store, self.bdf, self.mock_logger), False)
+                self.assertEqual(store, {})
+                self.assertEqual(len(probes), 2 if phase in ('final', 'mismatch') else 1)
+                if phase in ('initial', 'post-hook'):
+                    opened.assert_not_called()
+                message = str(self.mock_logger.error.call_args_list)
+                self.assertIn(self.bdf, message)
+                self.assertIn('wrong' if phase == 'mismatch' else 'restore probe denied', message)
+
+    def test_finally_restore_false_preserves_body_verdict_and_fails_clean_run(self):
+        """Cleanup uncertainty must preserve an active FAIL/SKIP, but cannot permit clean PASS."""
+        for body in ('fail', 'skip', 'clean'):
+            with self.subTest(body=body), self._ready_prechecks(), \
+                    self.mock.patch.object(nested_ste, '_discover_candidate_bdfs', return_value=[self.bdf]), \
+                    self.mock.patch.object(nested_ste, '_bind_usable_candidate', return_value=(self.bdf, [])), \
+                    self.mock.patch.object(nested_ste, '_start_tracing', return_value=(self.mock.Mock(), None)), \
+                    self.mock.patch.object(nested_ste, '_run_trigger', return_value=(None, False),
+                        side_effect=GLTTestFail('body failure') if body == 'fail' else
+                        (GLTTestSkip('body skip') if body == 'skip' else None)), \
+                    self.mock.patch.object(nested_ste, '_stop_tracing'), \
+                    self.mock.patch.object(nested_ste, '_parse_trace',
+                        return_value=(0, nested_ste.ITERATIONS, nested_ste.ITERATIONS)), \
+                    self.mock.patch.object(nested_ste, '_restore_driver_state', return_value=False) as restore:
+                outcome = self._verdict()
+                self.assertIsInstance(outcome, GLTTestSkip if body == 'skip' else GLTTestFail)
+                self.assertIn({'fail': 'body failure', 'skip': 'body skip', 'clean': 'reboot'}[body], str(outcome))
+                restore.assert_called_once()
+
+    def test_failed_candidate_restore_stops_without_finally_or_posthook_retry(self):
+        """A popped uncertain device cannot authorize another bind attempt or a cleanup retry."""
+        def save(store, bdf):
+            store[bdf] = {'orig_driver': 'nvidia', 'orig_override': ''}
+
+        def uncertain_restore(store, bdf, _logger):
+            store.pop(bdf)
+            return False
+
+        with self._ready_prechecks(), \
+                self.mock.patch.object(nested_ste, '_discover_candidate_bdfs',
+                    return_value=[self.bdf, '0004:02:00.0']), \
+                self.mock.patch.object(nested_ste, '_save_driver_state', side_effect=save), \
+                self.mock.patch.object(nested_ste, '_bind_vfio_pci', return_value='bind denied') as bind, \
+                self.mock.patch.object(nested_ste, '_restore_driver_state', side_effect=uncertain_restore) as restore:
+            outcome = self._verdict()
+            attr = nested_ste.test_nested_ste_hitless_update.attr
+            self.assertIsNone(nested_ste._nested_ste_cleanup(None, attr, self.mock_logger))
+            restore.assert_called_once()
+            bind.assert_called_once_with(self.bdf, self.mock_logger)
+            self.assertEqual(attr.driver_state, {})
+            self.assertIsNone(attr.nested_ste_bdf)
+            self.assertIsInstance(outcome, GLTTestFail)
+            for diagnostic in (self.bdf, 'bind denied', 'recover', 'reboot'):
+                self.assertIn(diagnostic, str(outcome).lower())
+
+    def test_successfully_restored_failed_candidate_allows_next(self):
+        """A verified restore retains the existing later-candidate compatibility path."""
+        def restore(store, bdf, _logger):
+            store.pop(bdf)
+            return True
+
+        store = {}
+        with self.mock.patch.object(nested_ste, '_save_driver_state',
+                    side_effect=lambda values, bdf: values.update({bdf: {'orig_driver': ''}})), \
+                self.mock.patch.object(nested_ste, '_bind_vfio_pci', side_effect=['bind denied', None]) as bind, \
+                self.mock.patch.object(nested_ste, '_restore_driver_state', side_effect=restore) as restored:
+            selected, errors = nested_ste._bind_usable_candidate(
+                [self.bdf, '0004:02:00.0'], store, self.mock_logger)
+        self.assertEqual(selected, '0004:02:00.0')
+        self.assertEqual(errors, [self.bdf + ': bind denied'])
+        self.assertEqual(bind.call_count, 2)
+        restored.assert_called_once_with(store, self.bdf, self.mock_logger)
+        self.assertEqual(set(store), {'0004:02:00.0'})
 
 
 if __name__ == "__main__":

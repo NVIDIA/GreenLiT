@@ -18,14 +18,211 @@ Python script to test IOMMU.
 """
 import ctypes.util
 import glob
+import json
 import os
 import platform
+import queue
 import re
+import signal
 import subprocess
+import sys
+import threading
+from pathlib import Path
 from common import glt_core as GLTCore
-from common import glt_utils
+from common import glt_utils, pci_utils
 from common.nv_device import NvDev
 from modules.iommu import cmdqv_hyp_own_runner as runner
+
+
+_MIXED_PASID_HELPER = "/usr/share/greenlit/bin/glt_iommu_mixed_pasid.py"
+_MIXED_PASID_OBSERVER = "/usr/share/greenlit/bin/glt_iommu_mixed_pasid.bt"
+
+
+def _mixed_pasid_observer_identity(pid):
+    """Read PID starttime and expected invocation before an owned stop."""
+    try:
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return None
+        root = Path("/proc") / str(pid)
+        stat = (root / "stat").read_text(encoding="utf-8")
+        argv = (root / "cmdline").read_bytes().rstrip(b"\0").decode().split("\0")
+        if (Path(argv[0]).name != "bpftrace" or argv[-2] != _MIXED_PASID_OBSERVER
+                or not argv[-1].isdigit()):
+            return None
+        return {"pid": pid, "starttime": stat[stat.rfind(")") + 2:].split()[19], "argv": argv}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _mixed_pasid_identity_matches(observer, worker_pid):
+    """Match the recorded observer identity and expected worker invocation."""
+    argv = observer.get("argv")
+    if not isinstance(argv, list) or len(argv) < 2 or not all(isinstance(value, str) for value in argv):
+        return False
+    identity = _mixed_pasid_observer_identity(observer.get("pid"))
+    return (identity is not None and argv[-1] == str(worker_pid)
+            and all(identity.get(key) == observer.get(key) for key in ("pid", "starttime", "argv")))
+
+
+def _mixed_pasid_stop_owned(observer, worker_pid):
+    """Parent cleanup is restricted to the handed-off, rechecked observer."""
+    if not _mixed_pasid_identity_matches(observer, worker_pid):
+        return False
+    try:
+        os.kill(observer["pid"], signal.SIGTERM)
+        return True
+    except OSError:
+        return False
+
+
+def _mixed_pasid_incomplete(process, observer, reason, report=None):
+    """Report residual ownership; never restore devices/modules from the parent."""
+    evidence = dict(report or {})
+    residuals = evidence.get("residuals", []) + [
+        "worker cleanup unverified: GPU binding/override, FDs and temporary modules"]
+    if observer and not _mixed_pasid_stop_owned(observer, process.pid):
+        residuals.append("observer identity or stop unverified")
+    elif not observer:
+        residuals.append("observer ownership was not handed off")
+    evidence.update(status="FAIL", reason="; ".join(filter(None, (evidence.get("reason"), reason))),
+                    cleanup_ok=False, residuals=residuals)
+    return evidence
+
+
+def _mixed_pasid_read_first_line(process, messages):
+    """Deliver the initial worker line or its original read error."""
+    try:
+        messages.put(process.stdout.readline())
+    except (OSError, ValueError) as exc:
+        messages.put(exc)
+
+
+def _mixed_pasid_first_message(process):
+    """Bound the initial read without killing a potentially live ioctl owner."""
+    messages = queue.Queue()
+
+    threading.Thread(target=_mixed_pasid_read_first_line, args=(process, messages), daemon=True).start()
+    message = messages.get(timeout=180)
+    if isinstance(message, Exception):
+        raise message
+    record = json.loads(message) if message else {}
+    if not isinstance(record, dict):
+        raise ValueError("invalid initial worker protocol record")
+    return record
+
+
+def _mixed_pasid_acknowledge(process, observer):
+    """Validate ownership metadata and the current identity before allowing mutation."""
+    pid = observer.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0 or not observer.get("starttime"):
+        raise ValueError("invalid observer process handoff")
+    owned = observer.get("program_ids", [])
+    if (not isinstance(owned, list) or any(not isinstance(value, int) or isinstance(value, bool)
+                                         or value <= 0 for value in owned) or len(set(owned)) < 4):
+        raise ValueError("invalid observer program-ID handoff")
+    if not _mixed_pasid_identity_matches(observer, process.pid):
+        raise ValueError("observer identity changed before handoff acknowledgment")
+    process.stdin.write("ACK\n")
+    process.stdin.flush()
+
+
+def _mixed_pasid_cleanup_readback(report, observer):
+    """Independently read device/module state and prove the owned BPF IDs absent."""
+    fixture = report["fixture"]
+    gpu = Path("/sys/bus/pci/devices") / fixture["gpu"]
+    override = (gpu / "driver_override").read_text(encoding="utf-8").strip()
+    if (pci_utils.get_pci_driver(fixture["gpu"]) is not None or override not in ("", "(null)")
+            or pci_utils.get_pci_driver(fixture["parent"]) != "pcieport"):
+        raise ValueError("independent GPU/parent/override cleanup readback failed")
+    for module in report["modules_loaded"]:
+        try:
+            (Path("/sys/module") / module).stat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        raise ValueError("independent temporary-module cleanup readback failed")
+    if not glt_utils.is_cli_available("bpftool"):
+        raise ValueError("bpftool missing for independent cleanup inventory")
+    result = glt_utils.run_command(["bpftool", "-j", "prog", "show"],
+                                   "independent bpftool cleanup inventory failed", timeout=10)
+    inventory = json.loads(result.stdout)
+    if not isinstance(inventory, list) or any(
+            not isinstance(item, dict) or not isinstance(item.get("id"), int)
+            or isinstance(item["id"], bool)
+            or item["id"] <= 0 for item in inventory):
+        raise ValueError("invalid independent bpftool JSON inventory")
+    if {item["id"] for item in inventory} & set(observer["program_ids"]):
+        raise ValueError("independent cleanup inventory found owned BPF IDs")
+
+
+def _mixed_pasid_close_pipes(process):
+    """Release parent pipe ends without waiting on, or signalling, a live owner."""
+    if process.stdin is not None and not process.stdin.closed:
+        process.stdin.close()
+    if process.poll() is not None:
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("disruptive")
+def test_mixed_pasid_attach(_, logger):  # pylint: disable=too-many-branches
+    """Validate mixed-PASID attach and detach for PASID 1.
+
+    JIRA: DGX-13063
+    Patch: https://git.kernel.org/torvalds/c/b3f6fcd8404f9f92262303369bb877ec5d188a81
+    Only an unused GPU is bound; its PASID-incapable parent stays on pcieport.
+    This disruptive case requires an externally prepared shared IOMMU group.
+    """
+    try:
+        # D2: context exit must not wait on an ioctl owner that timed out.
+        process = subprocess.Popen([sys.executable, _MIXED_PASID_HELPER], stdin=subprocess.PIPE,  # pylint: disable=consider-using-with
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError as exc:
+        GLTCore.GLTTestResult.fail(f"could not start mixed-PASID worker: {exc}")
+    observer = None
+    report = None
+    try:
+        first = _mixed_pasid_first_message(process)
+        if first.get("type") == "observer":
+            if not isinstance(first.get("observer"), dict):
+                raise ValueError("invalid observer ownership record")
+            observer = first["observer"]
+            _mixed_pasid_acknowledge(process, observer)
+        # communicate closes stdin, drains remaining output and reaps a completed owner.
+        output, stderr = process.communicate(timeout=180)
+        records = [first] + [json.loads(line) for line in output.splitlines() if line.strip()]
+        if any(not isinstance(record, dict) for record in records):
+            raise ValueError("invalid worker protocol record")
+        reports = [record for record in records if record.get("type") == "result"]
+        if len(reports) != 1:
+            report = _mixed_pasid_incomplete(process, observer,
+                                            "worker exited without verified cleanup attestation: " + stderr.strip())
+        else:
+            report = reports[0]
+            logger.info("Mixed-PASID worker evidence: %s", json.dumps(report, sort_keys=True))
+            if report.get("cleanup_ok") is not True:
+                report = _mixed_pasid_incomplete(process, observer, "worker cleanup attestation failed", report)
+            else:
+                if (report.get("status") not in ("PASS", "FAIL", "SKIP")
+                        or (report["status"] == "PASS" and report.get("valid") is not True)):
+                    raise ValueError("invalid worker verdict")
+                if process.returncode != (0 if report["status"] in ("PASS", "SKIP") else 1):
+                    raise ValueError("worker exit code disagrees with its verdict")
+                if not observer and report["status"] != "SKIP" and not (
+                        report["status"] == "FAIL" and report.get("residuals") == []):
+                    raise ValueError("worker result has no observer ownership handoff")
+                if observer:
+                    _mixed_pasid_cleanup_readback(report, observer)
+    except (OSError, ValueError, KeyError, TypeError, queue.Empty, subprocess.SubprocessError, RuntimeError) as exc:
+        report = _mixed_pasid_incomplete(process, observer, f"mixed-PASID worker incomplete: {exc}", report)
+    finally:
+        _mixed_pasid_close_pipes(process)
+    if report["status"] == "SKIP" and report.get("cleanup_ok"):
+        GLTCore.GLTTestResult.skip(report["reason"])
+    if report["status"] != "PASS" or not report.get("cleanup_ok"):
+        GLTCore.GLTTestResult.fail(
+            report["reason"] + (f"; residuals: {report['residuals']}" if report.get("residuals") else ""))
 
 
 @GLTCore.GLTTestAttr()

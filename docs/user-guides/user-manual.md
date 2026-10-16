@@ -157,6 +157,54 @@ rejects it if it does not belong to the disruptive plan. Test cases required by
 `@GLTRequires` are added automatically. `glt-test-suite` rejects combining
 `--test-case` with `--list`, `--resume`, or category flags such as `--pci`.
 
+#### Mixed-PASID IOMMU attach
+
+`iommu:test_mixed_pasid_attach` is an opt-in disruptive test for Ubuntu ARM64
+systems using ARM SMMUv3. After following the recommended installation workflow,
+select it explicitly:
+
+```bash
+sudo glt-test-suite --disruptive --test-case iommu:test_mixed_pasid_attach
+```
+
+Prepare a shared IOMMU group containing exactly an unused, unbound NVIDIA GPU
+and its direct-parent PCIe root port. The GPU must advertise the PASID extended
+capability and have a null driver override; the port must have no PASID capability
+and remain bound to `pcieport`. Group/ACS and boot preparation are outside this
+case. Only Ubuntu ARM64 systems with ARM SMMUv3 are supported.
+
+The test requires root, a little-endian host, available VFIO/IOMMUFD modules,
+kernel BTF, typed `bpftrace` probes, `lspci`, `modprobe`, and `bpftool` on PATH.
+`bpftool -j prog show` must work. A full GreenLiT installation stages the private
+Python helper and its separately GPL-2.0-only observer in
+`/usr/share/greenlit/bin/`; a Python-wheel-only installation is insufficient.
+The observer must initialize successfully before any module or GPU-binding
+change is allowed.
+
+The case allocates an empty IOAS and PASID-compatible HWPT without mapping DMA.
+At the first attributed core entry it checks the actual GPU and parent IOMMU
+pointers and effective PASID limits: GPU greater than one, parent zero. It then
+requires PASID 1 to attach successfully with one GPU set callback and no parent
+callback. Explicit VFIO detach must succeed and produce one GPU block callback.
+A safely observed control kernel rejection of PASID 1 fails the case. An early
+ioctl error alone cannot establish an attributed core rejection.
+PASID 1 below the GPU limit with a parent limit of zero is the discriminator for
+`b3f6fcd8404f` and must succeed with the fix. The test issues only PASID 1;
+the observed GPU limit establishes eligibility and is never used as another
+requested PASID. An attributed PASID 1 rejection with an observed GPU limit of
+one may skip after verified cleanup because no positive PASID is usable.
+The test collects trace snapshots for the full two-second observation window
+before validating the final snapshot. Extra requests or callbacks within that
+snapshot fail; this finite window cannot prove no event arrives after its deadline.
+
+Ordinary missing prerequisites may skip before acquisition. Missing or mismatched
+evidence after acquisition, a failed PASID 1 lifecycle, or incomplete cleanup fails
+the case. The test verifies closed descriptors, restored GPU binding and override,
+a stopped observer, absent observer BPF programs, and removal of modules it loaded.
+If the test times out or lacks cleanup attestation, device, module or BPF state
+may remain. The report lists residuals. Review them before further hardware work.
+A skipped test does not establish whether the kernel behavior is correct.
+
 ### Test Plans
 
 - **Standard** (default): `sudo glt-test-suite --standard` — comprehensive tests that do
