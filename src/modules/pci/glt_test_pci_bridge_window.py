@@ -76,34 +76,35 @@ def parse_probe_report(text):
     return windows
 
 
-def _run_probe_command(args, timeout):
-    """Run a probe command and turn a timeout into a failed result."""
-    try:
-        return subprocess.run(
-            args,
-            capture_output=True,
-            check=False,
-            shell=False,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(
-            args, 124, "", f"timed out after {timeout}s"
-        )
-
-
 def _unload_bridge_window_probe(logger):
     """Unload the probe if it is still loaded."""
     if not os.path.exists(f"/sys/module/{_PROBE_MODULE}"):
         return
-    result = _run_probe_command(["rmmod", _PROBE_MODULE], _MODULE_TIMEOUT_SECS)
-    if result.returncode != 0:
-        logger.error(
-            "Failed to unload %s: %s",
-            _PROBE_MODULE,
-            result.stderr.strip() or result.stdout.strip() or "rmmod failed",
+    try:
+        subprocess.run(
+            ["rmmod", _PROBE_MODULE],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_MODULE_TIMEOUT_SECS,
         )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip() or "rmmod failed"
+        logger.error("Failed to unload %s: %s", _PROBE_MODULE, detail)
+    except (subprocess.TimeoutExpired, OSError) as error:
+        logger.error("Failed to unload %s: %s", _PROBE_MODULE, error)
+
+
+def _clean_bridge_window_probe(logger):
+    """Remove build products. A clean failure does not hide the verdict."""
+    try:
+        glt_utils.run_command(
+            ["make", "clean"],
+            "Failed to clean the bridge-window probe",
+            timeout=_MAKE_TIMEOUT_SECS,
+        )
+    except RuntimeError as error:
+        logger.error("%s", error)
 
 
 def _bridge_window_tooling_skip_reason():
@@ -128,14 +129,16 @@ def _bridge_window_tooling_skip_reason():
 def _build_and_load_bridge_window_probe(logger):
     """Build, sign, and load the probe.
 
-    Return a skip reason when the toolchain or loader cannot run the probe.
+    Return a warning reason when the toolchain or loader cannot run the probe.
     """
-    result = _run_probe_command(["make"], _MAKE_TIMEOUT_SECS)
-    if result.returncode != 0:
-        return (
-            "Cannot build the bridge-window probe: "
-            + (result.stderr.strip() or result.stdout.strip() or "make failed")
+    try:
+        glt_utils.run_command(
+            ["make"],
+            "Failed to build the bridge-window probe",
+            timeout=_MAKE_TIMEOUT_SECS,
         )
+    except RuntimeError as error:
+        return f"Cannot build the bridge-window probe: {error}"
 
     module_ko = f"{_PROBE_MODULE}.ko"
     if not glt_utils.sign_kernel_module(module_ko, logger):
@@ -144,14 +147,23 @@ def _build_and_load_bridge_window_probe(logger):
             "See docs/user-guides/secure-boot.md for setup."
         )
 
-    result = _run_probe_command(
-        ["insmod", module_ko], _MODULE_TIMEOUT_SECS
-    )
-    if result.returncode != 0:
-        return (
-            "Cannot load the bridge-window probe: "
-            + (result.stderr.strip() or result.stdout.strip() or "insmod failed")
+    try:
+        subprocess.run(
+            ["insmod", module_ko],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=_MODULE_TIMEOUT_SECS,
         )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return (
+            "Cannot load the bridge-window probe "
+            f"(insmod exit {error.returncode}){suffix}"
+        )
+    except (subprocess.TimeoutExpired, OSError) as error:
+        return f"Cannot load the bridge-window probe: {error}"
     return None
 
 
@@ -209,7 +221,7 @@ def test_pci_bridge_window_type(_, logger):
         finally:
             if module_loaded:
                 _unload_bridge_window_probe(logger)
-            _run_probe_command(["make", "clean"], _MAKE_TIMEOUT_SECS)
+            _clean_bridge_window_probe(logger)
 
     if not windows:
         GLTCore.GLTTestResult.skip("No PCI-to-PCI bridge found.")

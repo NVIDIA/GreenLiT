@@ -27,7 +27,7 @@ class TestPciBridgeWindow(GLTTestBase):
         ), self.mock.patch.object(
             window, "parse_probe_report", return_value=windows
         ), self.mock.patch.object(
-            window, "_run_probe_command"
+            window.glt_utils, "run_command"
         ), self.mock.patch(
             "builtins.open", self.mock.mock_open(read_data="")
         ):
@@ -76,11 +76,15 @@ class TestPciBridgeWindow(GLTTestBase):
             "_build_and_load_bridge_window_probe",
             return_value="cannot build",
         ), self.mock.patch.object(
-            window, "_run_probe_command"
+            window.glt_utils, "run_command"
         ) as run:
             with self.assertRaises(GLTTestWarn):
                 window.test_pci_bridge_window_type(None, logger)
-        run.assert_called_with(["make", "clean"], window._MAKE_TIMEOUT_SECS)
+        run.assert_called_with(
+            ["make", "clean"],
+            "Failed to clean the bridge-window probe",
+            timeout=window._MAKE_TIMEOUT_SECS,
+        )
 
     def test_probe_report_parses_bdf_slot_and_flags(self):
         """The proc report is one window per line."""
