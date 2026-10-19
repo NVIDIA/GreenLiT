@@ -34,6 +34,7 @@ include = [
     "src/modules/mm/bingo/*",
     "src/modules/mm/contpte_access_flags/*",
     "src/modules/mm/hotplug_tlb/*",
+    "src/modules/pci/aspm_l1ss_saved_state_probe/*",
     "src/modules/pci/aspm_saved_state_probe/*",
     "src/modules/pci/bridge_window_probe/*",
     "src/modules/iommu/nested_ste/*.bt"
