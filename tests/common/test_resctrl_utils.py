@@ -131,6 +131,288 @@ class TestManagedMount(GLTTestBase):
         self.mock_logger.warning.assert_called_once_with("Failed to unmount resctrl.")
 
 
+class TestMountOptions(GLTTestBase):
+    """Known resctrl flags read from the mount table."""
+
+    def setUp(self):
+        super().setUp()
+        temp_dir = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+        self.addCleanup(temp_dir.cleanup)
+        self.mounts = Path(temp_dir.name) / "mounts"
+        patcher = self.mock.patch.object(
+            resctrl_utils, "PROC_MOUNTS", str(self.mounts))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_known_flags_ignore_generic_options(self):
+        """Only resctrl flags are returned, from the default mount point."""
+        self.mounts.write_text(
+            "resctrl /mnt/rc resctrl rw,cdp 0 0\n"
+            "resctrl /sys/fs/resctrl resctrl rw,relatime,cdp,debug,this_is_not_abi 0 0\n",
+            encoding="utf-8")
+        self.assertEqual(
+            resctrl_utils.mount_options(),
+            frozenset({"cdp", "debug", "this_is_not_abi"}))
+
+    def test_plain_mount_is_an_empty_set(self):
+        """A mount with no resctrl flags is present but empty."""
+        self.mounts.write_text(
+            "resctrl /sys/fs/resctrl resctrl rw 0 0\n", encoding="utf-8")
+        self.assertEqual(resctrl_utils.mount_options(), frozenset())
+
+    def test_absent_or_other_mount_is_none(self):
+        """Another resctrl mount, or none at all, is not the default mount."""
+        self.mounts.write_text(
+            "resctrl /mnt/rc resctrl rw,this_is_not_abi 0 0\n", encoding="utf-8")
+        self.assertIsNone(resctrl_utils.mount_options())
+        self.mounts.write_text("", encoding="utf-8")
+        self.assertIsNone(resctrl_utils.mount_options())
+
+    def test_unreadable_mount_table_raises(self):
+        """A missing mount table is an error, not "not mounted"."""
+        with self.assertRaises(OSError):
+            resctrl_utils.mount_options()
+
+    def test_missing_options_field_raises(self):
+        """A mount line without an options field is malformed."""
+        self.mounts.write_text("resctrl /sys/fs/resctrl resctrl\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "has no options"):
+            resctrl_utils.mount_options()
+
+
+class TestIommuGroupIds(GLTTestBase):
+    """Parsing of iommu_group lines in a resctrl tasks file."""
+
+    def test_pids_and_blank_lines_are_ignored(self):
+        """Only iommu_group entries are returned."""
+        text = "\n1\n12\niommu_group:0\n  iommu_group:3 \n"
+        self.assertEqual(resctrl_utils.parse_iommu_group_ids(text), {0, 3})
+        self.assertEqual(resctrl_utils.parse_iommu_group_ids(""), set())
+
+    def test_malformed_and_duplicate_lines_fail(self):
+        """A bad id or a repeated id is an error."""
+        cases = {
+            "iommu_group\n": "Malformed iommu group line",
+            "iommu_group:\n": "Malformed iommu group line",
+            "iommu_group:foo\n": "Malformed iommu group line",
+            "iommu_group:-1\n": "Malformed iommu group line",
+            "iommu_group:1 extra\n": "Malformed iommu group line",
+            "iommu_group:2\niommu_group:2\n": "Duplicate iommu group 2",
+            "iommu_group:1\niommu_group:01\n": "Duplicate iommu group 1",
+        }
+        for text, message in cases.items():
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, message):
+                    resctrl_utils.parse_iommu_group_ids(text)
+
+
+class TestMountWithOptions(GLTTestBase):
+    """Mount resctrl with required flags and restore a replaced mount."""
+
+    def _commands(self, mock_run):
+        return [call.args[0] for call in mock_run.call_args_list]
+
+    def _mount(self, options=""):
+        argv = ["mount", "-t", "resctrl", "resctrl", "/sys/fs/resctrl"]
+        if options:
+            argv.extend(["-o", options])
+        return argv
+
+    def _run(self, option_sequence, *, run_side_effect=None, cleanup_errors=None):
+        with ExitStack() as stack:
+            mock_options = stack.enter_context(self.mock.patch.object(
+                resctrl_utils, "mount_options", side_effect=option_sequence))
+            mock_run = stack.enter_context(self.mock.patch.object(
+                resctrl_utils.glt_utils, "run_command", side_effect=run_side_effect))
+            with resctrl_utils.mount_with_options(
+                    self.mock_logger, ("this_is_not_abi",),
+                    cleanup_errors=cleanup_errors) as state:
+                pass
+        return state, mock_run, mock_options
+
+    def test_in_place_mount_is_left_alone(self):
+        """An existing mount with exactly the requested flags is not cycled."""
+        state, mock_run, mock_options = self._run(
+            [frozenset({"this_is_not_abi"})])
+        self.assertEqual(state, (True, None))
+        mock_run.assert_not_called()
+        self.assertEqual(mock_options.call_count, 1)
+
+    def test_mount_containing_requested_flags_is_left_alone(self):
+        """Extra flags stay mounted when every requested flag is already present."""
+        state, mock_run, mock_options = self._run(
+            [frozenset({"debug", "this_is_not_abi"})])
+        self.assertEqual(state, (True, None))
+        mock_run.assert_not_called()
+        self.assertEqual(mock_options.call_count, 1)
+
+    def test_mounts_then_unmounts_when_absent(self):
+        """A helper-owned playground mount is removed and not replaced."""
+        playground = frozenset({"this_is_not_abi"})
+        state, mock_run, mock_options = self._run([None, playground])
+        self.assertEqual(state, (True, None))
+        self.assertEqual(mock_options.call_count, 2)
+        self.assertEqual(
+            self._commands(mock_run),
+            [self._mount("this_is_not_abi"),
+             ["umount", "/sys/fs/resctrl"]])
+
+    def test_plain_mount_is_replaced_and_restored(self):
+        """A mount with no resctrl flags is restored without -o."""
+        playground = frozenset({"this_is_not_abi"})
+        state, mock_run, _ = self._run([frozenset(), playground])
+        self.assertEqual(state, (True, None))
+        self.assertEqual(
+            self._commands(mock_run),
+            [["umount", "/sys/fs/resctrl"],
+             self._mount("this_is_not_abi"),
+             ["umount", "/sys/fs/resctrl"],
+             self._mount()])
+
+    def test_saved_flags_are_restored_in_sorted_order(self):
+        """Previous resctrl flags are mounted again after the test mount."""
+        playground = frozenset({"this_is_not_abi"})
+        state, mock_run, _ = self._run(
+            [frozenset({"debug", "mba_MBps"}), playground])
+        self.assertEqual(state, (True, None))
+        self.assertEqual(
+            self._commands(mock_run)[-1], self._mount("debug,mba_MBps"))
+
+    def test_failed_unmount_does_not_mount(self):
+        """A pre-existing mount that cannot be removed is left unchanged."""
+        state, mock_run, _ = self._run(
+            [frozenset({"cdp"})],
+            run_side_effect=RuntimeError("Failed to unmount resctrl."))
+        self.assertEqual(state, (False, "Failed to unmount resctrl."))
+        self.assertEqual(self._commands(mock_run), [["umount", "/sys/fs/resctrl"]])
+        self.mock_logger.error.assert_called_once()
+
+    def test_failed_mount_restores_the_previous_flags(self):
+        """A rejected test mount is rolled back to the saved flags."""
+        state, mock_run, _ = self._run(
+            [frozenset({"cdp"})],
+            run_side_effect=[
+                "",
+                RuntimeError("Failed to mount resctrl with this_is_not_abi."),
+                "",
+            ])
+        self.assertEqual(state, (False, "Failed to mount resctrl with this_is_not_abi."))
+        self.assertEqual(
+            self._commands(mock_run),
+            [["umount", "/sys/fs/resctrl"],
+             self._mount("this_is_not_abi"),
+             self._mount("cdp")])
+
+    def test_failed_mount_when_absent_does_not_unmount(self):
+        """Nothing is unmounted when the test mount was the first mount."""
+        state, mock_run, _ = self._run(
+            [None],
+            run_side_effect=RuntimeError("Failed to mount resctrl with this_is_not_abi."))
+        self.assertEqual(
+            state, (False, "Failed to mount resctrl with this_is_not_abi."))
+        self.assertEqual(
+            self._commands(mock_run),
+            [self._mount("this_is_not_abi")])
+
+    def test_failed_restore_is_included_in_the_setup_error(self):
+        """A mount failure that also fails to restore names both problems."""
+        errors = []
+        state, _, _ = self._run(
+            [frozenset({"cdp"})],
+            run_side_effect=[
+                "",
+                RuntimeError("Failed to mount resctrl with this_is_not_abi."),
+                RuntimeError("Failed to restore resctrl mount with cdp."),
+            ],
+            cleanup_errors=errors)
+        self.assertFalse(state[0])
+        self.assertIn("Failed to mount resctrl with this_is_not_abi.", state[1])
+        self.assertIn("Also failed to restore", state[1])
+        self.assertEqual(errors, ["Failed to restore resctrl mount with cdp."])
+
+    def test_option_mismatch_rolls_back_and_restores(self):
+        """A mount that does not show the requested flags is not left active."""
+        state, mock_run, _ = self._run([frozenset({"cdp"}), frozenset()])
+        self.assertFalse(state[0])
+        self.assertIn("do not match", state[1])
+        self.assertNotIn("Also failed", state[1])
+        self.assertEqual(
+            self._commands(mock_run),
+            [["umount", "/sys/fs/resctrl"],
+             self._mount("this_is_not_abi"),
+             ["umount", "/sys/fs/resctrl"],
+             self._mount("cdp")])
+
+    def test_option_mismatch_without_a_previous_mount_only_unmounts(self):
+        """Rollback of the first mount does not invent a restore mount."""
+        state, mock_run, _ = self._run([None, frozenset()])
+        self.assertFalse(state[0])
+        self.assertEqual(
+            self._commands(mock_run),
+            [self._mount("this_is_not_abi"),
+             ["umount", "/sys/fs/resctrl"]])
+
+    def test_rollback_unmount_failure_does_not_remount(self):
+        """A busy test mount is not covered by mounting the saved flags on top."""
+        errors = []
+        state, mock_run, _ = self._run(
+            [frozenset({"cdp"}), frozenset()],
+            run_side_effect=["", "", RuntimeError("Failed to unmount resctrl.")],
+            cleanup_errors=errors)
+        self.assertFalse(state[0])
+        self.assertIn("do not match", state[1])
+        self.assertIn("Also failed to restore", state[1])
+        self.assertEqual(errors, ["Failed to unmount resctrl."])
+        self.assertEqual(len(self._commands(mock_run)), 3)
+
+    def test_unreadable_mount_table_is_logged_and_nothing_is_mounted(self):
+        """With the mount flags unknown, no mount is attempted."""
+        state, mock_run, _ = self._run(OSError("no /proc"))
+        self.assertFalse(state[0])
+        self.assertIn("no /proc", state[1])
+        mock_run.assert_not_called()
+        self.mock_logger.error.assert_called_once()
+
+    def test_cleanup_unmount_failure_is_logged_and_collected(self):
+        """An exit unmount failure is logged and appended to cleanup_errors."""
+        errors = []
+        playground = frozenset({"this_is_not_abi"})
+        state, _, _ = self._run(
+            [None, playground],
+            run_side_effect=["", RuntimeError("Failed to unmount resctrl.")],
+            cleanup_errors=errors)
+        self.assertEqual(state, (True, None))
+        self.assertEqual(errors, ["Failed to unmount resctrl."])
+        self.mock_logger.warning.assert_called_once_with("%s", "Failed to unmount resctrl.")
+
+    def test_cleanup_restore_failure_is_logged_and_collected(self):
+        """A failed restore after a successful body is collected."""
+        errors = []
+        playground = frozenset({"this_is_not_abi"})
+        state, mock_run, _ = self._run(
+            [frozenset({"cdp"}), playground],
+            run_side_effect=[
+                "", "", "",
+                RuntimeError("Failed to restore resctrl mount with cdp."),
+            ],
+            cleanup_errors=errors)
+        self.assertEqual(state, (True, None))
+        self.assertEqual(errors, ["Failed to restore resctrl mount with cdp."])
+        self.assertEqual(self._commands(mock_run)[-1], self._mount("cdp"))
+        self.mock_logger.warning.assert_called_once_with(
+            "%s", "Failed to restore resctrl mount with cdp.")
+
+    def test_unknown_option_and_bare_string_are_rejected(self):
+        """Requested flags are validated before any mount change."""
+        with self.assertRaisesRegex(ValueError, "not-a-flag"):
+            with resctrl_utils.mount_with_options(self.mock_logger, ["not-a-flag"]):
+                pass
+        with self.assertRaisesRegex(TypeError, "not a string"):
+            with resctrl_utils.mount_with_options(
+                    self.mock_logger, "this_is_not_abi"):
+                pass
+
+
 class TestSchemataParsing(GLTTestBase):
     """Strict parsing of schemata files."""
 

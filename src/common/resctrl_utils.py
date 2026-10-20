@@ -36,6 +36,13 @@ PROC_MOUNTS = "/proc/mounts"
 MON_FEATURES = "mon_features"
 MBM_TOTAL_BYTES = "mbm_total_bytes"
 MON_GROUP_RETRY_INTERVAL_SEC = 0.5
+RESCTRL_MOUNT_OPTIONS = frozenset({
+    "cdp",
+    "cdpl2",
+    "debug",
+    "mba_MBps",
+    "this_is_not_abi",
+})
 
 
 def fs_supported() -> bool:
@@ -65,6 +72,29 @@ def is_mounted() -> bool:
     Raises OSError when PROC_MOUNTS cannot be read.
     """
     return RESCTRL_MOUNT_POINT in mount_points()
+
+
+def mount_options():
+    """Return the known resctrl flags at RESCTRL_MOUNT_POINT.
+
+    Returns None when resctrl is not mounted there. Returns a frozenset of
+    the known flags, possibly empty, when it is. Generic flags such as rw
+    are ignored. Raises OSError when PROC_MOUNTS cannot be read, and
+    ValueError when the matching mount line has no options field.
+    """
+    with open(PROC_MOUNTS, "r", encoding="utf-8") as mounts:
+        for line in mounts:
+            fields = line.split()
+            if (len(fields) < 3 or fields[1] != RESCTRL_MOUNT_POINT
+                    or fields[2] != RESCTRL_FS_TYPE):
+                continue
+            if len(fields) < 4:
+                raise ValueError(
+                    f"resctrl mount line in {PROC_MOUNTS} has no options: {line!r}")
+            return frozenset(
+                flag for flag in fields[3].split(",")
+                if flag in RESCTRL_MOUNT_OPTIONS)
+    return None
 
 
 @contextmanager
@@ -134,6 +164,180 @@ def managed_mount(logger, *, cleanup_errors=None):
                 logger.warning("Failed to unmount resctrl.")
                 if cleanup_errors is not None:
                     cleanup_errors.append(str(error))
+
+
+def _requested_mount_options(options):
+    """Return options as a frozenset, rejecting a bare string or unknown flags."""
+    if isinstance(options, str):
+        raise TypeError(
+            "resctrl mount options must be a sequence of flag names, not a string")
+    requested = frozenset(options)
+    unknown = requested - RESCTRL_MOUNT_OPTIONS
+    if unknown:
+        raise ValueError(
+            "Unknown resctrl mount option(s): " + ", ".join(sorted(unknown)))
+    return requested
+
+
+def _restore_previous_mount(logger, saved_options, cleanup_errors):
+    """Remount saved flags. None means resctrl was not previously mounted."""
+    if saved_options is None:
+        return True
+    option_text = ",".join(sorted(saved_options)) or "no resctrl options"
+    failure_message = f"Failed to restore resctrl mount with {option_text}."
+    command = ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE, RESCTRL_MOUNT_POINT]
+    if saved_options:
+        command.extend(["-o", option_text])
+    try:
+        glt_utils.run_command(command, failure_message)
+    except RuntimeError as error:
+        logger.warning("%s", failure_message)
+        if cleanup_errors is not None:
+            cleanup_errors.append(str(error))
+        return False
+    return True
+
+
+def _unmount_for_cleanup(logger, cleanup_errors):
+    """Unmount resctrl during rollback or exit. Return False when it fails."""
+    failure_message = "Failed to unmount resctrl."
+    try:
+        glt_utils.run_command(["umount", RESCTRL_MOUNT_POINT], failure_message)
+    except RuntimeError as error:
+        logger.warning("%s", failure_message)
+        if cleanup_errors is not None:
+            cleanup_errors.append(str(error))
+        return False
+    return True
+
+
+def _replace_mount(logger, saved_options, cleanup_errors):
+    """Remove the helper mount and restore the mount found on entry.
+
+    Return False when the unmount or the restore mount fails.
+    """
+    if not _unmount_for_cleanup(logger, cleanup_errors):
+        return False
+    return _restore_previous_mount(logger, saved_options, cleanup_errors)
+
+
+def _switch_mount(logger, requested, saved_options, cleanup_errors):
+    """Replace the current mount with requested.
+
+    Return (ready, error, owned). owned is True only when the requested
+    mount is in place and the caller must restore saved_options on exit.
+    A failed switch rolls back before returning.
+    """
+    if saved_options is not None:
+        try:
+            glt_utils.run_command(
+                ["umount", RESCTRL_MOUNT_POINT], "Failed to unmount resctrl.")
+        except RuntimeError as error:
+            logger.error("%s", error)
+            return False, str(error), False
+
+    option_text = ",".join(sorted(requested)) or "no resctrl options"
+    failure_message = f"Failed to mount resctrl with {option_text}."
+    command = ["mount", "-t", RESCTRL_FS_TYPE, RESCTRL_FS_TYPE, RESCTRL_MOUNT_POINT]
+    if requested:
+        command.extend(["-o", option_text])
+    try:
+        glt_utils.run_command(command, failure_message)
+    except RuntimeError as error:
+        logger.error("%s", error)
+        if _restore_previous_mount(logger, saved_options, cleanup_errors):
+            return False, str(error), False
+        return False, f"{error} Also failed to restore the previous resctrl mount.", False
+
+    try:
+        confirmed = mount_options()
+    except (OSError, ValueError) as error:
+        message = f"Cannot confirm resctrl mount options from {PROC_MOUNTS}: {error}"
+    else:
+        if confirmed == requested:
+            return True, None, True
+        message = (
+            f"resctrl mount options {confirmed!r} do not match "
+            f"requested {sorted(requested)!r}.")
+
+    logger.error("%s", message)
+    if not _replace_mount(logger, saved_options, cleanup_errors):
+        message += " Also failed to restore the previous resctrl mount."
+    return False, message, False
+
+
+@contextmanager
+def mount_with_options(logger, options, *, cleanup_errors=None):
+    """Yield resctrl mounted with the requested resctrl flags.
+
+    options is a sequence of known resctrl mount flags. When the mount at
+    RESCTRL_MOUNT_POINT already includes every requested flag, it is left
+    in place, including any extra resctrl flags. Otherwise a pre-existing
+    mount is unmounted, resctrl is mounted with those flags, and on exit
+    that mount is removed. Saved flags are then mounted again. A
+    filesystem that was not mounted on entry stays unmounted.
+
+    Unmounting resctrl resets every group and schemata. Restoring the
+    mount brings the previous flags back, not the previous groups.
+
+    Yields (mount_succeeded, detail). detail is None on success and the
+    setup error otherwise. Callers fail with detail when mount_succeeded
+    is False.
+
+    Setup failures yield mount_succeeded False and do not leave the
+    requested mount in place. Cleanup failures are logged. When
+    cleanup_errors is a list, the failure message is appended so a
+    decorated caller can fail after a successful body.
+    """
+    requested = _requested_mount_options(options)
+    mount_succeeded = False
+    setup_error = None
+    mounted_by_helper = False
+    saved_options = None
+    try:
+        try:
+            current = mount_options()
+        except (OSError, ValueError) as error:
+            setup_error = (
+                f"Cannot determine resctrl mount options from {PROC_MOUNTS}: {error}")
+            logger.error("%s", setup_error)
+        else:
+            if current is not None and requested <= current:
+                mount_succeeded = True
+            else:
+                saved_options = current
+                mount_succeeded, setup_error, mounted_by_helper = _switch_mount(
+                    logger, requested, saved_options, cleanup_errors)
+
+        yield mount_succeeded, setup_error
+    finally:
+        if mounted_by_helper and mount_succeeded:
+            _replace_mount(logger, saved_options, cleanup_errors)
+
+
+def parse_iommu_group_ids(text):
+    """Return the iommu group ids listed in resctrl tasks-file text.
+
+    Blank lines and pid lines are ignored. A line that starts with
+    iommu_group but not iommu_group: is malformed. Raises ValueError
+    on a malformed iommu_group line or a duplicate id.
+    """
+    prefix = "iommu_group:"
+    group_ids = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line.startswith(prefix):
+            if line.startswith("iommu_group"):
+                raise ValueError(f"Malformed iommu group line: {line!r}")
+            continue
+        id_text = line[len(prefix):]
+        if not id_text.isdecimal():
+            raise ValueError(f"Malformed iommu group line: {line!r}")
+        group_id = int(id_text)
+        if group_id in group_ids:
+            raise ValueError(f"Duplicate iommu group {group_id}")
+        group_ids.add(group_id)
+    return group_ids
 
 
 def make_mon_group(path, timeout_sec=10.0, *, logger=None):
