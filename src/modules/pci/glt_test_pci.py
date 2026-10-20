@@ -19,6 +19,7 @@ Python script to test PCI.
 
 # pylint: disable=too-many-lines
 
+import errno
 import os
 import platform
 import re
@@ -80,6 +81,7 @@ def _cleanup_aspm_saved_state_probe(module_loaded, policy_changed, original_poli
     if policy_changed:
         try:
             _write_aspm_policy(original_policy)
+            _verify_aspm_policy(original_policy)
         except OSError as e:
             logger.error(
                 "Failed to restore PCIe ASPM policy %s: %s",
@@ -199,16 +201,20 @@ def _read_aspm_policy(policy_path=ASPM_POLICY_PATH):
         return _parse_aspm_policy_content(fh.read())
 
 
-def _write_aspm_policy(policy, policy_path=ASPM_POLICY_PATH):
-    """Write the ASPM policy sysfs file."""
-    with open(policy_path, "w", encoding="utf-8") as fh:
-        fh.write(policy)
+def _verify_aspm_policy(policy, policy_path=ASPM_POLICY_PATH):
+    """Verify that the ASPM policy sysfs file reports the requested policy."""
     _, current_policy = _read_aspm_policy(policy_path)
     if current_policy != policy:
         raise OSError(
             f"PCIe ASPM policy write to {policy} did not take effect; "
             f"current policy is {current_policy or 'unknown'}."
         )
+
+
+def _write_aspm_policy(policy, policy_path=ASPM_POLICY_PATH):
+    """Write the ASPM policy sysfs file."""
+    with open(policy_path, "w", encoding="utf-8") as fh:
+        fh.write(policy)
 
 
 @GLTCore.GLTTestAttr()
@@ -672,9 +678,19 @@ def test_pci_aspm_saved_state_update(_, logger):
                     original_policy,
                     alternate_policy,
                 )
-                _write_aspm_policy(alternate_policy)
+                try:
+                    _write_aspm_policy(alternate_policy)
+                except OSError as error:
+                    if error.errno != errno.EPERM:
+                        raise
+                    GLTCore.GLTTestResult.skip(
+                        "PCIe ASPM policy write rejected with EPERM; "
+                        f"cannot exercise the saved-state update path: {error}"
+                    )
                 policy_changed = True
+                _verify_aspm_policy(alternate_policy)
                 _write_aspm_policy(original_policy)
+                _verify_aspm_policy(original_policy)
                 policy_changed = False
                 after_counts = _read_aspm_probe_hits()
 
