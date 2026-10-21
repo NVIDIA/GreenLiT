@@ -63,8 +63,8 @@ class NvDev:
 
     @staticmethod
     def get_nvidia_3d_bdf() -> str:
-        """Get device BDF of NVIDIA 3D class"""
-        lspci_output = subprocess.run(r"""lspci -d 10de::302 | cut -d' ' -f1""",
+        """Get domain-qualified BDFs of NVIDIA 3D class devices."""
+        lspci_output = subprocess.run(r"""lspci -D -d 10de::302 | cut -d' ' -f1""",
                                       capture_output=True, shell=True, text=True, check=False)
 
         return lspci_output.stdout
