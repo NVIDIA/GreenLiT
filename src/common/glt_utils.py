@@ -34,6 +34,7 @@ from typing import TypeAlias
 
 from common.kernel_cmdline import KernelCmdlineManager
 from common.nv_device import NvDev
+from scripts import check_kernel_config
 
 
 # Default location for MOK (Machine Owner Key) files used to sign
@@ -185,6 +186,26 @@ def _get_kernel_cmdline_transaction_root(session_dir):
     if session_dir is None or not str(session_dir).strip():
         return None
     return os.path.join(session_dir, "boot-config")
+
+
+def module_unload_unavailable_reason():
+    """Return why the running kernel config cannot support a temporary module."""
+    config_path = "/boot/config-" + platform.release()
+    try:
+        config = check_kernel_config.parse_kconfig(config_path)
+    except (OSError, ValueError) as error:
+        return (
+            f"Cannot verify module loading/unloading support from {config_path}: {error}; "
+            "provide a readable running-kernel configuration before loading a temporary probe"
+        )
+    required = ("CONFIG_MODULES", "CONFIG_MODULE_UNLOAD")
+    unavailable = [option + "=y" for option in required if config.get(option) != "y"]
+    if unavailable:
+        return (
+            f"Temporary kernel probes require {', '.join(unavailable)}; "
+            "use a kernel with module loading and unloading enabled"
+        )
+    return ""
 
 
 def sign_kernel_module(module_path, logger=None):

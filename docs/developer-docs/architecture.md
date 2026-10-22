@@ -14,8 +14,9 @@ greenlit/
 ├── pyproject.toml          # Project build configuration
 ├── src/                    # Test framework source code
 │   ├── bin/                # Private runtime helpers packaged as wheel data
-│   ├── common/             # Common utilities
-│   │   └── virt/           # Libvirt and direct-KVM helper APIs for tests
+│   ├── common/             # Framework and cross-subsystem APIs
+│   │   ├── tpm/            # Shared TPM ACPI and runtime helpers
+│   │   └── virt/           # Libvirt/QEMU helper APIs for tests
 │   ├── greenlit/           # Main package
 │   ├── modules/            # Test modules
 │   │   ├── acpi/           # ACPI and EFI tests
@@ -67,6 +68,8 @@ Use this table when modifying the repository. For how to run the suite on a syst
 |--------|----------|----------|
 | New in-tree test case | `src/modules/<module>/glt_test_<feature>.py` | [Test modules](#test-modules), [writing-test-cases.md](writing-test-cases.md) |
 | New test module (category) | `src/modules/<module>/` (directory name = CLI flag) | Confirm with user first; update the module list in this doc; [AGENTS.md](../../AGENTS.md) |
+| Framework or cross-subsystem helper | `src/common/` | Unit test under `tests/common/` |
+| Subsystem-specific shared helper | `src/common/<subsystem>/`, such as `tpm/` or `virt/` | Unit test under `tests/common/<subsystem>/` |
 | Private subprocess helper used by native tests | `src/bin/` (packaged under `greenlit/_runtime/bin/`) | `install.sh` copies the installed payload to `/usr/share/greenlit/bin/`; invoke helpers by path, not as CLIs or external tests |
 | Shared helper used by tests | `src/common/` or `src/common/virt/` for virtualization | Unit test under `tests/common/` |
 | CLI, discovery, or scheduling | `src/greenlit/greenlit.py`, `src/common/glt_core.py` | — |
@@ -74,6 +77,11 @@ Use this table when modifying the repository. For how to run the suite on a syst
 | Per-test skip or config YAML | `confs/glt-confs.d/` (installed to `/usr/share/greenlit/confs.d/`) | [configuration.md](../user-guides/configuration.md) |
 | Hardware manifest | `confs/hardware-manifest.json` | — |
 | Framework unit test | `tests/` (typically `tests/common/` for helpers or `tests/modules/` for module test logic) | [development-setup.md](development-setup.md), [AGENTS.md](../../AGENTS.md) |
+
+Keep new subsystem-specific helpers together in `src/common/<subsystem>/`;
+reserve the `src/common/` root for GreenLiT framework and cross-subsystem APIs.
+For example, `src/common/tpm/acpi.py` parses TPM ACPI identity, while
+`src/common/tpm/runtime.py` handles TPM driver binding and capability responses.
 
 Unit tests under `tests/modules/` validate module test logic with mocks. They do not define
 new GreenLiT runtime test categories; runtime categories remain under `src/modules/`.
