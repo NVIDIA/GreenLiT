@@ -8,6 +8,7 @@ import signal
 from tests.test_base import GLTTestBase
 from src.common import glt_utils as glt_utils_module
 from src.common.glt_utils import (
+    _find_kexec_boot_files,  # pylint: disable=protected-access
     _load_kernel_for_kexec,  # pylint: disable=protected-access
     append_kernel_parameter,
     arm_for_reset,
@@ -1264,6 +1265,92 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             extracted_paths[0],
         )
         self.assertFalse(os.path.exists(extracted_paths[0]))
+
+    def _find_kexec_boot_files_in(self, files):
+        """Run _find_kexec_boot_files() against a fake /boot listing."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.glob.glob", return_value=files
+        ):
+            return _find_kexec_boot_files("6.12.0-160100.1-default")
+
+    def test_find_kexec_boot_files_accepts_image(self):
+        """arm64 kernels can be installed as Image-<release>."""
+        kernel, initrd = self._find_kexec_boot_files_in(
+            [
+                "/boot/config-6.12.0-160100.1-default",
+                "/boot/Image-6.12.0-160100.1-default",
+                "/boot/initrd-6.12.0-160100.1-default",
+                "/boot/symvers-6.12.0-160100.1-default.gz",
+                "/boot/sysctl.conf-6.12.0-160100.1-default",
+                "/boot/System.map-6.12.0-160100.1-default",
+                "/boot/vmlinux-6.12.0-160100.1-default.gz",
+            ]
+        )
+
+        self.assertEqual(kernel, "/boot/Image-6.12.0-160100.1-default")
+        self.assertEqual(initrd, "/boot/initrd-6.12.0-160100.1-default")
+
+    def test_find_kexec_boot_files_prefers_vmlinuz_over_image(self):
+        """vmlinuz keeps priority when both names are present."""
+        kernel, _ = self._find_kexec_boot_files_in(
+            [
+                "/boot/Image-6.12.0-160100.1-default",
+                "/boot/vmlinuz-6.12.0-160100.1-default",
+                "/boot/initrd-6.12.0-160100.1-default",
+            ]
+        )
+
+        self.assertEqual(kernel, "/boot/vmlinuz-6.12.0-160100.1-default")
+
+    def test_reboot_with_kexec_loads_image(self):
+        """An Image-<release> kernel reaches the kexec loader."""
+        files = [
+            "/boot/initrd-test-kernel",
+            "/boot/Image-test-kernel",
+        ]
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.platform.release",
+            return_value="test-kernel",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.glob.glob", return_value=files
+        ), GLTTestBase.unittest.mock.patch(
+            "builtins.open",
+            GLTTestBase.unittest.mock.mock_open(
+                read_data="BOOT_IMAGE=/boot/Image-test-kernel root=test"
+            ),
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils._load_kernel_for_kexec",
+            return_value=(False, "stop here"),
+        ) as mock_loader:
+            loaded, reason = reboot_with_kexec("test_case", self.mock_sd)
+
+        self.assertFalse(loaded)
+        self.assertEqual(reason, "stop here")
+        mock_loader.assert_called_once()
+        self.assertEqual(
+            mock_loader.call_args.args[:2],
+            ("/boot/Image-test-kernel", "/boot/initrd-test-kernel"),
+        )
+
+    def test_reboot_with_kexec_reports_missing_kernel_image(self):
+        """The error names both accepted kernel image names."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available", return_value=True
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.platform.release",
+            return_value="test-kernel",
+        ), GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.glob.glob",
+            return_value=["/boot/initrd-test-kernel"],
+        ):
+            loaded, reason = reboot_with_kexec("test_case", self.mock_sd)
+
+        self.assertFalse(loaded)
+        self.assertEqual(
+            reason, "No matching vmlinuz or Image in /boot for current kernel"
+        )
 
     def test_reboot_with_kexec_stops_when_kernel_load_fails(self):
         """A load failure is returned without triggering a kexec reboot."""

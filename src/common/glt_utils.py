@@ -1080,6 +1080,33 @@ def _kexec_failure_after_load(reason: str) -> tuple[bool, str]:
     return False, reason
 
 
+def _find_kexec_boot_files(kernel_version: str) -> tuple[str | None, str | None]:
+    """Find the running kernel's image and initrd in /boot. Some distributions
+    install the kernel as ``vmlinuz-<release>``, while others use `Image-<release>``
+    (e.g. SUSE on arm64). The ``vmlinuz``` variant is preferred when both are
+    present.
+
+    Returns:
+        (kernel image path, initrd path); either is None if not found.
+    """
+    initrd_path = None
+    vmlinuz_path = None
+    image_path = None
+
+    for file in glob.glob(f"/boot/*{kernel_version}*"):
+        if "kdump" in file or "rescue" in file:
+            continue
+        name = os.path.basename(file)
+        if initrd_path is None and ("initramfs" in file or "initrd" in file):
+            initrd_path = file
+        elif vmlinuz_path is None and "vmlinuz" in file:
+            vmlinuz_path = file
+        elif image_path is None and name.startswith("Image-"):
+            image_path = file
+
+    return vmlinuz_path or image_path, initrd_path
+
+
 # pylint: disable=too-many-return-statements,too-many-branches
 def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | None]:
     """
@@ -1105,22 +1132,12 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
 
     kernel_loaded = False
     try:
-        kernel_version = platform.release()
-        initrd_path = None
-        vmlinuz_path = None
-
-        for file in glob.glob(f"/boot/*{kernel_version}*"):
-            if "kdump" in file or "rescue" in file:
-                continue
-            if initrd_path is None and ("initramfs" in file or "initrd" in file):
-                initrd_path = file
-            elif vmlinuz_path is None and "vmlinuz" in file:
-                vmlinuz_path = file
+        kernel_path, initrd_path = _find_kexec_boot_files(platform.release())
 
         if not initrd_path:
             return (False, "No matching initrd/initramfs in /boot for current kernel")
-        if not vmlinuz_path:
-            return (False, "No matching vmlinuz in /boot for current kernel")
+        if not kernel_path:
+            return (False, "No matching vmlinuz/Image in /boot for current kernel")
 
         try:
             with open("/proc/cmdline", "r", encoding="utf-8") as f:
@@ -1133,7 +1150,7 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
         )
 
         loaded, reason = _load_kernel_for_kexec(
-            vmlinuz_path,
+            kernel_path,
             initrd_path,
             kexec_cmdline,
         )
