@@ -1,6 +1,16 @@
 [build-system]
-requires = ["poetry-core>=1.9.0"]
+requires = ["poetry-core>=2.2.0"]
 build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "greenlit"
+requires-python = ">=3.10"
+license = "Apache-2.0 AND GPL-2.0-only"
+license-files = ["LICENSE", "LICENSES/GPL-2.0-only.txt"]
+dynamic = [
+    "version", "description", "readme",
+    "authors", "dependencies", "scripts",
+]
 
 [tool.poetry]
 name = "greenlit"
@@ -8,7 +18,6 @@ version = "3.1.1"
 description = "Automates Base OS testing with scripts and patches"
 readme = "docs/user-guides/user-manual.md"
 authors = ["NVIDIA GreenLiT"]
-license = "Apache-2.0"
 packages = [
     {include = "greenlit", from = "src"},
     {include = "common", from = "src"},
