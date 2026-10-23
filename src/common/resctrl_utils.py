@@ -21,8 +21,10 @@ test-owned mount. They return facts or raise OSError/ValueError; the
 calling test decides whether a condition is a skip or a failure.
 """
 
+from collections.abc import Collection, Generator, Iterable
 from contextlib import contextmanager
 import errno
+import logging
 import os
 import re
 import time
@@ -56,7 +58,7 @@ def fs_supported() -> bool:
                    for line in f if line.strip())
 
 
-def mount_points():
+def mount_points() -> list[str]:
     """Return every mount point currently using the resctrl filesystem."""
     with open(PROC_MOUNTS, "r", encoding="utf-8") as f:
         return [
@@ -74,7 +76,7 @@ def is_mounted() -> bool:
     return RESCTRL_MOUNT_POINT in mount_points()
 
 
-def mount_options():
+def mount_options() -> frozenset[str] | None:
     """Return the known resctrl flags at RESCTRL_MOUNT_POINT.
 
     Returns None when resctrl is not mounted there. Returns a frozenset of
@@ -98,7 +100,9 @@ def mount_options():
 
 
 @contextmanager
-def managed_mount(logger, *, cleanup_errors=None):
+def managed_mount(
+    logger: logging.Logger, *, cleanup_errors: list[str] | None = None,
+) -> Generator[tuple[bool, str | None], None, None]:
     """Yield resctrl mount state and clean up only a test-owned mount.
 
     Yields (mount_succeeded, missing_cli). missing_cli is the first of
@@ -267,7 +271,12 @@ def _switch_mount(logger, requested, saved_options, cleanup_errors):
 
 
 @contextmanager
-def mount_with_options(logger, options, *, cleanup_errors=None):
+def mount_with_options(
+    logger: logging.Logger,
+    options: Iterable[str],
+    *,
+    cleanup_errors: list[str] | None = None,
+) -> Generator[tuple[bool, str | None], None, None]:
     """Yield resctrl mounted with the requested resctrl flags.
 
     options is a sequence of known resctrl mount flags. When the mount at
@@ -315,7 +324,7 @@ def mount_with_options(logger, options, *, cleanup_errors=None):
             _replace_mount(logger, saved_options, cleanup_errors)
 
 
-def parse_iommu_group_ids(text):
+def parse_iommu_group_ids(text: str) -> set[int]:
     """Return the iommu group ids listed in resctrl tasks-file text.
 
     Blank lines and pid lines are ignored. A line that starts with
@@ -340,7 +349,12 @@ def parse_iommu_group_ids(text):
     return group_ids
 
 
-def make_mon_group(path, timeout_sec=10.0, *, logger=None):
+def make_mon_group(
+    path: str | os.PathLike[str],
+    timeout_sec: float = 10.0,
+    *,
+    logger: logging.Logger | None = None,
+) -> None:
     """Create a resctrl monitor group, waiting for a monitor ID if needed.
 
     resctrl parks a deleted group's monitor ID (RMID) in a limbo list and
@@ -409,7 +423,9 @@ def _parse_schemata_entries(resource, values, path, value_pattern):
     return domains
 
 
-def read_schemata(path, resources):
+def read_schemata(
+    path: str | os.PathLike[str], resources: Collection[str],
+) -> dict[str, dict[int, int]]:
     """Return {resource: {domain: value}} for the named schemata resources.
 
     Values must be decimal integers, as for the MB resources. Only lines
@@ -461,7 +477,7 @@ def mb_control_resource() -> str:
     )
 
 
-def schemata_domains(resource):
+def schemata_domains(resource: str) -> set[int] | None:
     """Return the set of domain IDs on a resource's root schemata line.
 
     Values are not interpreted, so this works for bitmask resources such
@@ -486,7 +502,9 @@ def schemata_domains(resource):
         resource, line[len(prefix):], schemata_path, r"[^;=\s]+"))
 
 
-def read_mbm_assignment_states(path, event=MBM_TOTAL_BYTES):
+def read_mbm_assignment_states(
+    path: str | os.PathLike[str], event: str = MBM_TOTAL_BYTES,
+) -> dict[int, str]:
     """Return {domain: state} for an event in a resctrl MBM assignment file.
 
     A state is "e" (assigned) or "_" (unassigned). Raises ValueError on a
@@ -525,7 +543,7 @@ def read_mbm_assignment_states(path, event=MBM_TOTAL_BYTES):
     return states
 
 
-def read_mbm_counter_counts(path):
+def read_mbm_counter_counts(path: str | os.PathLike[str]) -> dict[int, int]:
     """Return {domain: count} from an MBM counter information file."""
     content = glt_utils.read_sysfs_value(path)
     if not content:
@@ -543,7 +561,9 @@ def read_mbm_counter_counts(path):
     return counts
 
 
-def sum_l3_occupancy(occupancy_files) -> int:
+def sum_l3_occupancy(
+    occupancy_files: Iterable[str | os.PathLike[str]],
+) -> int:
     """Return total llc_occupancy summed across the given mon_L3 domains."""
     total = 0
     for occ in occupancy_files:

@@ -43,7 +43,8 @@ class NvDev:
         if os.path.exists(self.nca_dev_funcs):
             self.nca_available = True
 
-    def _modalias_parser(self, parser) -> list[str]:
+    def _modalias_parser(self, parser: str) -> list[str] | None:
+        """Return modalias strings, or None when parser is unknown."""
         # Use a dict to store mapping of parser and private function.
         parser_func_dict = {"dmi": self._dmi_modalias_parser}
         if parser in parser_func_dict:
@@ -51,7 +52,8 @@ class NvDev:
             return modalias_list
         return None
 
-    def _dmi_modalias_parser(self) -> list[str]:
+    def _dmi_modalias_parser(self) -> list[str] | None:
+        """Return DMI modalias strings, or None when the sysfs file is absent."""
         dut_dmi_modalias = "/sys/class/dmi/id/modalias"
         modalias_list = []
         if os.path.isfile(dut_dmi_modalias):
@@ -70,7 +72,7 @@ class NvDev:
         return lspci_output.stdout
 
     @staticmethod
-    def get_release_info() -> dict:
+    def get_release_info() -> dict[str, str]:
         """Get the release information follows freedesktop.org standard."""
         if hasattr(platform, "freedesktop_os_release"):
             return platform.freedesktop_os_release()
@@ -191,7 +193,9 @@ class NvDev:
         except OSError:
             return -1
 
-    def manifest_skip_func(self, category, specify_parser=None) -> bool:
+    def manifest_skip_func(
+        self, category: str, specify_parser: str | None = None,
+    ) -> bool:
         """
         Example:
         Add manifest_skip_func("tpm", "dmi") into your test case,
@@ -232,6 +236,8 @@ class NvDev:
             else:
                 parser = skip_modalias.split(":")[0]
                 modalias_list = self._modalias_parser(parser)
+                if not modalias_list:
+                    continue
 
             for old, new in replacements.items():
                 skip_modalias = skip_modalias.replace(old, new)

@@ -16,8 +16,9 @@
 """Helpers for Linux CPU topology sysfs values."""
 
 
-def parse_cpu_mask(mask_text):
+def parse_cpu_mask(mask_text: str) -> set[int]:
     """Parse a Linux CPU mask such as '0-3,8' into a set of CPU numbers."""
+    # TODO: this returns a CPU set, such as {0, 1, 2, 3, 8}, not a cpumask.
     cpus = set()
     mask_text = mask_text.strip()
     if not mask_text:

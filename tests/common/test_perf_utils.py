@@ -275,10 +275,10 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_get_perf_version_handles_missing_perf(self, mock_run):
-        """Missing perf reports no version string."""
+        """Missing perf has no version."""
         mock_run.side_effect = FileNotFoundError
 
-        self.assertEqual(get_perf_version(self.mock_logger), "")
+        self.assertIsNone(get_perf_version(self.mock_logger))
         self.mock_logger.debug.assert_called_once()
 
     def test_get_perf_kernel_version_warning_accepts_matching_versions(self):

@@ -18,6 +18,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
   - [Naming and Formatting Rules](#naming-and-formatting-rules)
   - [Using GLTTestAttr](#using-glttestattr)
   - [Leveraging GreenLiT Utilities](#leveraging-greenlit-utilities)
+  - [Function type contract](#function-type-contract)
   - [Running CLI Commands with `run_command`](#running-cli-commands-with-run_command)
   - [Using GLTLibvirt for Virtualization Tests](#using-gltlibvirt-for-virtualization-tests)
   - [Test Results: FAILED, SKIPPED, or WARNING](#test-results-failed-skipped-or-warning)
@@ -308,6 +309,34 @@ Apply the same rule to helper code and adapters. Before adding a local wrapper,
 launcher, parser, or setup helper inside a test file, check `src/common/` and
 nearby module utilities first. Keep helper logic local only when it is specific
 to that one test and unlikely to be reused.
+
+### Function type contract
+
+Every function and method in `src/common` declares parameter and return types.
+Python 3.10 is the minimum, so write absence as `T | None`. A helper used by
+more than one test belongs in `src/common` and follows the same rule.
+
+Use one meaning per channel:
+
+- A missing fact is `T | None`. `None` is the only "no answer." Do not also
+  return `""` or `0` for that same meaning. When the return is `T | None`, the
+  docstring says what `None` means.
+- No items is an empty `list`, `set`, or `frozenset`, not `None`.
+- Failure is an exception (`OSError`, `ValueError`, or `RuntimeError`) or an
+  existing result object such as `tuple[bool, str]` or `KernelParameterResult`.
+  `0` is a real number, not a missing value: equal versions, a process
+  status, and `GLTExtShellExitCode.PASS`. External tests use exit code `0`
+  for PASS. See [Exit Codes](#exit-codes).
+- Do not annotate a value as `Any`. `Any` disables checking, so an agent
+  cannot see which operations are valid. Name the value instead: `list[str]`,
+  `dict[str, str]`, `str | None`, a `TypedDict`, or a `Protocol`.
+
+`ruff` rule `ANN201` requires a return type on every public function in
+`src/common`. `ANN401` rejects `Any` anywhere in that directory.
+`ty` checks that the annotations match the bodies and the calls inside
+`src/common`. After that directory is clean, run `ty check` on a module file
+you are editing so a wrong argument fails before the test runs on a device.
+See [Running Local Checks](development-setup.md#running-local-checks).
 
 ### Running CLI Commands with `run_command`
 

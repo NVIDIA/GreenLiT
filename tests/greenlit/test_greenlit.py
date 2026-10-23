@@ -11,6 +11,7 @@ from unittest import mock
 
 from tests.test_base import GLTTestBase
 from src.common import glt_core as GLTCore
+from src.common.glt_conf import GLTConfTestConditions
 from src.greenlit import greenlit
 
 
@@ -189,18 +190,18 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         scheduler.test_categories = ["arm64", "hwtracing"]
         yaml_data = [
             {
-                "hwtracing:test_unrelated": {
+                "hwtracing:test_unrelated": GLTConfTestConditions.model_validate({
                     "conditional-skip": [{
                         "condition": {"name": "skip unrelated", "script": "true"}
                     }]
-                },
+                }),
             },
             {
-                "hwtracing:test_prereq": {
+                "hwtracing:test_prereq": GLTConfTestConditions.model_validate({
                     "conditional-skip": [{
                         "condition": {"name": "skip prereq", "script": "true"}
                     }]
-                },
+                }),
             },
         ]
 
@@ -227,18 +228,18 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         scheduler.sort()
         yaml_data = [
             {
-                "hwtracing:test_prereq": {
+                "hwtracing:test_prereq": GLTConfTestConditions.model_validate({
                     "conditional-skip": [{
                         "condition": {"name": "old skip", "script": "true"}
                     }]
-                },
+                }),
             },
             {
-                "hwtracing:test_prereq": {
+                "hwtracing:test_prereq": GLTConfTestConditions.model_validate({
                     "allow-failure": [{
                         "condition": {"name": "new allow", "script": "true"}
                     }]
-                },
+                }),
             },
         ]
 

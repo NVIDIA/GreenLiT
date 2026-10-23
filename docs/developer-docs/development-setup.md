@@ -34,7 +34,7 @@ change, so running it locally closely reproduces CI.
 One-time setup:
 
 ```bash
-python3 -m venv gltenv && source gltenv/bin/activate && pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org . pylint pytest pytest-cov
+python3 -m venv gltenv && source gltenv/bin/activate && pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org . pylint pytest pytest-cov ruff ty
 ```
 
 The `--trusted-host` flags disable certificate verification for those hosts,
@@ -73,14 +73,19 @@ See [the result-call contract](writing-test-cases.md#result-call-contract-glt001
 for its scope and limitations.
 
 Run these before creating a commit or MR. Skip any check whose tool isn't
-installed, except the mandatory contract check above. `shellcheck` and `jq` are system tools; `pylint` and `pytest` come
+installed, except the mandatory contract check above. `shellcheck` and `jq` are system tools; `pylint`, `ruff`, `ty`, and `pytest` come
 from the `gltenv` venv set up above. [AGENTS.md](../../AGENTS.md) points here
-for the canonical local-check commands.
+for the canonical local-check commands. `ruff` and `ty` enforce the
+[function type contract](writing-test-cases.md#function-type-contract) on
+`src/common`. `ty check path/to/module.py` also checks a file outside
+`src/common` against those typed helpers.
 
 | Tool | Command |
 |------|---------|
 | Contract check | `python3 tools/check_glt_contracts.py` |
 | Python lint | `source gltenv/bin/activate && find . -not -path "./gltenv/*" -name "*.py" -print0 \| xargs -0 pylint --init-hook="import sys; sys.path.extend(['src', '.'])"` |
+| Annotation check | `source gltenv/bin/activate && ruff check src/common` |
+| Type check | `source gltenv/bin/activate && ty check` |
 | Shell lint | `find . -name "*.sh" -print0 \| xargs -0 shellcheck` |
 | JSON validation | `find . -name "*.json" -print0 \| xargs -0 jq -r . > /dev/null` |
 | Unit tests | `source gltenv/bin/activate && python -m pytest tests/ -v --cov=src --cov-report=term-missing` |

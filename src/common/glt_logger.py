@@ -28,7 +28,7 @@ LOGGING_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 LOGGING_LEVEL = logging.INFO
 
 
-def is_piped():
+def is_piped() -> bool:
     """Check if stderr is being piped or redirected"""
     return not sys.stderr.isatty()
 
@@ -36,7 +36,7 @@ def is_piped():
 class GltFormatter(logging.Formatter):
     """Custom formatter to change the logger name format."""
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         original_name = record.name
         if ':' in original_name:
             prefix, test_name = original_name.split(':', 1)
@@ -63,7 +63,7 @@ class ColorFormatter(GltFormatter):
     }
     RESET = "\033[0m"
 
-    def format(self, record):
+    def format(self, record: logging.LogRecord) -> str:
         base_message = super().format(record)
         # Color the level name
         level_name = record.levelname
@@ -85,13 +85,13 @@ class ColorFormatter(GltFormatter):
         return base_message
 
 
-def get_logger_dir(session, module_name) -> str:
+def get_logger_dir(session: str | os.PathLike[str], module_name: str) -> str:
     """Return the logger directory path"""
     log_path = os.path.join(session, module_name)
     return log_path
 
 
-def get_logger(session, module_name) -> logging.Logger:
+def get_logger(session: str | os.PathLike[str], module_name: str) -> logging.Logger:
     """Return a logger for different purpose"""
     logger = logging.getLogger(module_name)
 
@@ -129,7 +129,7 @@ def get_logger(session, module_name) -> logging.Logger:
     return logger
 
 
-def verbose(logger):
+def verbose(logger: logging.Logger) -> None:
     """Set verbose logger"""
     logger.setLevel(logging.DEBUG)
     for h in logger.handlers:

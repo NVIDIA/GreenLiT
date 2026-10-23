@@ -56,6 +56,7 @@ include = [
 python = ">=3.10"
 pyyaml = "^6.0.1"
 packaging = "^25.0"
+pydantic = "^2.11"
 
 [tool.poetry.scripts]
 glt-test-suite = "greenlit.greenlit:main"
@@ -65,3 +66,26 @@ optional = true
 
 [tool.poetry.group.dev.dependencies]
 pylint = "^2.15"
+ruff = "^0.14"
+ty = "0.0.95"
+
+[tool.ruff]
+line-length = 120
+src = ["src"]
+
+[tool.ruff.lint]
+select = ["ANN201", "ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/modules/**" = ["ANN201", "ANN401"]
+"src/greenlit/**" = ["ANN201", "ANN401"]
+"src/scripts/**" = ["ANN201", "ANN401"]
+"src/bin/**" = ["ANN201", "ANN401"]
+"tests/**" = ["ANN201", "ANN401"]
+
+[tool.ty.environment]
+python-version = "3.10"
+root = ["./src"]
+
+[tool.ty.src]
+include = ["src/common"]

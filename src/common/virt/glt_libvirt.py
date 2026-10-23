@@ -15,21 +15,37 @@
 
 """Libvirt helper for GreenLiT tests."""
 
+import logging
 import os
 import shlex
 import subprocess
 import tempfile
-from typing import Optional, Sequence, Tuple, Union
+from typing import Sequence, Tuple, TypedDict, Union
 import xml.etree.ElementTree as ET
 
 
 VirshCommand = Union[str, Sequence[str]]
 
 
+class DomainXmlConfig(TypedDict, total=False):
+    """Direct-boot domain settings accepted by generate_domain_xml."""
+
+    domain_name: str
+    memory_mb: int
+    vcpus: int
+    arch: str
+    kernel_path: str
+    initrd_path: str
+    kernel_args: str
+    machine_type: str
+    emulator: str
+    enable_acpi: bool
+
+
 class GLTLibvirt:
     """Small virsh wrapper for tests that need local libvirt domains."""
 
-    def __init__(self, logger, uri: str = "qemu:///system"):
+    def __init__(self, logger: logging.Logger, uri: str = "qemu:///system") -> None:
         if logger is None:
             raise ValueError("Logger is required")
 
@@ -49,7 +65,7 @@ class GLTLibvirt:
     def run_virsh_command(
         self,
         command: VirshCommand,
-        xml_file: Optional[str] = None,
+        xml_file: str | None = None,
         timeout: int = 60,
     ) -> Tuple[bool, str, int]:
         """Run a virsh command and return success, output, and return code."""
@@ -157,7 +173,7 @@ class GLTLibvirt:
         return success
 
     @staticmethod
-    def generate_domain_xml(config: dict) -> str:
+    def generate_domain_xml(config: DomainXmlConfig) -> str:
         """Generate a small direct-boot domain XML document."""
         domain_name = config.get("domain_name")
         if not domain_name:
