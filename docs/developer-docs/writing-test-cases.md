@@ -7,6 +7,7 @@ This guide explains how to write effective test cases for the GreenLiT test fram
 - [Introduction & Objectives](#introduction--objectives)
 - [Prerequisites](#prerequisites)
 - [Do We Need a New Test Case?](#do-we-need-a-new-test-case)
+- [Runtime Contract for Hardware Tests](#runtime-contract-for-hardware-tests)
 - [Choosing the Implementation Path](#choosing-the-implementation-path)
   - [When Starting from an Existing Script](#when-starting-from-an-existing-script)
 - [Unit Tests](#unit-tests)
@@ -68,6 +69,27 @@ Before creating a new test case, check if existing test cases cover what you'd l
 - Upstream kselftests that are included in test cycles
 
 There will be no need to create a duplicated test case if either of the above two already covers what you'd like to check.
+
+## Runtime Contract for Hardware Tests
+
+A hardware test must observe the kernel, firmware, or userspace implementation
+running on the DUT. Inspect patches and source while designing the test; the
+kernel implementation source is not a runtime oracle and a full kernel source
+tree must not be a required DUT dependency. Source comparisons, source hashes,
+and results from a separately compiled replacement kernel do not establish the
+behavior of the installed kernel.
+
+Use a concrete runtime stimulus and an observable result. A probe may be built
+against matching installed kernel headers, but its result must come from the
+running kernel. It must not copy the implementation under test or replace its
+production state or transport with a scripted implementation.
+
+If the available interfaces, hardware, or firmware cannot safely trigger and
+observe the required behavior, report the coverage gap and its missing
+prerequisites before implementing an alternative. Do not count source checks,
+mocked guest results, or an unexercised API as runtime coverage. An explicitly
+scoped passive diagnostic may report historical failure observations, but does
+not close an active behavioral coverage gap.
 
 ## Choosing the Implementation Path
 

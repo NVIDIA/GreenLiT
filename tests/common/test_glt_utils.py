@@ -57,6 +57,53 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
             getattr(glt_utils_module, "KernelLogCheckpoint", None)
         )
 
+    def test_module_unload_unavailable_reason_accepts_enabled_config(self):
+        """Both module-loading and unloading booleans must be enabled."""
+        with GLTTestBase.unittest.mock.patch.object(
+            glt_utils_module.platform, "release", return_value="probe-kernel"
+        ), GLTTestBase.unittest.mock.patch.object(
+            glt_utils_module.check_kernel_config, "parse_kconfig",
+            return_value={"CONFIG_MODULES": "y", "CONFIG_MODULE_UNLOAD": "y"},
+        ) as config_reader:
+            self.assertEqual(glt_utils_module.module_unload_unavailable_reason(), "")
+
+        config_reader.assert_called_once_with("/boot/config-probe-kernel")
+
+    def test_module_unload_unavailable_reason_rejects_disabled_or_invalid_config(self):
+        """Missing, disabled and invalid booleans cannot authorize a temporary probe."""
+        for option in ("CONFIG_MODULES", "CONFIG_MODULE_UNLOAD"):
+            for value in ("n", "m", None, "invalid", True):
+                config = {"CONFIG_MODULES": "y", "CONFIG_MODULE_UNLOAD": "y"}
+                if value is None:
+                    del config[option]
+                else:
+                    config[option] = value
+                with self.subTest(option=option, value=value), GLTTestBase.unittest.mock.patch.object(
+                    glt_utils_module.check_kernel_config, "parse_kconfig", return_value=config,
+                ):
+                    reason = glt_utils_module.module_unload_unavailable_reason()
+
+                self.assertIn(option + "=y", reason)
+                self.assertIn("use a kernel with module loading and unloading enabled", reason)
+
+    def test_module_unload_unavailable_reason_reports_config_read_errors(self):
+        """An unavailable or invalid config leaves unload support unverified."""
+        errors = (
+            FileNotFoundError("missing config"), PermissionError("unreadable config"),
+            OSError("config read failed"), ValueError("invalid config"),
+        )
+        for error in errors:
+            with self.subTest(error=error), GLTTestBase.unittest.mock.patch.object(
+                glt_utils_module.platform, "release", return_value="probe-kernel"
+            ), GLTTestBase.unittest.mock.patch.object(
+                glt_utils_module.check_kernel_config, "parse_kconfig", side_effect=error,
+            ):
+                reason = glt_utils_module.module_unload_unavailable_reason()
+
+            self.assertIn("/boot/config-probe-kernel", reason)
+            self.assertIn(str(error), reason)
+            self.assertIn("provide a readable running-kernel configuration", reason)
+
     def test_parse_journal_boots_normalizes_exact_boot_ids(self):
         """Parse retained indexes and normalize exact boot IDs."""
         boots = glt_utils_module._parse_journal_boots(  # pylint: disable=protected-access
