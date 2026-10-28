@@ -43,15 +43,15 @@ class NvDev:
         if os.path.exists(self.nca_dev_funcs):
             self.nca_available = True
 
-    def __modalias_parser(self, parser) -> list[str]:
+    def _modalias_parser(self, parser) -> list[str]:
         # Use a dict to store mapping of parser and private function.
-        parser_func_dict = {"dmi": self.__dmi_modalias_parser}
+        parser_func_dict = {"dmi": self._dmi_modalias_parser}
         if parser in parser_func_dict:
             modalias_list = parser_func_dict[parser]()
             return modalias_list
         return None
 
-    def __dmi_modalias_parser(self) -> list[str]:
+    def _dmi_modalias_parser(self) -> list[str]:
         dut_dmi_modalias = "/sys/class/dmi/id/modalias"
         modalias_list = []
         if os.path.isfile(dut_dmi_modalias):
@@ -221,7 +221,7 @@ class NvDev:
             return False
 
         if specify_parser:
-            modalias_list = self.__modalias_parser(specify_parser)
+            modalias_list = self._modalias_parser(specify_parser)
             if not modalias_list:
                 return False
 
@@ -231,7 +231,7 @@ class NvDev:
                     continue
             else:
                 parser = skip_modalias.split(":")[0]
-                modalias_list = self.__modalias_parser(parser)
+                modalias_list = self._modalias_parser(parser)
 
             for old, new in replacements.items():
                 skip_modalias = skip_modalias.replace(old, new)

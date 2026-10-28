@@ -226,7 +226,7 @@ class TestNvDevice(GLTTestBase):
         with GLTTestBase.unittest.mock.patch(
             "os.path.isfile", return_value=True
         ), GLTTestBase.unittest.mock.patch(
-            "src.common.nv_device.NvDev._NvDev__dmi_modalias_parser",
+            "src.common.nv_device.NvDev._dmi_modalias_parser",
             return_value=[self.sample_dmi_modalias],
         ), GLTTestBase.unittest.mock.patch(
             "builtins.open", mock_open()
@@ -245,7 +245,7 @@ class TestNvDevice(GLTTestBase):
         with GLTTestBase.unittest.mock.patch(
             "os.path.isfile", return_value=True
         ), GLTTestBase.unittest.mock.patch(
-            "src.common.nv_device.NvDev._NvDev__dmi_modalias_parser",
+            "src.common.nv_device.NvDev._dmi_modalias_parser",
             return_value=[different_modalias],
         ), GLTTestBase.unittest.mock.patch(
             "builtins.open", mock_open()
@@ -283,7 +283,7 @@ class TestNvDevice(GLTTestBase):
             "json.load", return_value=self.sample_hw_manifest
         ), GLTTestBase.unittest.mock.patch.object(
             nv_dev,
-            "_NvDev__modalias_parser",
+            "_modalias_parser",
             return_value=[self.sample_dmi_modalias],
         ), GLTTestBase.unittest.mock.patch(
             "re.match", side_effect=mock_re_match
