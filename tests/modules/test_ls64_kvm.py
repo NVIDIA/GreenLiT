@@ -39,9 +39,6 @@ class TestVeraLs64UserspaceAbi(GLTTestBase):
     def test_vera_ls64_userspace_abi_has_no_broad_kselftest_dependency(self):
         """The LS64 gate is not blocked by unrelated broad KVM selftest setup."""
         test_func = ls64_kvm.test_vera_ls64_userspace_abi
-        while hasattr(test_func, "__wrapped__"):
-            self.assertFalse(hasattr(test_func, "requires"))
-            test_func = test_func.__wrapped__
         self.assertFalse(hasattr(test_func, "requires"))
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_ls64_kvm.NvDev")
@@ -116,7 +113,7 @@ class TestLs64NativeMetadata(GLTTestBase):
                 )
                 self.assertIn(
                     "arm64:test_vera_ls64_userspace_abi",
-                    test_case.__wrapped__.requires.all_true,
+                    test_case.attr.requires.all_true,
                 )
 
 

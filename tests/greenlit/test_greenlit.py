@@ -13,7 +13,7 @@ import tempfile
 from unittest import mock
 
 from tests.test_base import GLTTestBase
-from src.common import glt_core as GLTCore
+from common import glt_core as GLTCore
 from src.common.glt_conf import GLTConfTestConditions
 from src.greenlit import greenlit
 
@@ -217,7 +217,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
             greenlit.apply_glt_configs(scheduler, self.mock_logger)
 
         self.assertEqual(
-            len(test_prereq.__wrapped__.attr.conditional_skip.any_true), 1)
+            len(test_prereq.attr.conditional_skip.any_true), 1)
 
     def test_apply_glt_configs_later_yaml_overwrites_test_definition(self):
         """Later YAML files replace earlier definitions for the same test."""
@@ -255,9 +255,43 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
             greenlit.apply_glt_configs(scheduler, self.mock_logger)
 
         self.assertEqual(
-            len(test_prereq.__wrapped__.attr.conditional_skip.any_true), 0)
+            len(test_prereq.attr.conditional_skip.any_true), 0)
         self.assertEqual(
-            len(test_prereq.__wrapped__.attr.allow_failure.any_true), 1)
+            len(test_prereq.attr.allow_failure.any_true), 1)
+
+    def test_allow_failure_uses_metadata_record(self):
+        """A matching allow-failure rule changes FAIL to Allowed FAILURE."""
+
+        def _run(predicate, expected, reason_text):
+            core = greenlit.GLTCore
+
+            @core.GLTTestAttr(cat="hwtracing", name="test_allowed")
+            @core.GLTPlan(core.GLTPlanType.STANDARD.value)
+            def test_allowed(_scheduler, _logger):
+                core.GLTTestResult.fail("boom", func=test_allowed)
+
+            def allow_rule():
+                return predicate
+
+            allow_rule.desc = "configured allow"
+            test_allowed.attr.allow_failure.any_true.append(allow_rule)
+
+            with tempfile.TemporaryDirectory() as log_dir:
+                scheduler = GLTCore.GLTScheduler([test_allowed], logdir=log_dir)
+                scheduler.sort()
+                scheduler.test_categories = ["hwtracing"]
+                scheduler.test_tags = {GLTCore.GLTPlanType.STANDARD.value}
+                with mock.patch.object(
+                        greenlit.glt_utils, "collect_logs", return_value=(True, "")), \
+                        mock.patch.object(greenlit, "show_report"):
+                    greenlit.perform_tests(self.mock_logger, scheduler)
+
+            self.assertEqual(test_allowed.attr.result[0], expected)
+            self.assertIn(reason_text, test_allowed.attr.result[1])
+
+        core = greenlit.GLTCore
+        _run(True, core.GLTTestResult.AFAIL, "configured allow")
+        _run(False, core.GLTTestResult.FAIL, "boom")
 
     def test_validate_test_case_args_rejects_list(self):
         """--list cannot be combined with parsed --test-case selectors."""
@@ -420,7 +454,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(
-            [f"{obj.__wrapped__.attr.category}:{obj.__wrapped__.attr.name}"
+            [f"{obj.attr.category}:{obj.attr.name}"
              for obj in test_objs],
             ["pci:test_standard"])
 
@@ -462,7 +496,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(
-            [f"{obj.__wrapped__.attr.category}:{obj.__wrapped__.attr.name}"
+            [f"{obj.attr.category}:{obj.attr.name}"
              for obj in test_objs],
             ["cxl:test_standard"])
 
@@ -531,7 +565,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(
-            [f"{obj.__wrapped__.attr.category}:{obj.__wrapped__.attr.name}"
+            [f"{obj.attr.category}:{obj.attr.name}"
              for obj in test_objs],
             ["arm64:test_main", "hwtracing:test_prereq"])
 
@@ -569,7 +603,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(
-            [f"{obj.__wrapped__.attr.category}:{obj.__wrapped__.attr.name}"
+            [f"{obj.attr.category}:{obj.attr.name}"
              for obj in test_objs],
             ["arm64:test_selected", "hwtracing:test_prereq"])
 
@@ -608,7 +642,7 @@ class TestGreenlitHelpers(GLTTestBase):  # pylint: disable=too-many-public-metho
         self.assertEqual(error, "")
         self.assertEqual(exit_code, 0)
         self.assertEqual(
-            [f"{obj.__wrapped__.attr.category}:{obj.__wrapped__.attr.name}"
+            [f"{obj.attr.category}:{obj.attr.name}"
              for obj in test_objs],
             ["arm64:test_main", "hwtracing:test_prereq"])
 

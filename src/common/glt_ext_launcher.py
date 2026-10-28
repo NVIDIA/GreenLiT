@@ -42,9 +42,7 @@ def _generate_test_func(
     exe_path: str | os.PathLike[str], relative_name: str,
 ) -> Callable[[GLTCore.GLTScheduler, logging.Logger], None]:
     def test_func(sd: GLTCore.GLTScheduler, logger: logging.Logger) -> None:
-        attr = getattr(test_func, "attr", None)
-        if not isinstance(attr, GLTCore.GLTTestAttr):
-            raise AttributeError("external test has no GLTTestAttr")
+        attr = GLTCore.get_test_attr(test_func)
         # TODO: make GLTScheduler.log_dir a plain str, then drop these None checks.
         # relative_name is checked only to stay consistent with the log_dir check.
         if sd.log_dir is None:

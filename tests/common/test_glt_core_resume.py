@@ -132,7 +132,7 @@ class TestGLTSchedulerResume(GLTTestBase):
         self.assertEqual(scheduler.test_categories, ["current"])
         self.assertEqual(scheduler.test_list, [external_test])
         self.assertEqual(
-            external_test.__wrapped__.attr.result,
+            external_test.attr.result,
             (GLTTestResult.NA, ""))
 
     def test_progress_read_reports_missing_result_reason(self):
@@ -172,7 +172,7 @@ class TestGLTSchedulerResume(GLTTestBase):
         self.assertEqual(scheduler.test_tags, {GLTPlanType.STANDARD.value})
         self.assertEqual(scheduler.test_categories, ["current"])
         self.assertEqual(
-            external_test.__wrapped__.attr.result,
+            external_test.attr.result,
             (GLTTestResult.NA, ""))
 
     def test_progress_read_reports_unknown_result_value(self):
@@ -213,7 +213,7 @@ class TestGLTSchedulerResume(GLTTestBase):
         self.assertEqual(scheduler.test_tags, {GLTPlanType.STANDARD.value})
         self.assertEqual(scheduler.test_categories, ["current"])
         self.assertEqual(
-            external_test.__wrapped__.attr.result,
+            external_test.attr.result,
             (GLTTestResult.NA, ""))
 
     def test_progress_read_reports_missing_progress_file(self):
@@ -287,7 +287,7 @@ class TestGLTSchedulerResume(GLTTestBase):
         self.assertEqual(progress_error, "")
         self.assertEqual(scheduler.test_list, [external_test])
         self.assertEqual(
-            external_test.__wrapped__.attr.result,
+            external_test.attr.result,
             (GLTTestResult.PASS, "completed"))
 
     def test_progress_read_without_session_path_uses_shared_progress_reader(self):

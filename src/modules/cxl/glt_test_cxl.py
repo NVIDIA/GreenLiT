@@ -269,7 +269,7 @@ def test_cxl_link_disable_led_error(sd, logger):
 
     # Stash cleanup state BEFORE the first PCO write so any subsequent
     # skip path (postskip hook) restores the register.
-    test_cxl_link_disable_led_error.attr.cleanup_state = {
+    GLTCore.get_test_attr(test_cxl_link_disable_led_error).cleanup_state = {
         "rp_bdf": rp_bdf,
         "orig_pc": orig_pc,
         "pco_offset": pco_offset,
@@ -322,7 +322,7 @@ def test_cxl_link_disable_led_error(sd, logger):
         )
 
 
-test_cxl_link_disable_led_error.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_cxl_link_disable_led_error).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_post_restore_link,
     postskip=_post_restore_link,
     postfail=_restore_or_reboot_hook,
@@ -640,7 +640,7 @@ def test_cxl_save_restore_across_cxl_bus_reset(sd, logger):
         )
     logger.info("Original reset_method on %s: %r", bdf, orig_reset_method)
 
-    test_cxl_save_restore_across_cxl_bus_reset.attr.cleanup_state = {
+    GLTCore.get_test_attr(test_cxl_save_restore_across_cxl_bus_reset).cleanup_state = {
         "bdf": bdf,
         "orig_reset_method": orig_reset_method,
     }
@@ -766,7 +766,7 @@ def test_cxl_save_restore_across_cxl_bus_reset(sd, logger):
 # pylint: enable=too-many-branches,too-many-statements,too-many-locals
 
 
-test_cxl_save_restore_across_cxl_bus_reset.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_cxl_save_restore_across_cxl_bus_reset).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_restore_reset_method,
     postskip=_restore_reset_method,
     postfail=_cxl_bus_reset_reboot_hook,
@@ -895,7 +895,7 @@ def test_cxl_reset_dvsec_sysfs(sd, logger):
 # pylint: enable=too-many-branches,too-many-statements
 
 
-test_cxl_reset_dvsec_sysfs.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_cxl_reset_dvsec_sysfs).post_hooks = GLTCore.PostHooks.create(
     postfail=_cxl_reset_reboot_hook,
     postafail=_cxl_reset_reboot_hook,
 )
@@ -1068,7 +1068,7 @@ def test_cxl_link_disable_fwctl_registration(sd, logger):
         )
     logger.info("Original %s.w on %s: %#06x", pco_offset_str, rp_bdf, orig_pc)
 
-    test_cxl_link_disable_fwctl_registration.attr.cleanup_state = {
+    GLTCore.get_test_attr(test_cxl_link_disable_fwctl_registration).cleanup_state = {
         "rp_bdf": rp_bdf,
         "orig_pc": orig_pc,
         "pco_offset": pco_offset,
@@ -1108,7 +1108,7 @@ def test_cxl_link_disable_fwctl_registration(sd, logger):
     time.sleep(5)
 
 
-test_cxl_link_disable_fwctl_registration.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_cxl_link_disable_fwctl_registration).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_restore_link_and_disable_resume,
     postskip=_restore_link_and_disable_resume,
     postfail=_restore_link_and_disable_resume,

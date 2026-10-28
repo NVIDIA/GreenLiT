@@ -21,7 +21,6 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from enum import Enum
-from functools import wraps
 from graphlib import CycleError, TopologicalSorter
 import inspect
 import json
@@ -66,7 +65,7 @@ class PostHooks:
     ) -> "PostHooks":
         """
         Build a PostHooks instance for the given callables. Assign the return value
-        to your test's attr: my_test.attr.post_hooks = PostHooks.create(...).
+        to your test's attr: GLTCore.get_test_attr(my_test).post_hooks = PostHooks.create(...).
         Pass callables with signature (scheduler, attr, logger). Omitted slots are
         no-ops. The runner invokes the hook that matches the test result.
         """
@@ -88,7 +87,7 @@ class PostHooks:
         Return a post-hook callable that runs a normal reboot only when progress
         has trigger_key for this test and condition_fn() is true. Use as
         postsuccess=..., postskip=..., etc. in PostHooks.create() and assign the
-        result to test_func.attr.post_hooks.
+        result to GLTCore.get_test_attr(test_func).post_hooks.
         """
         def hook(scheduler, attr, logger):
             if scheduler.progress_check(attr.name, trigger_key) and condition_fn():
@@ -175,21 +174,6 @@ class GLTConditionalSkip(GLTConditionalCheck):
         return self.check()
 
 
-def _get_requires(func: Callable[..., object]) -> "GLTRequires":
-    """Return the requirement set stored on a decorated test, creating it if needed.
-
-    Requirements stay on the wrapped function when one exists, which is where
-    the scheduler reads them. A requirement decorator applied directly, or
-    beneath @GLTTestAttr, has no wrapper yet and stores them on func.
-    """
-    target = getattr(func, "__wrapped__", func)
-    requires = getattr(target, "requires", None)
-    if not isinstance(requires, GLTRequires):
-        requires = GLTRequires()
-        setattr(target, "requires", requires)
-    return requires
-
-
 class GLTRequires:
     """To check reaching requirements before launch"""
 
@@ -218,7 +202,7 @@ class GLTRequires:
         """Decorator for any_fail when discover function"""
 
         def decorator(func: Callable[..., object]) -> Callable[..., object]:
-            _get_requires(func).any_false.append(f"{category}:{name}")
+            get_test_attr(func).requires.any_false.append(f"{category}:{name}")
             return func
 
         return decorator
@@ -230,7 +214,7 @@ class GLTRequires:
         """Decorator for any_pass when discover function"""
 
         def decorator(func: Callable[..., object]) -> Callable[..., object]:
-            _get_requires(func).any_true.append(f"{category}:{name}")
+            get_test_attr(func).requires.any_true.append(f"{category}:{name}")
             return func
 
         return decorator
@@ -242,7 +226,7 @@ class GLTRequires:
             test_obj = sd.get_test_obj_by_name(func)
             if test_obj is None:
                 raise AttributeError(f"{func} is not a scheduled test")
-            attr = _get_wrapped_attr(test_obj)
+            attr = get_test_attr(test_obj)
             outcome = getattr(attr, "result", None)
             if outcome is None or outcome[0] != GLTTestResult.PASS:
                 return False, f"{getattr(attr, 'name')} in all_true did not pass"
@@ -252,7 +236,7 @@ class GLTRequires:
             test_obj = sd.get_test_obj_by_name(func)
             if test_obj is None:
                 raise AttributeError(f"{func} is not a scheduled test")
-            attr = _get_wrapped_attr(test_obj)
+            attr = get_test_attr(test_obj)
             outcome = getattr(attr, "result", None)
             if outcome is None or outcome[0] != GLTTestResult.FAIL:
                 return False, f"{getattr(attr, 'name')} in all_false did not fail"
@@ -264,7 +248,7 @@ class GLTRequires:
                 test_obj = sd.get_test_obj_by_name(func)
                 if test_obj is None:
                     raise AttributeError(f"{func} is not a scheduled test")
-                attr = _get_wrapped_attr(test_obj)
+                attr = get_test_attr(test_obj)
                 outcome = getattr(attr, "result", None)
                 if outcome is not None and outcome[0] == GLTTestResult.PASS:
                     result = True
@@ -279,7 +263,7 @@ class GLTRequires:
                 test_obj = sd.get_test_obj_by_name(func)
                 if test_obj is None:
                     raise AttributeError(f"{func} is not a scheduled test")
-                attr = _get_wrapped_attr(test_obj)
+                attr = get_test_attr(test_obj)
                 outcome = getattr(attr, "result", None)
                 if outcome is not None and outcome[0] == GLTTestResult.FAIL:
                     result = True
@@ -296,7 +280,7 @@ class GLTRequires:
         """Decorator for must_fail when discover function"""
 
         def decorator(func: Callable[..., object]) -> Callable[..., object]:
-            _get_requires(func).all_false.append(f"{category}:{name}")
+            get_test_attr(func).requires.all_false.append(f"{category}:{name}")
             return func
 
         return decorator
@@ -308,7 +292,7 @@ class GLTRequires:
         """Decorator for must_pass when discover function"""
 
         def decorator(func: Callable[..., object]) -> Callable[..., object]:
-            _get_requires(func).all_true.append(f"{category}:{name}")
+            get_test_attr(func).requires.all_true.append(f"{category}:{name}")
             return func
 
         return decorator
@@ -372,14 +356,10 @@ class GLTPlan:
         self.plan_type = plan_type
 
     def __call__(self, func: Callable[..., object]) -> Callable[..., object]:
-        @wraps(func)
-        def wrapper(*args: object, **kwargs: object) -> object:
-            return func(*args, **kwargs)
-
-        plans = getattr(wrapper, "plans", None)
+        plans = getattr(func, "plans", None)
         if not isinstance(plans, list):
             plans = []
-            setattr(wrapper, "plans", plans)
+            setattr(func, "plans", plans)
 
         selected_plans = {plan for plan in plans if isinstance(plan, str)}
         selected_plans.add(self.plan_type)
@@ -393,7 +373,7 @@ class GLTPlan:
             )
 
         plans.append(self.plan_type)
-        return wrapper
+        return func
 
 
 class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
@@ -411,6 +391,8 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
         self.func = func
         self.allow_failure = GLTAllowFailure()
         self.conditional_skip = GLTConditionalSkip()
+        self.requires = GLTRequires()
+        self.post_hooks: PostHooks | None = None
         self.result: tuple["GLTTestResult", str] | None = None
 
     def __call__(self, func: Callable[..., object]) -> Callable[..., object]:
@@ -423,16 +405,8 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
                 )
             self.name = function_name
 
-        @wraps(func)
-        def wrapper(*args: object, **kwargs: object) -> object:
-            return func(*args, **kwargs)
-
-        if not hasattr(func, "attr"):
-            setattr(func, "attr", self)
-        # The name bound in the test module is this wrapper, not the inner func.
-        # Set wrapper.attr so the author can write test_xyz.attr.post_hooks = ...
-        # without reaching through __wrapped__.
-        setattr(wrapper, "attr", self)
+        # The test stays the function the author wrote; its record is test_xyz.attr.
+        setattr(func, "attr", self)
 
         caller_frame = inspect.stack()[1]
         filepath = caller_frame.filename
@@ -450,7 +424,7 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
         if isinstance(plans, list) and all(isinstance(plan, str) for plan in plans):
             self.plans = [plan for plan in plans if isinstance(plan, str)]
 
-        return wrapper
+        return func
 
     def _extract_cat(self, filepath):
         # Extract 'cat' (e.g., 'arm64') from the file path
@@ -476,67 +450,70 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
             output(" - plans:")
             for plan in self.plans:
                 output(f"  - {plan}")
-        requires = getattr(func, "requires", None)
-        if isinstance(requires, GLTRequires):
+        if self.requires.dependency_names():
             output(" - requires:")
-            if requires.all_true:
+            if self.requires.all_true:
                 output("  - all_true:")
-                for item in requires.all_true:
+                for item in self.requires.all_true:
                     output(f"   - [{item}]")
-            if requires.all_false:
+            if self.requires.all_false:
                 output("  - all_false:")
-                for item in requires.all_false:
+                for item in self.requires.all_false:
                     output(f"   - [{item}]")
-            if requires.any_true:
+            if self.requires.any_true:
                 output("  - any_true:")
-                for item in requires.any_true:
+                for item in self.requires.any_true:
                     output(f"   - [{item}]")
-            if requires.any_false:
+            if self.requires.any_false:
                 output("  - any_false:")
-                for item in requires.any_false:
+                for item in self.requires.any_false:
                     output(f"   - [{item}]")
-        conditional_skip = getattr(getattr(func, "attr", None), "conditional_skip", None)
-        if isinstance(conditional_skip, GLTConditionalSkip):
-            output(" - conditional_skip:")
-            if conditional_skip.all_true:
-                output("  - all_true:")
-                for condition in conditional_skip.all_true:
-                    output(f"   - [{_condition_description(condition)}]")
-            if conditional_skip.all_false:
-                output("  - all_false:")
-                for condition in conditional_skip.all_false:
-                    output(f"   - [{_condition_description(condition)}]")
-            if conditional_skip.any_true:
-                output("  - any_true:")
-                for condition in conditional_skip.any_true:
-                    output(f"   - [{_condition_description(condition)}]")
-            if conditional_skip.any_false:
-                output("  - any_false:")
-                for condition in conditional_skip.any_false:
-                    output(f"   - [{_condition_description(condition)}]")
-        allow_failure = getattr(getattr(func, "attr", None), "allow_failure", None)
-        if isinstance(allow_failure, GLTAllowFailure):
-            output(" - allow_failure:")
-            if allow_failure.all_true:
-                output("  - all_true:")
-                for condition in allow_failure.all_true:
-                    output(f"   - [{_condition_description(condition)}]")
-            if allow_failure.all_false:
-                output("  - all_false:")
-                for condition in allow_failure.all_false:
-                    output(f"   - [{_condition_description(condition)}]")
-            if allow_failure.any_true:
-                output("  - any_true:")
-                for condition in allow_failure.any_true:
-                    output(f"   - [{_condition_description(condition)}]")
-            if allow_failure.any_false:
-                output("  - any_false:")
-                for condition in allow_failure.any_false:
-                    output(f"   - [{_condition_description(condition)}]")
+        output(" - conditional_skip:")
+        if self.conditional_skip.all_true:
+            output("  - all_true:")
+            for condition in self.conditional_skip.all_true:
+                output(f"   - [{_condition_description(condition)}]")
+        if self.conditional_skip.all_false:
+            output("  - all_false:")
+            for condition in self.conditional_skip.all_false:
+                output(f"   - [{_condition_description(condition)}]")
+        if self.conditional_skip.any_true:
+            output("  - any_true:")
+            for condition in self.conditional_skip.any_true:
+                output(f"   - [{_condition_description(condition)}]")
+        if self.conditional_skip.any_false:
+            output("  - any_false:")
+            for condition in self.conditional_skip.any_false:
+                output(f"   - [{_condition_description(condition)}]")
+        output(" - allow_failure:")
+        if self.allow_failure.all_true:
+            output("  - all_true:")
+            for condition in self.allow_failure.all_true:
+                output(f"   - [{_condition_description(condition)}]")
+        if self.allow_failure.all_false:
+            output("  - all_false:")
+            for condition in self.allow_failure.all_false:
+                output(f"   - [{_condition_description(condition)}]")
+        if self.allow_failure.any_true:
+            output("  - any_true:")
+            for condition in self.allow_failure.any_true:
+                output(f"   - [{_condition_description(condition)}]")
+        if self.allow_failure.any_false:
+            output("  - any_false:")
+            for condition in self.allow_failure.any_false:
+                output(f"   - [{_condition_description(condition)}]")
         if self.result:
             output(f" - result: [{self.result[0].value}] {self.result[1]}")
 
     # pylint: enable=too-many-branches
+
+
+def get_test_attr(test_obj: object) -> "GLTTestAttr":
+    """Return the metadata record stored on a decorated test."""
+    attr = getattr(test_obj, "attr", None)
+    if isinstance(attr, GLTTestAttr):
+        return attr
+    raise AttributeError("decorated test has no GLTTestAttr")
 
 
 class GLTTestSkip(Exception):
@@ -552,19 +529,8 @@ class GLTTestWarn(Exception):
 
 
 def _record_test_result(target: object, result: tuple["GLTTestResult", str]) -> None:
-    """Store result on a decorated test, preferring the wrapped function."""
-    wrapped = getattr(target, "__wrapped__", None)
-    if wrapped is not None:
-        attr = getattr(wrapped, "attr", None)
-        if isinstance(attr, GLTTestAttr):
-            attr.result = result
-            return
-        raise AttributeError("wrapped test has no GLTTestAttr")
-    attr = getattr(target, "attr", None)
-    if isinstance(attr, GLTTestAttr):
-        attr.result = result
-        return
-    raise AttributeError("test has no GLTTestAttr")
+    """Store result on the metadata record of a decorated test."""
+    get_test_attr(target).result = result
 
 
 class GLTTestResult(Enum):
@@ -633,15 +599,6 @@ class GLTTestResult(Enum):
         raise GLTTestWarn(reason)
 
 
-def _get_wrapped_attr(test_obj: object) -> object:
-    """Return the attribute record attached to a decorated test."""
-    wrapped = getattr(test_obj, "__wrapped__", None)
-    attr = getattr(wrapped, "attr", None)
-    if attr is None:
-        raise AttributeError("scheduled test has no GLTTestAttr")
-    return attr
-
-
 # pylint: disable=too-many-instance-attributes
 class GLTScheduler:
     """
@@ -662,23 +619,8 @@ class GLTScheduler:
         for test_obj in test_objs:
             name = self.get_test_case_name(test_obj)
             self.test_list.append(test_obj)
-            wrapped = getattr(test_obj, "__wrapped__", None)
-            reqs = getattr(wrapped, "requires", None)
-            if isinstance(reqs, GLTRequires):
-                if reqs.all_true:
-                    for item in reqs.all_true:
-                        self.add_dependency(name, item)
-                if reqs.all_false:
-                    for item in reqs.all_false:
-                        self.add_dependency(name, item)
-                if reqs.any_true:
-                    for item in reqs.any_true:
-                        self.add_dependency(name, item)
-                if reqs.any_false:
-                    for item in reqs.any_false:
-                        self.add_dependency(name, item)
-            elif reqs is not None:
-                raise TypeError(f"{name}: requires must be GLTRequires, got {type(reqs).__name__}")
+            for item in get_test_attr(test_obj).requires.dependency_names():
+                self.add_dependency(name, item)
 
     def add_dependency(self, case: str, depends_on: str) -> None:
         """Add a dependency: the case depends on depends_on."""
@@ -687,8 +629,8 @@ class GLTScheduler:
     @staticmethod
     def get_test_case_name(test_obj: Callable[..., object]) -> str:
         """Return the test case name for structuring"""
-        attr = _get_wrapped_attr(test_obj)
-        return f"{getattr(attr, 'category')}:{getattr(attr, 'name')}"
+        attr = get_test_attr(test_obj)
+        return f"{attr.category}:{attr.name}"
 
     def get_test_obj_by_name(self, name: str) -> Callable[..., object] | None:
         """Return the test object by test case name.
@@ -795,7 +737,7 @@ class GLTScheduler:
                     return (
                         "Resume progress references unknown test case "
                         f"{obj_name}")
-                attr = _get_wrapped_attr(test_obj)
+                attr = get_test_attr(test_obj)
                 if "Result" in status:
                     result_value = status["Result"]
                     result_reason = status.get("ResultReason")
