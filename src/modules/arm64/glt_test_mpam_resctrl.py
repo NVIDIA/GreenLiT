@@ -42,13 +42,15 @@ MPAM_DEBUGFS_PATH = "/sys/kernel/debug/mpam"
 MPAMF_IDR_HAS_MBW_PART = 1 << 26
 MPAM_PLATFORM_CAPABILITIES = {
     "grace": {
-        "expected_dirs": ("L3", "L3_MON", "MB", "MB_HLIM"),
+        "expected_dirs": ("L3", "L3_MON", "MB"),
+        "optional_dirs": ("MB_HLIM",),
         "expected_files": ("last_cmd_status",),
         "expected_mb_mon_features": (),
     },
     "vera": {
         # MB_HLIM exposure is checked against max_lim by DGX-17719.
         "expected_dirs": ("L3", "L3_MON", "MB", "MB_MON"),
+        "optional_dirs": (),
         "expected_files": ("last_cmd_status",),
         "expected_mb_mon_features": (resctrl_utils.MBM_TOTAL_BYTES,),
     },
@@ -879,7 +881,6 @@ def test_mpam_resctrl_mb_max_lim(_, logger):  # pylint: disable=too-many-branche
         GLTCore.GLTTestResult.fail(cleanup_errors[0])
 
 
-@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_driver_init_registers")
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
@@ -937,6 +938,13 @@ def test_mpam_resctrl_mount(_, logger):
             GLTCore.GLTTestResult.fail("Failed to mount resctrl.")
 
 
+# Grace does not run the Vera-specific driver-init register test.
+if not NvDev().is_cpu_type("grace"):
+    test_mpam_resctrl_mount = GLTCore.GLTRequires.must_pass(
+        "arm64", "test_mpam_driver_init_registers"
+    )(test_mpam_resctrl_mount)
+
+
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
@@ -988,6 +996,11 @@ def test_mpam_resctrl_info(_, logger):  # pylint: disable=too-many-branches
                 errors.append(f"{name} (expected file) is missing")
             elif not os.path.isfile(path):
                 errors.append(f"{name} exists but is not a file")
+
+        for name in platform_capabilities["optional_dirs"]:
+            path = os.path.join(info_dir, name)
+            if os.path.exists(path) and not os.path.isdir(path):
+                errors.append(f"{name} exists but is not a directory")
 
         if errors:
             GLTCore.GLTTestResult.fail(

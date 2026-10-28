@@ -14,8 +14,105 @@ from tests.test_base import GLTTestBase
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from common import glt_core as GLTCore
+from common import nv_device
 from common import resctrl_utils
+from greenlit import greenlit
 from src.modules.arm64 import glt_test_mpam_resctrl as mpam_resctrl
+
+
+class TestMpamResctrlDependencies(GLTTestBase):
+    """Discover real MPAM prerequisites without executing hardware bodies."""
+
+    INIT = "arm64:test_mpam_driver_init_registers"
+    MOUNT = "arm64:test_mpam_resctrl_mount"
+    INFO = "arm64:test_mpam_resctrl_info"
+
+    def _discover_scheduler(self, cpu, selected):
+        """Use fresh CPU-specific metadata and restore discovery's module entry."""
+        module_name = "glt_test_mpam_resctrl"
+        missing = object()
+        previous = sys.modules.get(module_name, missing)
+        nvdev = self.mock.Mock()
+        nvdev.is_cpu_type.side_effect = lambda name: name == cpu
+        try:
+            with self.mock.patch.object(nv_device, "NvDev", return_value=nvdev), \
+                    self.mock.patch.object(greenlit.glob, "glob",
+                                           return_value=[mpam_resctrl.__file__]):
+                test_objs, error, exit_code = greenlit.discover_target_test_cases(
+                    ["arm64"], [selected], {"standard"})
+        finally:
+            if previous is missing:
+                sys.modules.pop(module_name, None)
+            else:
+                sys.modules[module_name] = previous
+        self.assertEqual((exit_code, error), (0, ""))
+        scheduler = GLTCore.GLTScheduler(test_objs)
+        scheduler.sort()
+        return scheduler
+
+    def _assert_pass_required(self, scheduler, prerequisite, dependent):
+        """A skipped, failed, or unexecuted prerequisite must block its dependent."""
+        prerequisite_attr = scheduler.test_map[prerequisite].__wrapped__.attr
+        requires = scheduler.test_map[dependent].__wrapped__.requires
+        for status in (GLTCore.GLTTestResult.PASS, GLTCore.GLTTestResult.FAIL,
+                       GLTCore.GLTTestResult.SKIP, GLTCore.GLTTestResult.NA):
+            with self.subTest(status=status):
+                prerequisite_attr.result = (status, "")
+                self.assertEqual(requires.can_start(scheduler)[0],
+                                 status == GLTCore.GLTTestResult.PASS)
+
+    def test_grace_info_selection_reaches_shared_mount_and_info(self):
+        """Grace info must not pull in the Vera-only initializer that would skip."""
+        scheduler = self._discover_scheduler("grace", self.INFO)
+
+        self.assertEqual(list(scheduler.test_map), [self.MOUNT, self.INFO])
+
+    def test_grace_mount_selection_does_not_require_vera_initializer(self):
+        """Selecting only the shared mount must remain runnable on Grace."""
+        scheduler = self._discover_scheduler("grace", self.MOUNT)
+
+        self.assertEqual(list(scheduler.test_map), [self.MOUNT])
+
+    def test_grace_info_still_requires_mount_pass(self):
+        """Removing Grace's Vera prerequisite must preserve info's mount gate."""
+        scheduler = self._discover_scheduler("grace", self.INFO)
+
+        self._assert_pass_required(scheduler, self.MOUNT, self.INFO)
+
+    def test_vera_preserves_initializer_selection_order_and_pass_gate(self):
+        """Vera must initialize successfully before mounting or inspecting resctrl."""
+        for selected, expected in (
+                (self.MOUNT, [self.INIT, self.MOUNT]),
+                (self.INFO, [self.INIT, self.MOUNT, self.INFO])):
+            with self.subTest(selected=selected):
+                scheduler = self._discover_scheduler("vera", selected)
+
+                self.assertEqual(list(scheduler.test_map), expected)
+                self._assert_pass_required(scheduler, self.INIT, self.MOUNT)
+
+    def test_unknown_cpu_preserves_initializer_selection_order_and_pass_gate(self):
+        """Failure to identify Grace must retain the conservative initializer gate."""
+        for selected, expected in (
+                (self.MOUNT, [self.INIT, self.MOUNT]),
+                (self.INFO, [self.INIT, self.MOUNT, self.INFO])):
+            with self.subTest(selected=selected):
+                scheduler = self._discover_scheduler("unknown", selected)
+
+                self.assertEqual(list(scheduler.test_map), expected)
+                self._assert_pass_required(scheduler, self.INIT, self.MOUNT)
+
+    def test_alternating_cpu_discovery_does_not_leak_dependencies(self):
+        """Fresh Grace/Vera/Grace discovery must keep each CPU's own prerequisites."""
+        selections = []
+        for cpu in ("grace", "vera", "grace"):
+            scheduler = self._discover_scheduler(cpu, self.INFO)
+            selections.append(list(scheduler.test_map))
+
+        self.assertEqual(selections, [
+            [self.MOUNT, self.INFO],
+            [self.INIT, self.MOUNT, self.INFO],
+            [self.MOUNT, self.INFO],
+        ])
 
 
 class TestMpamMbaHardlimExposure(GLTTestBase):
@@ -310,16 +407,30 @@ class TestMpamMscDomainCompleteness(GLTTestBase):
 class TestMpamResctrlInfo(GLTTestBase):
     """Validate Grace/Vera-specific MPAM resctrl info behavior."""
 
-    def _patch_mounted_info(self, mb_mon_present):
+    def _patch_mounted_info(self, mb_mon_present, *, mb_hlim_present=True,
+                            mb_hlim_isdir=True, required_entry_defect=(None, None)):
         def exists(path):
+            entry = mpam_resctrl.os.path.basename(path)
+            if entry == required_entry_defect[0]:
+                return required_entry_defect[1] != "missing"
+            if entry == "MB_HLIM":
+                return mb_hlim_present
             if path.endswith("MB_MON"):
                 return mb_mon_present
             return True
 
         def isdir(path):
+            entry = mpam_resctrl.os.path.basename(path)
+            if entry == required_entry_defect[0]:
+                return False
+            if entry == "MB_HLIM":
+                return mb_hlim_present and mb_hlim_isdir
             if path.endswith("MB_MON"):
                 return mb_mon_present
             return True
+
+        def isfile(path):
+            return mpam_resctrl.os.path.basename(path) != required_entry_defect[0]
 
         return (
             self.mock.patch.object(resctrl_utils, "is_mounted",
@@ -329,8 +440,21 @@ class TestMpamResctrlInfo(GLTTestBase):
             self.mock.patch.object(mpam_resctrl.os.path, "exists",
                                    side_effect=exists),
             self.mock.patch.object(mpam_resctrl.os.path, "isfile",
-                                   return_value=True),
+                                   side_effect=isfile),
         )
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_grace_does_not_require_mb_hlim_or_mb_mon(self, mock_nvdev):
+        """Grace keeps validating its base schema when optional entries are absent."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        patches = self._patch_mounted_info(mb_mon_present=False, mb_hlim_present=False)
+        mock_open = self.mock.mock_open()
+
+        with patches[0], patches[1], patches[2], patches[3], \
+                self.mock.patch("builtins.open", mock_open):
+            mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
+
+        mock_open.assert_not_called()
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
     def test_grace_does_not_require_mb_mon(self, mock_nvdev):
@@ -344,6 +468,52 @@ class TestMpamResctrlInfo(GLTTestBase):
             mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
 
         mock_open.assert_not_called()
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_grace_mb_hlim_non_directory_fails(self, mock_nvdev):
+        """An optional MB_HLIM entry must still be a directory when present."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        patches = self._patch_mounted_info(mb_mon_present=False, mb_hlim_isdir=False)
+
+        with patches[0], patches[1], patches[2], patches[3]:
+            with self.assertRaisesRegex(GLTCore.GLTTestFail,
+                                        "MB_HLIM exists but is not a directory"):
+                mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_grace_required_entry_defects_fail(self, mock_nvdev):
+        """Optional MB_HLIM must not relax the required Grace schema."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "grace"
+        cases = (
+            ("L3", "missing", "L3 (expected directory) is missing"),
+            ("L3", "wrong type", "L3 exists but is not a directory"),
+            ("L3_MON", "missing", "L3_MON (expected directory) is missing"),
+            ("L3_MON", "wrong type", "L3_MON exists but is not a directory"),
+            ("MB", "missing", "MB (expected directory) is missing"),
+            ("MB", "wrong type", "MB exists but is not a directory"),
+            ("last_cmd_status", "missing", "last_cmd_status (expected file) is missing"),
+            ("last_cmd_status", "wrong type", "last_cmd_status exists but is not a file"),
+        )
+        for entry, defect, message in cases:
+            with self.subTest(entry=entry, defect=defect):
+                patches = self._patch_mounted_info(
+                    mb_mon_present=False, required_entry_defect=(entry, defect))
+                with patches[0], patches[1], patches[2], patches[3]:
+                    with self.assertRaises(GLTCore.GLTTestFail) as context:
+                        mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
+
+                self.assertIn(message, str(context.exception))
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_vera_ignores_mb_hlim_non_directory(self, mock_nvdev):
+        """Vera MB_HLIM type belongs to the separate hard-limit exposure test."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "vera"
+        patches = self._patch_mounted_info(mb_mon_present=True, mb_hlim_isdir=False)
+        mock_open = self.mock.mock_open(read_data="mbm_total_bytes\n")
+
+        with patches[0], patches[1], patches[2], patches[3], \
+                self.mock.patch("builtins.open", mock_open):
+            mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
     def test_vera_missing_mb_mon_fails(self, mock_nvdev):
@@ -386,6 +556,19 @@ class TestMpamResctrlInfo(GLTTestBase):
             "r",
             encoding="utf-8",
         )
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_vera_missing_mbm_total_bytes_fails(self, mock_nvdev):
+        """Present MB_MON does not replace Vera's required total-bytes feature."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = lambda name: name == "vera"
+        patches = self._patch_mounted_info(mb_mon_present=True)
+        mock_open = self.mock.mock_open(read_data="mbm_local_bytes\n")
+
+        with patches[0], patches[1], patches[2], patches[3], \
+                self.mock.patch("builtins.open", mock_open):
+            with self.assertRaisesRegex(GLTCore.GLTTestFail,
+                                        "missing expected features: mbm_total_bytes"):
+                mpam_resctrl.test_mpam_resctrl_info(None, self.mock_logger)
 
     def test_info_unmounts_when_post_mount_check_fails(self):
         """A test-owned mount is cleaned up even when validation fails early."""
