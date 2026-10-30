@@ -22,7 +22,7 @@ references:
     purpose: Canonical upstream Linux implementation and commit history.
   linux-nvidia:
     remote: https://github.com/NVIDIA/NV-Kernels.git
-    ref: linux-nvidia-6.18-next
+    ref: linux-nvidia-6.18
     purpose: NVIDIA target kernel implementation and downstream commit history.
 lenses:
   convention:
