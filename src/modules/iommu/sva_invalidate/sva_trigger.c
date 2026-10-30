@@ -26,6 +26,10 @@
 // with ARM_SMMU_FEAT_RANGE_INV, size = end - start + 1 can soft-lock
 // __arm_smmu_tlb_inv_range during munmap. The Python harness FAILs on
 // TimeoutExpired for that case.
+//
+// test_sva_cd_hw_access_dirty also runs this binary with 0 iterations, only
+// as the SVA bind stimulus, to capture the CD that arm_smmu_set_pasid()
+// installs.
 
 #define _GNU_SOURCE
 #include <stdio.h>
