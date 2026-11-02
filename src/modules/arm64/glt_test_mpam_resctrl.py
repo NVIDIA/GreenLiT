@@ -54,8 +54,8 @@ MPAM_PLATFORM_CAPABILITIES = {
         "expected_mb_mon_features": (),
     },
     "vera": {
-        # MB_HLIM exposure is checked against max_lim by DGX-17719.
-        "expected_dirs": ("L3", "L3_MON", "MB", "MB_MON"),
+        # MB_HLIM is checked against max_lim by DGX-17719; L2_MAX is optional.
+        "expected_dirs": ("L3", "L3_MAX", "L3_MON", "MB", "MB_MON"),
         "optional_dirs": (),
         "expected_files": ("last_cmd_status",),
         "expected_mb_mon_features": (resctrl_utils.MBM_TOTAL_BYTES,),
@@ -2097,6 +2097,103 @@ def test_mpam_l2_max_schemata(_, logger):  # pylint: disable=too-many-branches
     if status == "blocked":
         GLTCore.GLTTestResult.warn(
             "L2_MAX percentage schemata could not be validated: "
+            f"{reason}.")
+    if status == "fail":
+        GLTCore.GLTTestResult.fail(reason)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_l3_max_schemata(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify the Vera MPAM L3_MAX percentage schemata write/readback path.
+
+    JIRA: DGX-17928
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip(
+            "This is not an NVIDIA Vera CPU; test is Vera-specific.")
+
+    cleanup_errors = []
+    status, reason = "ok", ""
+    grid = None
+    with resctrl_utils.managed_mount(
+            logger, cleanup_errors=cleanup_errors) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            status, reason = "fail", "Failed to mount resctrl."
+        else:
+            try:
+                info = _mpam_read_percentage_info("L3_MAX")
+                if info is None:
+                    status = "not_exposed"
+                    reason = "info/L3_MAX is absent; L3_MAX resource directory is not exposed."
+                else:
+                    reason = _mpam_percentage_policy_reason("L3_MAX", *info)
+                    if reason:
+                        status = "blocked"
+                    else:
+                        grid = list(range(info[0], MPAM_PERCENT_MAX + 1, info[1]))
+            except (ValueError, OSError) as error:
+                status, reason = "fail", str(error)
+        if status == "ok":
+            try:
+                suffix = uuid.uuid4().hex[:8]
+                group = os.path.join(
+                    resctrl_utils.RESCTRL_MOUNT_POINT,
+                    f"glt_l3_max_{os.getpid()}_{suffix}")
+                try:
+                    os.mkdir(group)
+                except FileExistsError:
+                    raise ValueError(
+                        f"resctrl group {group} already exists; refusing to "
+                        "remove a group not created by this test invocation.") from None
+                schemata_path = os.path.join(group, "schemata")
+                initial_values = None
+                try:
+                    schemas = resctrl_utils.read_schemata(schemata_path, ("L3_MAX",))
+                    if "L3_MAX" not in schemas:
+                        raise ValueError(f"L3_MAX resource line is missing from {schemata_path}.")
+                    initial_values = schemas["L3_MAX"]
+                    domains = tuple(initial_values)
+                    pair = _mpam_probe_percentage_pair(
+                        schemata_path, "L3_MAX", domains, initial_values, grid)
+                    if pair is None:
+                        status = "blocked"
+                        reason = MPAM_PERCENTAGE_NO_PAIR_REASON.format(
+                            resource="L3_MAX", grid=grid)
+                    else:
+                        low, high = pair
+                        logger.info("L3_MAX selected low=%s, high=%s.", low, high)
+                finally:
+                    try:
+                        if initial_values is not None:
+                            _mpam_restore_percentage_schemata(
+                                schemata_path, "L3_MAX", domains, initial_values)
+                    except (ValueError, OSError) as error:
+                        cleanup_errors.append(str(error))
+                    finally:
+                        try:
+                            os.rmdir(group)
+                        except OSError as error:
+                            cleanup_errors.append(f"Failed to remove resctrl group {group}: {error}")
+            except (ValueError, OSError) as error:
+                status, reason = "fail", str(error)
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(_mpam_combined_failure(reason, cleanup_errors))
+    if status == "not_exposed":
+        GLTCore.GLTTestResult.fail(
+            "L3_MAX is not exposed on this Vera boot after resctrl "
+            f"prerequisites passed because {reason}; no L3_MAX assertion "
+            "was run."
+        )
+    if status == "blocked":
+        GLTCore.GLTTestResult.warn(
+            "L3_MAX percentage schemata could not be validated: "
             f"{reason}.")
     if status == "fail":
         GLTCore.GLTTestResult.fail(reason)
