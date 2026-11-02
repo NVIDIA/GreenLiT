@@ -11,7 +11,6 @@ GreenLiT provides automated tests to verify system functionality and stability o
   - [Secure Boot](#secure-boot)
 - [Basic Usage](#basic-usage)
   - [Running Tests](#running-tests)
-  - [MPAM resctrl operation](#mpam-resctrl-operation)
   - [Test Cases](#test-cases)
   - [Test Plans](#test-plans)
   - [Skipping Tests](#skipping-tests)
@@ -144,20 +143,6 @@ sudo rm -rf /usr/local/share/greenlit/linux
 - Verbose output: `sudo glt-test-suite --verbose`
 - List available tests: `sudo glt-test-suite --list`
 - Display help information: `sudo glt-test-suite --help`
-
-### MPAM resctrl operation
-
-Run only one GreenLiT invocation per DUT at a time when using MPAM/resctrl
-checks. This includes standalone test invocations. Keep other resctrl writers
-inactive for the entire run, including cleanup; GreenLiT does not serialize
-these writers or recover overlapping runs.
-
-After an aborted run, inspect any remaining `glt_l*_max_*` directories under
-the resctrl mount before restarting. Verify that the owning run and its workload
-have stopped and that the group has no active tasks or writers. Remove only
-those leftovers verified inactive. A name, an empty tasks file, or an encoded
-PID alone does not prove inactivity. If ownership or activity is uncertain,
-resolve it before restarting. GreenLiT does not automatically scavenge leftovers.
 
 ### Test Cases
 

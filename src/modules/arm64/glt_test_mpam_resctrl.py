@@ -16,6 +16,7 @@
 """ARM64 MPAM and resctrl validation tests."""
 # pylint: disable=too-many-lines
 
+from contextlib import contextmanager
 import errno
 import fnmatch
 import glob
@@ -27,11 +28,15 @@ import signal
 import stat
 import struct
 import subprocess
+from statistics import median as _median
+import tempfile
 import threading
 import time
-
 import uuid
+
+from common.cpu_topology import parse_cpu_mask
 from common import glt_core as GLTCore
+from common import glt_proc
 from common import glt_utils
 from common import resctrl_utils
 from common.nv_device import NvDev
@@ -46,6 +51,27 @@ MPAM_PERCENTAGE_NO_PAIR_REASON = (
     "{resource} reported grid {grid!r} has no two distinct legal values that "
     "both differ from the restored initial schemata on every domain."
 )
+MPAM_L3_MAX_LIVE_PATTERN = ("low", "high", "low", "high", "low", "high")
+MPAM_L3_MAX_LIVE_MIN_SPAN = 10
+MPAM_L3_MAX_LIVE_BASELINE_LIMIT = 1024 * 1024
+MPAM_L3_MAX_LIVE_BASELINE_TIMEOUT_SEC = 5
+MPAM_L3_MAX_LIVE_BASELINE_POLL_SEC = 0.1
+MPAM_L3_MAX_LIVE_MIN_SEPARATION_BYTES = 1024 * 1024
+MPAM_L3_MAX_LIVE_WARMUP_SEC = 5
+MPAM_L3_MAX_LIVE_SAMPLE_COUNT = 10
+MPAM_L3_MAX_LIVE_SAMPLE_INTERVAL_SEC = 1
+MPAM_L3_MAX_LIVE_OUTER_TIMEOUT_SEC = 45
+MPAM_L3_MAX_LIVE_STRESS_TIMEOUT_SEC = 30
+MPAM_L3_MAX_LIVE_MEMBERSHIP_TIMEOUT_SEC = 5
+MPAM_L3_MAX_LIVE_QUIESCE_SEC = 2
+MPAM_L3_MAX_LIVE_KILL_CLEANUP_TIMEOUT_SEC = 5
+MPAM_L3_MAX_LIVE_KILL_CLEANUP_POLL_SEC = 0.1
+MPAM_L3_MAX_LIVE_STRESS_WORKERS = 4
+MPAM_L3_MAX_LIVE_VM_BYTES = "1G"
+MPAM_L3_MAX_LIVE_VM_FOOTPRINT_BYTES = 1024 * 1024 * 1024
+MPAM_L3_MAX_LIVE_MIN_RESIDENT_BYTES = (MPAM_L3_MAX_LIVE_VM_FOOTPRINT_BYTES * 90 + 99) // 100
+MPAM_L3_MAX_LIVE_VM_WORKER_COMM = "stress-ng-vm"
+MPAM_L3_MAX_LIVE_OUTPUT_LIMIT_BYTES = 16 * 1024
 MPAM_PLATFORM_CAPABILITIES = {
     "grace": {
         "expected_dirs": ("L3", "L3_MON", "MB"),
@@ -61,6 +87,12 @@ MPAM_PLATFORM_CAPABILITIES = {
         "expected_mb_mon_features": (resctrl_utils.MBM_TOTAL_BYTES,),
     },
 }
+
+
+class _MpamBlocked(RuntimeError):
+    """Helper blockage for decorated callers to convert to GLT warn."""
+
+    early_exit = None
 
 
 def _read_mb_hlim_schemata(path):
@@ -245,26 +277,58 @@ def _mpam_probe_percentage_pair(schemata_path, resource, domains,
         schemata_path, resource, domains, initial_values, grid)
 
 
-def _cpus_of_node(node) -> list:
-    """Return the list of online CPU ids owned by a NUMA node.
+def _cpus_of_node(node, online_only=False) -> list:
+    """Return CPU ids owned by a NUMA node.
 
-    Parses /sys/devices/system/node/node<N>/cpulist (e.g. "0-15,88-103").
-    Returns an empty list if the node has no CPUs. Raises OSError if the
-    cpulist cannot be read, or ValueError if a range cannot be parsed.
+    Default callers keep the original permissive cpulist parser.  Live
+    attribution opts into strict parsing and filters by the kernel online set.
     """
     cpus = []
-    with open(f"/sys/devices/system/node/node{node}/cpulist",
-              "r", encoding="utf-8") as f:
-        spec = f.read().strip()
-    for part in spec.split(","):
-        if not part:
-            continue
-        if "-" in part:
-            lo, hi = part.split("-")
-            cpus.extend(range(int(lo), int(hi) + 1))
-        else:
-            cpus.append(int(part))
-    return cpus
+    cpulist_path = f"/sys/devices/system/node/node{node}/cpulist"
+    try:
+        with open(cpulist_path, "r", encoding="utf-8") as f:
+            spec = f.read().strip()
+    except OSError as error:
+        if not online_only:
+            raise
+        raise OSError(
+            f"Could not read NUMA node {node} CPU list at {cpulist_path}: "
+            f"{error}") from error
+    if not online_only:
+        for part in spec.split(","):
+            if not part:
+                continue
+            if "-" in part:
+                lo, hi = part.split("-")
+                cpus.extend(range(int(lo), int(hi) + 1))
+            else:
+                cpus.append(int(part))
+        return cpus
+
+    try:
+        node_cpus = parse_cpu_mask(spec)
+    except ValueError as error:
+        raise ValueError(
+            f"Malformed NUMA node {node} CPU list at {cpulist_path}: "
+            f"{spec!r}") from error
+
+    online_path = "/sys/devices/system/cpu/online"
+    try:
+        with open(online_path, "r", encoding="utf-8") as f:
+            online_spec = f.read().strip()
+    except OSError as error:
+        raise OSError(
+            f"Could not read online CPU list at {online_path}: {error}"
+        ) from error
+    try:
+        online_cpus = parse_cpu_mask(online_spec)
+    except ValueError as error:
+        raise ValueError(
+            f"Malformed online CPU list at {online_path}: {online_spec!r}"
+        ) from error
+    if not online_cpus:
+        raise ValueError(f"Online CPU list at {online_path} is empty.")
+    return sorted(node_cpus & online_cpus)
 
 
 def _mpam_debugfs_subdirs(path, pattern) -> list:
@@ -312,6 +376,1021 @@ def _mpam_class_mbw_part_components(class_level):
                 if idr & MPAMF_IDR_HAS_MBW_PART:
                     components.add(int(component))
     return components
+
+
+def _mpam_l3_max_discovery_names(path):
+    """List one attribution directory without suppressing I/O failures."""
+    try:
+        with os.scandir(path) as entries:
+            return tuple(entry.name for entry in entries)
+    except OSError as error:
+        raise _MpamBlocked(
+            f"Could not enumerate L3_MAX attribution directory {path}: "
+            f"{error}") from error
+
+
+def _mpam_l3_cache_ids_for_cpu(cpu):
+    """Return L3 cache IDs visible for one CPU."""
+    cache_ids = set()
+    cache_path = f"/sys/devices/system/cpu/cpu{cpu}/cache"
+    for name in _mpam_l3_max_discovery_names(cache_path):
+        if not name.startswith("index"):
+            continue
+        index = os.path.join(cache_path, name)
+        try:
+            with open(os.path.join(index, "level"), encoding="utf-8") as f:
+                level_text = f.read().strip()
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not read cache level for CPU {cpu} at {index}: "
+                f"{error}") from error
+        try:
+            level = int(level_text)
+        except ValueError as error:
+            raise _MpamBlocked(
+                f"Malformed cache level for CPU {cpu} at {index}: "
+                f"{level_text!r}") from error
+        if level != 3:
+            continue
+        try:
+            with open(os.path.join(index, "id"), encoding="utf-8") as f:
+                cache_id_text = f.read().strip()
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not read L3 cache ID for CPU {cpu} at {index}: "
+                f"{error}") from error
+        try:
+            cache_ids.add(int(cache_id_text))
+        except ValueError as error:
+            raise _MpamBlocked(
+                f"Malformed L3 cache ID for CPU {cpu} at {index}: "
+                f"{cache_id_text!r}") from error
+    return cache_ids
+
+
+def _mpam_l3_max_node_cpulists():
+    """Return NUMA node cpulist paths sorted by numeric node ID."""
+    node_cpulists = []
+    node_path = "/sys/devices/system/node"
+    for name in _mpam_l3_max_discovery_names(node_path):
+        match = re.match(r"node(\d+)", name)
+        if match is None:
+            continue
+        cpulist = os.path.join(node_path, name, "cpulist")
+        try:
+            os.lstat(cpulist)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not inspect NUMA cpulist {cpulist}: {error}") from error
+        node_cpulists.append((int(match.group(1)), cpulist))
+    return tuple(sorted(node_cpulists))
+
+
+def _mpam_l3_max_monitor_files(group):
+    """Return advertised L3 monitor files from this private group."""
+    monitor_files = {}
+    monitor_path = os.path.join(group, "mon_data")
+    for name in sorted(_mpam_l3_max_discovery_names(monitor_path)):
+        mon_match = re.match(r"mon_L3_(\d+)", name)
+        if mon_match is None:
+            continue
+        path = os.path.join(monitor_path, name, "llc_occupancy")
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not inspect L3 monitor {path}: {error}") from error
+        monitor_files[int(mon_match.group(1))] = path
+
+    return monitor_files
+
+
+def _mpam_l3_max_occupancy_files(group, placement):
+    """Resolve every selected cache monitor in the new window's own group."""
+    monitor_files = _mpam_l3_max_monitor_files(group)
+    selected_monitor_ids = set(monitor_files) & set(placement['cache_ids'])
+    if selected_monitor_ids != set(placement['cache_ids']):
+        raise _MpamBlocked(
+            "L3 monitor IDs do not exactly match selected NUMA node "
+            f"{placement['node']}: expected cache IDs {list(placement['cache_ids'])}, "
+            f"found selected monitor IDs {sorted(selected_monitor_ids)}.")
+    return tuple(monitor_files[cache_id] for cache_id in placement['cache_ids'])
+
+
+def _mpam_l3_max_attribution(group):
+    """Select NUMA node, CPUs and cache IDs using calibration monitors."""
+    monitor_files = _mpam_l3_max_monitor_files(group)
+    for node, _cpulist in _mpam_l3_max_node_cpulists():
+        try:
+            cpus = tuple(_cpus_of_node(node, online_only=True))
+        except (OSError, ValueError) as error:
+            raise _MpamBlocked(str(error)) from error
+        if not cpus:
+            continue
+        cache_ids = set()
+        for cpu in cpus:
+            cpu_cache_ids = _mpam_l3_cache_ids_for_cpu(cpu)
+            if not cpu_cache_ids:
+                raise _MpamBlocked(
+                    f"Selected NUMA node {node} online CPU {cpu} has no "
+                    "L3 cache IDs for live attribution.")
+            cache_ids.update(cpu_cache_ids)
+        selected_monitor_ids = set(monitor_files) & cache_ids
+        if selected_monitor_ids != cache_ids:
+            raise _MpamBlocked(
+                "L3 monitor IDs do not exactly match selected NUMA node "
+                f"{node}: expected cache IDs {sorted(cache_ids)}, found "
+                f"selected monitor IDs {sorted(selected_monitor_ids)}."
+            )
+        return {"node": node, "cpus": cpus, "cache_ids": tuple(sorted(cache_ids))}
+    raise _MpamBlocked(
+        "Could not build complete NUMA/CPU/L3-cache attribution for "
+        f"{group}; no matching llc_occupancy files found.")
+
+
+def _mpam_read_group_task_ids(group):
+    """Return task IDs currently listed in one resctrl group tasks file."""
+    with open(os.path.join(group, "tasks"), "r", encoding="utf-8") as f:
+        return {line.strip() for line in f if line.strip()}
+
+
+def _mpam_resctrl_control_groups():
+    """Return resctrl control groups that expose a tasks file."""
+    groups = [resctrl_utils.RESCTRL_MOUNT_POINT]
+    child_groups = []
+    try:
+        with os.scandir(resctrl_utils.RESCTRL_MOUNT_POINT) as entries:
+            for entry in entries:
+                group = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, entry.name)
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise _MpamBlocked(
+                        "Could not inspect resctrl control group entry "
+                        f"{group}: {error}") from error
+                if not stat.S_ISDIR(entry_stat.st_mode):
+                    continue
+                tasks_path = os.path.join(group, "tasks")
+                try:
+                    os.stat(tasks_path)
+                except FileNotFoundError:
+                    continue
+                except OSError as error:
+                    raise _MpamBlocked(
+                        "Could not inspect resctrl control group tasks file "
+                        f"{tasks_path}: {error}") from error
+                child_groups.append(group)
+    except OSError as error:
+        raise _MpamBlocked(
+            "Could not enumerate resctrl control groups under "
+            f"{resctrl_utils.RESCTRL_MOUNT_POINT}: {error}") from error
+    groups.extend(sorted(child_groups))
+    return tuple(dict.fromkeys(groups))
+
+
+def _mpam_resctrl_monitor_groups(control_group):
+    """Return immediate monitor groups under one resctrl control group."""
+    monitor_root = os.path.join(control_group, "mon_groups")
+    try:
+        monitor_root_stat = os.stat(monitor_root)
+    except FileNotFoundError:
+        return ()
+    except OSError as error:
+        raise _MpamBlocked(
+            "Could not inspect resctrl monitor group directory "
+            f"{monitor_root}: {error}") from error
+    if not stat.S_ISDIR(monitor_root_stat.st_mode):
+        raise _MpamBlocked(
+            f"resctrl monitor group path {monitor_root} exists but is not "
+            "a directory.")
+
+    monitor_groups = []
+    try:
+        with os.scandir(monitor_root) as entries:
+            for entry in entries:
+                monitor_group = os.path.join(monitor_root, entry.name)
+                try:
+                    entry_stat = entry.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise _MpamBlocked(
+                        "Could not inspect resctrl monitor group entry "
+                        f"{monitor_group}: {error}") from error
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    monitor_groups.append(monitor_group)
+    except OSError as error:
+        raise _MpamBlocked(
+            "Could not enumerate resctrl monitor groups under "
+            f"{monitor_root}: {error}") from error
+    return tuple(sorted(monitor_groups))
+
+
+def _mpam_resctrl_monitor_group_for_task(control_group, task_text):
+    """Find the optional immediate monitor group for one control-group task."""
+    monitor_groups = _mpam_resctrl_monitor_groups(control_group)
+    monitor_matches = []
+    monitor_read_errors = []
+    for monitor_group in monitor_groups:
+        try:
+            task_ids = _mpam_read_group_task_ids(monitor_group)
+        except OSError as error:
+            monitor_read_errors.append(f"{monitor_group}/tasks: {error}")
+            continue
+        if task_text in task_ids:
+            monitor_matches.append(monitor_group)
+    if monitor_read_errors:
+        raise _MpamBlocked(
+            "Could not prove supervisor resctrl monitor group before "
+            "mutation; unreadable tasks files: "
+            f"{', '.join(monitor_read_errors)}.")
+    if len(monitor_matches) > 1:
+        raise _MpamBlocked(
+            f"Supervisor task {task_text} appears in "
+            f"{len(monitor_matches)} resctrl monitor groups "
+            f"({monitor_matches}); expected at most one before mutating "
+            "task membership.")
+    return monitor_matches[0] if monitor_matches else None
+
+
+def _mpam_resctrl_group_for_task(task_id):
+    """Find the unique resctrl CTRL and optional MON group for one task."""
+    task_text = str(task_id)
+    matches = []
+    read_errors = []
+    for group in _mpam_resctrl_control_groups():
+        try:
+            task_ids = _mpam_read_group_task_ids(group)
+        except OSError as error:
+            read_errors.append(f"{group}/tasks: {error}")
+            continue
+        if task_text in task_ids:
+            matches.append(group)
+    if read_errors:
+        raise _MpamBlocked(
+            "Could not prove supervisor resctrl group before mutation; "
+            f"unreadable tasks files: {', '.join(read_errors)}.")
+    if len(matches) != 1:
+        raise _MpamBlocked(
+            f"Supervisor task {task_text} appears in {len(matches)} resctrl "
+            f"control groups ({matches}); expected exactly one before "
+            "mutating task membership.")
+    control_group = matches[0]
+    return (
+        control_group,
+        _mpam_resctrl_monitor_group_for_task(control_group, task_text),
+    )
+
+
+def _mpam_l3_max_preflight_supervisor_children():
+    """Prove the current thread exposes the proc children interface."""
+    thread_id = threading.get_native_id()
+    children_path = f"/proc/self/task/{thread_id}/children"
+    try:
+        with open(children_path, "r", encoding="utf-8") as f:
+            f.read()
+    except OSError as error:
+        raise _MpamBlocked(
+            "Could not read supervisor child-process interface "
+            f"{children_path}: errno {error.errno}: {error}") from error
+
+
+def _mpam_stable_workload_process_tree(pid):
+    """Return the workload tree only after two identical snapshots."""
+    try:
+        first = glt_proc.process_tree(pid)
+        time.sleep(0.05)
+        second = glt_proc.process_tree(pid)
+    except OSError as error:
+        raise _MpamBlocked(str(error)) from error
+    if first == second:
+        return second
+    return None
+
+
+def _mpam_l3_max_vm_descendant_comms(supervisor_pid, process_tree):
+    """Return exact descendant comm values, blocking ambiguous VM-like names."""
+    comm_by_pid = {}
+    ambiguous_descendants = []
+    for process_id in set(process_tree[0]) - {supervisor_pid}:
+        try:
+            comm = glt_proc.process_comm(process_id)
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not read stress-ng descendant {process_id} comm: "
+                f"{error}") from error
+        comm_by_pid[process_id] = comm
+        if comm == MPAM_L3_MAX_LIVE_VM_WORKER_COMM:
+            continue
+        if comm.startswith("stress-ng") or "vm" in comm.lower():
+            ambiguous_descendants.append(f"{process_id}:{comm}")
+    if ambiguous_descendants:
+        raise _MpamBlocked(
+            "Ambiguous stress-ng VM worker identity; expected exact "
+            f"comm {MPAM_L3_MAX_LIVE_VM_WORKER_COMM!r}, observed "
+            f"{sorted(ambiguous_descendants)}.")
+    return comm_by_pid
+
+
+def _mpam_require_l3_max_vm_comm(comm_by_pid, pid, role):
+    """Require one process to have the exact stress-ng VM comm."""
+    comm = comm_by_pid.get(pid)
+    if comm != MPAM_L3_MAX_LIVE_VM_WORKER_COMM:
+        raise _MpamBlocked(
+            f"stress-ng {role} {pid} has comm {comm!r}; expected "
+            f"{MPAM_L3_MAX_LIVE_VM_WORKER_COMM!r}.")
+
+
+def _mpam_l3_max_worker_leaf_for_parent(process_tree, comm_by_pid, parent_pid):
+    """Return the single workload leaf for one stress-ng VM instance parent."""
+    _mpam_require_l3_max_vm_comm(comm_by_pid, parent_pid, "direct child")
+    child_pids = process_tree[1].get(str(parent_pid), set())
+    if len(child_pids) != 1:
+        raise _MpamBlocked(
+            f"stress-ng instance parent {parent_pid} does not have "
+            f"exactly one child: {sorted(child_pids)}.")
+    worker_pid = next(iter(child_pids))
+    _mpam_require_l3_max_vm_comm(comm_by_pid, worker_pid, "workload leaf")
+    nested_children = process_tree[1].get(str(worker_pid), set())
+    if nested_children:
+        raise _MpamBlocked(
+            "Nested stress-ng VM workload topology below leaf "
+            f"{worker_pid}: {sorted(nested_children)}.")
+    return worker_pid
+
+
+def _mpam_l3_max_vm_worker_pids(supervisor_pid, process_tree):
+    """Return exact stress-ng VM workload-leaf process IDs."""
+    supervisor_pid = str(supervisor_pid)
+    comm_by_pid = _mpam_l3_max_vm_descendant_comms(
+        supervisor_pid, process_tree)
+    parent_pids = process_tree[1].get(supervisor_pid, set())
+    if len(parent_pids) != MPAM_L3_MAX_LIVE_STRESS_WORKERS:
+        raise _MpamBlocked(
+            "stress-ng workload topology has "
+            f"{len(parent_pids)} direct instance parents; expected "
+            f"{MPAM_L3_MAX_LIVE_STRESS_WORKERS} direct parent/leaf pairs.")
+
+    worker_pids = {
+        _mpam_l3_max_worker_leaf_for_parent(
+            process_tree, comm_by_pid, parent_pid)
+        for parent_pid in sorted(parent_pids)
+    }
+
+    expected_descendants = parent_pids | worker_pids
+    unexpected_descendants = (
+        set(process_tree[0]) - {supervisor_pid} - expected_descendants)
+    if unexpected_descendants:
+        raise _MpamBlocked(
+            "stress-ng workload topology has unexpected descendants outside "
+            f"the direct parent/leaf pairs: {sorted(unexpected_descendants)}.")
+    if len(worker_pids) != MPAM_L3_MAX_LIVE_STRESS_WORKERS:
+        raise _MpamBlocked(
+            "stress-ng workload topology produced "
+            f"{len(worker_pids)} direct workload leaves; expected "
+            f"{MPAM_L3_MAX_LIVE_STRESS_WORKERS}.")
+    return worker_pids
+
+
+def _mpam_validate_l3_max_placement(
+        task_ids, worker_pids, attribution, require_worker_footprint=False):
+    """Require workload CPU affinity, actual CPU, and worker memory locality."""
+    allowed_cpus = set(attribution['cpus'])
+    observed = {}
+    try:
+        for task_id in task_ids:
+            observed[task_id] = glt_proc.task_cpu(task_id)
+    except (OSError, ValueError, IndexError) as error:
+        raise _MpamBlocked(
+            f"Could not prove workload CPU placement: {error}") from error
+    outside = {
+        task_id: cpu for task_id, cpu in observed.items()
+        if cpu not in allowed_cpus
+    }
+    if outside:
+        raise _MpamBlocked(
+            "Workload task CPU placement escaped selected node "
+            f"{attribution['node']}: {outside}; allowed CPUs "
+            f"{sorted(allowed_cpus)}.")
+
+    try:
+        task_affinity = {
+            task_id: glt_proc.task_allowed_cpus(task_id)
+            for task_id in task_ids
+        }
+    except (OSError, ValueError) as error:
+        raise _MpamBlocked(
+            f"Could not prove workload CPU affinity: {error}") from error
+    affinity_outside = {
+        task_id: sorted(cpus)
+        for task_id, cpus in task_affinity.items()
+        if not cpus or not cpus.issubset(allowed_cpus)
+    }
+    if affinity_outside:
+        raise _MpamBlocked(
+            "Workload CPU affinity mask is not confined to selected node "
+            f"{attribution['node']}: {affinity_outside}; allowed CPUs "
+            f"{sorted(allowed_cpus)}.")
+
+    if not require_worker_footprint:
+        return
+
+    try:
+        worker_numa_pages = {
+            worker_pid: glt_proc.task_anonymous_numa_pages_by_node(worker_pid)
+            for worker_pid in worker_pids
+        }
+    except (OSError, ValueError) as error:
+        raise _MpamBlocked(
+            f"Could not prove worker memory locality: {error}") from error
+    worker_local_bytes = {
+        worker_pid: (
+            pages_by_node.get(attribution['node'], 0) * mmap.PAGESIZE)
+        for worker_pid, pages_by_node in worker_numa_pages.items()
+    }
+    remote_pages = {
+        worker_pid: {
+            node: pages for node, pages in pages_by_node.items()
+            if node != attribution['node'] and pages > 0
+        }
+        for worker_pid, pages_by_node in worker_numa_pages.items()
+    }
+    remote_pages = {
+        worker_pid: pages_by_node
+        for worker_pid, pages_by_node in remote_pages.items()
+        if pages_by_node
+    }
+    empty_local_footprints = {
+        worker_pid: local_bytes
+        for worker_pid, local_bytes in worker_local_bytes.items()
+        if local_bytes <= 0
+    }
+    aggregate_local_bytes = sum(worker_local_bytes.values())
+    if (remote_pages or empty_local_footprints
+            or aggregate_local_bytes < MPAM_L3_MAX_LIVE_MIN_RESIDENT_BYTES):
+        raise _MpamBlocked(
+            "Worker memory locality is not confined to selected NUMA node "
+            f"{attribution['node']}: remote pages {remote_pages}, workers with "
+            "no local workload-anonymous footprint "
+            f"{empty_local_footprints}; aggregate local workload-anonymous "
+            f"footprint {aggregate_local_bytes} bytes, required at least "
+            f"{MPAM_L3_MAX_LIVE_MIN_RESIDENT_BYTES} bytes across all "
+            "stress-ng VM workers.")
+
+
+def _mpam_validate_l3_max_membership_snapshot(
+        group, pid, attribution, deadline, require_worker_footprint=False):
+    """Require one exact workload membership and placement snapshot."""
+    _mpam_require_l3_max_deadline(deadline, "membership validation")
+    try:
+        pre_placement_group_tasks = _mpam_read_group_task_ids(group)
+    except OSError as error:
+        raise _MpamBlocked(
+            f"Could not read {group}/tasks for membership proof: "
+            f"{error}") from error
+    snapshot = _mpam_stable_workload_process_tree(pid)
+    if snapshot is None:
+        raise _MpamBlocked(
+            "stress-ng process/thread tree did not stabilize.")
+    task_ids = set().union(*snapshot[0].values())
+    worker_pids = _mpam_l3_max_vm_worker_pids(pid, snapshot)
+    if pre_placement_group_tasks != task_ids:
+        missing = task_ids - pre_placement_group_tasks
+        extra = pre_placement_group_tasks - task_ids
+        raise _MpamBlocked(
+            f"stress-ng observed IDs {sorted(task_ids)} must exactly match "
+            f"{group}/tasks; missing {sorted(missing)}, "
+            f"extra {sorted(extra)}.")
+    _mpam_validate_l3_max_placement(
+        task_ids, worker_pids, attribution,
+        require_worker_footprint=require_worker_footprint)
+    try:
+        post_placement_group_tasks = _mpam_read_group_task_ids(group)
+    except OSError as error:
+        raise _MpamBlocked(
+            f"Could not re-read {group}/tasks after placement proof: "
+            f"{error}") from error
+    if post_placement_group_tasks != pre_placement_group_tasks:
+        missing = pre_placement_group_tasks - post_placement_group_tasks
+        extra = post_placement_group_tasks - pre_placement_group_tasks
+        raise _MpamBlocked(
+            f"{group}/tasks changed during membership proof; missing "
+            f"{sorted(missing)}, extra {sorted(extra)}.")
+    _mpam_require_l3_max_deadline(
+        deadline, "after membership validation")
+
+
+def _mpam_wait_for_l3_max_membership(
+        group, workload, attribution, deadline, require_worker_footprint=False):
+    """Wait for full recursive workload membership and placement proof."""
+    pid = getattr(workload, "pid", workload)
+    membership_deadline = min(
+        deadline,
+        time.monotonic() + MPAM_L3_MAX_LIVE_MEMBERSHIP_TIMEOUT_SEC)
+    last_reason = (
+        f"stress-ng PID {pid} did not produce a complete membership proof.")
+    while time.monotonic() <= membership_deadline:
+        if hasattr(workload, "poll"):
+            _mpam_raise_if_l3_max_stress_exited(workload, "membership proof")
+        try:
+            _mpam_validate_l3_max_membership_snapshot(
+                group, pid, attribution, deadline,
+                require_worker_footprint=require_worker_footprint)
+        except _MpamBlocked as error:
+            last_reason = str(error)
+            time.sleep(0.1)
+            continue
+        now = time.monotonic()
+        if now > membership_deadline:
+            last_reason = (
+                "stress-ng membership proof completed after the membership "
+                "deadline.")
+            break
+        return
+    raise _MpamBlocked(
+        f"{last_reason} Deadline expired within the "
+        f"{MPAM_L3_MAX_LIVE_MEMBERSHIP_TIMEOUT_SEC}s membership window.")
+
+
+def _mpam_l3_max_stress_argv(node):
+    """Return the exact stress-ng command used for L3_MAX live-effect."""
+    return [
+        "numactl", f"--cpunodebind={node}", f"--membind={node}",
+        "stress-ng", "--vm", str(MPAM_L3_MAX_LIVE_STRESS_WORKERS),
+        "--vm-bytes", MPAM_L3_MAX_LIVE_VM_BYTES,
+        "--vm-keep", "--oomable", "--timeout", f"{MPAM_L3_MAX_LIVE_STRESS_TIMEOUT_SEC}s",
+    ]
+
+
+def _mpam_l3_max_stress_result_message(result):
+    """Return human-readable stress-ng completion evidence."""
+    if result.stdout:
+        return (
+            f"stress-ng exited with status {result.returncode}. "
+            f"Captured output: {result.stdout}"
+        )
+    return f"stress-ng exited with status {result.returncode}."
+
+
+def _mpam_l3_max_blocked_message(error, output):
+    """Keep the primary blockage and append evidence only after cleanup."""
+    message = str(error)
+    if output is None and error.early_exit is not None:
+        return f"{message} output unread: process group not proven gone."
+    if output:
+        return f"{message} Captured output: {output}"
+    return message
+
+
+def _mpam_raise_if_l3_max_stress_exited(proc, phase):
+    """Raise a typed blocked result if the stress-ng leader already exited."""
+    returncode = proc.poll()
+    if returncode is not None:
+        error = _MpamBlocked(
+            f"stress-ng exited with status {returncode} during {phase}.")
+        error.early_exit = returncode, phase
+        raise error
+
+
+def _mpam_l3_max_stress_summary_count(output, label):
+    """Parse one stress-ng summary count from bounded process output."""
+    matches = re.findall(
+        rf"^\s*stress-ng:\s+\w+:\s+\[\d+\]\s+{label}:\s+(\d+)\b",
+        output,
+        re.MULTILINE,
+    )
+    if not matches:
+        raise _MpamBlocked(
+            f"stress-ng output did not include required '{label}:' "
+            "status summary.")
+    if len(matches) != 1:
+        raise _MpamBlocked(
+            f"stress-ng output included multiple '{label}:' status "
+            f"summaries {matches}; expected exactly one.")
+    return int(matches[0])
+
+
+def _mpam_l3_max_parse_stress_summary(output):
+    """Parse stress-ng status lines without using performance metrics."""
+    if not re.search(
+            r"^\s*stress-ng:\s+\w+:\s+\[\d+\]\s+successful run completed\b",
+            output,
+            re.MULTILINE):
+        raise _MpamBlocked(
+            "stress-ng output did not include a successful completion line.")
+    return {
+        'skipped': _mpam_l3_max_stress_summary_count(output, "skipped"),
+        'passed': _mpam_l3_max_stress_summary_count(output, "passed"),
+        'failed': _mpam_l3_max_stress_summary_count(output, "failed"),
+        'metrics_untrustworthy': _mpam_l3_max_stress_summary_count(
+            output, "metrics untrustworthy"),
+    }
+
+
+def _mpam_validate_l3_max_stress_result(result):
+    """Validate stress-ng status output and return parsed summary counts."""
+    if result.returncode != 0:
+        raise ValueError(
+            _mpam_l3_max_stress_result_message(result))
+    summary = _mpam_l3_max_parse_stress_summary(result.stdout)
+    if summary['passed'] != MPAM_L3_MAX_LIVE_STRESS_WORKERS:
+        raise ValueError(
+            "stress-ng status summary reported an unexpected passed count: "
+            f"passed={summary['passed']}, expected "
+            f"{MPAM_L3_MAX_LIVE_STRESS_WORKERS}.")
+    bad_counts = {
+        "skipped": summary['skipped'],
+        "failed": summary['failed'],
+        "metrics untrustworthy": summary['metrics_untrustworthy'],
+    }
+    bad_counts = {
+        name: count for name, count in bad_counts.items() if count != 0
+    }
+    if bad_counts:
+        raise ValueError(
+            "stress-ng status summary reported non-zero bad counts: "
+            f"{bad_counts}.")
+    return summary
+
+
+def _mpam_wait_remaining(deadline):
+    """Return remaining seconds before the monotonic deadline."""
+    return max(0.0, deadline - time.monotonic())
+
+
+def _mpam_require_l3_max_deadline(deadline, phase):
+    """Block when the shared launch-time outer deadline has already expired."""
+    if time.monotonic() > deadline:
+        raise _MpamBlocked(
+            f"L3_MAX live-effect deadline expired before {phase}.")
+
+
+def _mpam_sleep_l3_max_with_deadline(seconds, deadline, phase):
+    """Sleep only when the shared deadline has enough remaining budget."""
+    if _mpam_wait_remaining(deadline) < seconds:
+        raise _MpamBlocked(
+            f"L3_MAX live-effect deadline would expire during {phase}.")
+    time.sleep(seconds)
+    if time.monotonic() > deadline:
+        raise _MpamBlocked(
+            f"L3_MAX live-effect deadline expired after {phase}.")
+
+
+def _mpam_collect_l3_max_samples(proc, deadline, resources, label, logger):
+    """Collect ten live llc_occupancy samples while workload is running."""
+    group, placement, occupancy_files = resources
+    samples = []
+    for index in range(MPAM_L3_MAX_LIVE_SAMPLE_COUNT):
+        _mpam_require_l3_max_deadline(deadline, f"sample {index}")
+        _mpam_raise_if_l3_max_stress_exited(
+            proc, f"sample {index} ({len(samples)}/"
+            f"{MPAM_L3_MAX_LIVE_SAMPLE_COUNT} samples collected)")
+        try:
+            _mpam_validate_l3_max_membership_snapshot(
+                group, proc.pid, placement, deadline,
+                require_worker_footprint=True)
+        except _MpamBlocked as error:
+            raise _MpamBlocked(
+                f"sample {index} before membership validation failed: {error}") from error
+        try:
+            sample_value = resctrl_utils.sum_l3_occupancy(occupancy_files)
+        except (OSError, ValueError) as error:
+            raise _MpamBlocked(
+                f"Could not read numeric llc_occupancy sample {index}: {error}"
+            ) from error
+        samples.append(sample_value)
+        logger.info(
+            "L3_MAX window %s sample=%s occupancy=%s deadline slack=%.3fs.",
+            label, index, sample_value, _mpam_wait_remaining(deadline))
+        if index == MPAM_L3_MAX_LIVE_SAMPLE_COUNT - 1:
+            try:
+                _mpam_validate_l3_max_membership_snapshot(
+                    group, proc.pid, placement, deadline,
+                    require_worker_footprint=True)
+            except _MpamBlocked as error:
+                raise _MpamBlocked(
+                    f"sample {index} after membership validation failed: {error}") from error
+        _mpam_require_l3_max_deadline(deadline, f"after sample {index}")
+        _mpam_raise_if_l3_max_stress_exited(
+            proc, f"after sample {index}")
+        if index != MPAM_L3_MAX_LIVE_SAMPLE_COUNT - 1:
+            _mpam_sleep_l3_max_with_deadline(
+                MPAM_L3_MAX_LIVE_SAMPLE_INTERVAL_SEC,
+                deadline,
+                f"sample interval {index}",
+            )
+    return tuple(samples)
+
+
+def _mpam_l3_max_group_exists(pgid):
+    """Return False only when signal-0 proves the launched group absent."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _mpam_l3_max_output(pgid, capture):
+    """Return bounded captured output only after the group is absent."""
+    if capture is None or capture.closed:
+        return None
+    if _mpam_l3_max_group_exists(pgid):
+        return None
+    try:
+        capture.seek(0, os.SEEK_END)
+        output_size = capture.tell()
+        truncated = output_size > MPAM_L3_MAX_LIVE_OUTPUT_LIMIT_BYTES
+        if truncated:
+            capture.seek(-MPAM_L3_MAX_LIVE_OUTPUT_LIMIT_BYTES, os.SEEK_END)
+            data = capture.read(MPAM_L3_MAX_LIVE_OUTPUT_LIMIT_BYTES)
+        else:
+            capture.seek(0)
+            data = capture.read()
+    except OSError as error:
+        return f"<could not read process output: {error}>"
+    text = data.decode("utf-8", errors="replace").strip()
+    if truncated:
+        return (
+            f"<kept last {MPAM_L3_MAX_LIVE_OUTPUT_LIMIT_BYTES} of {output_size} bytes>\n"
+            f"{text}"
+        )
+    return text
+
+
+def _mpam_wait_for_l3_max_stress_exit(proc, deadline, argv, capture):
+    """Wait for stress-ng to exit within the outer deadline."""
+    try:
+        returncode = proc.wait(timeout=_mpam_wait_remaining(deadline))
+    except subprocess.TimeoutExpired as error:
+        output = _mpam_l3_max_output(proc.pid, capture)
+        output_note = f" Captured output: {output}" if output else ""
+        raise _MpamBlocked(
+            "stress-ng did not exit within the live-effect deadline."
+            f"{output_note}"
+        ) from error
+    return subprocess.CompletedProcess(argv, returncode, stdout=_mpam_l3_max_output(proc.pid, capture))
+
+
+def _mpam_l3_max_restore_supervisor(
+        thread_id, supervisor_group, supervisor_monitor_group):
+    """Restore CTRL before MON and prove the exact original membership."""
+    try:
+        glt_utils.write_sysfs_value(
+            os.path.join(supervisor_group, "tasks"), thread_id)
+    except OSError as error:
+        raise ValueError(
+            f"Could not move supervisor thread {thread_id} back to "
+            f"{supervisor_group}/tasks: {error}") from error
+    if supervisor_monitor_group is not None:
+        try:
+            glt_utils.write_sysfs_value(
+                os.path.join(supervisor_monitor_group, "tasks"), thread_id)
+        except OSError as error:
+            raise ValueError(
+                f"Could not move supervisor thread {thread_id} back to "
+                f"{supervisor_monitor_group}/tasks: {error}") from error
+    try:
+        restored_group, restored_monitor_group = (
+            _mpam_resctrl_group_for_task(thread_id))
+    except _MpamBlocked as error:
+        raise ValueError(
+            f"Could not prove supervisor thread {thread_id} returned to "
+            f"control {supervisor_group}, monitor "
+            f"{supervisor_monitor_group}: {error}") from error
+    if (restored_group, restored_monitor_group) != (
+            supervisor_group, supervisor_monitor_group):
+        raise ValueError(
+            f"supervisor thread {thread_id} restored to control "
+            f"{restored_group}, monitor {restored_monitor_group}; "
+            f"expected control {supervisor_group}, monitor "
+            f"{supervisor_monitor_group}.")
+
+
+def _mpam_l3_max_require_stress_version():
+    """Require the supported status-summary format before resctrl mutation."""
+    minimum = "0.16.00"
+    try:
+        result = subprocess.run(
+            ["stress-ng", "--version"], stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, encoding="utf-8", errors="replace",
+            timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise _MpamBlocked(
+            f"stress-ng >= {minimum} is required; version check failed: {error}") from error
+    match = re.search(r"^stress-ng, version (\d+\.\d+\.\d+)\b", result.stdout)
+    if (result.returncode != 0 or match is None
+            or glt_utils.parse_linux_version(match[1]) < glt_utils.parse_linux_version(minimum)):
+        raise _MpamBlocked(
+            f"stress-ng >= {minimum} is required; observed version output "
+            f"{result.stdout.strip()!r} (exit {result.returncode}).")
+
+
+def _mpam_wait_l3_max_clean_baseline(group, occupancy_files):
+    """Poll stale cache occupancy with empty task proofs around each read."""
+    deadline = time.monotonic() + MPAM_L3_MAX_LIVE_BASELINE_TIMEOUT_SEC
+    while True:
+        try:
+            if _mpam_read_group_task_ids(group):
+                raise _MpamBlocked(f"prelaunch task snapshot for {group} was not empty.")
+            occupancy = resctrl_utils.sum_l3_occupancy(occupancy_files)
+            if _mpam_read_group_task_ids(group):
+                raise _MpamBlocked(
+                    f"prelaunch task snapshot for {group} was not empty after occupancy read.")
+        except (OSError, ValueError) as error:
+            raise _MpamBlocked(f"Could not read prelaunch baseline for {group}: {error}") from error
+        if occupancy < MPAM_L3_MAX_LIVE_BASELINE_LIMIT:
+            return occupancy
+        remaining = _mpam_wait_remaining(deadline)
+        if remaining <= 0:
+            raise _MpamBlocked(
+                "prelaunch aggregate llc_occupancy is not clean after "
+                f"{MPAM_L3_MAX_LIVE_BASELINE_TIMEOUT_SEC}s: {occupancy} bytes.")
+        time.sleep(min(MPAM_L3_MAX_LIVE_BASELINE_POLL_SEC, remaining))
+
+
+def _mpam_stop_l3_max_workload(proc, primary_error, cleanup_errors, capture):
+    """Stop this workload with independent leader and group-absence budgets."""
+    errors = []
+    output = None
+    try:
+        if proc.poll() is None:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(proc.pid, sig)
+                except ProcessLookupError:
+                    pass
+                except PermissionError as error:
+                    errors.append(str(error))
+                try:
+                    proc.wait(timeout=5)
+                    break
+                except subprocess.TimeoutExpired as error:
+                    if sig == signal.SIGKILL:
+                        errors.append(str(error))
+        deadline = time.monotonic() + MPAM_L3_MAX_LIVE_KILL_CLEANUP_TIMEOUT_SEC
+        if _mpam_l3_max_group_exists(proc.pid):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError as error:
+                errors.append(str(error))
+        while _mpam_l3_max_group_exists(proc.pid):
+            if time.monotonic() >= deadline:
+                errors.append(
+                    f"process group {proc.pid} still exists after "
+                    f"{MPAM_L3_MAX_LIVE_KILL_CLEANUP_TIMEOUT_SEC} seconds")
+                break
+            time.sleep(MPAM_L3_MAX_LIVE_KILL_CLEANUP_POLL_SEC)
+        cleanup_errors.extend(
+            f"Failed to terminate stress-ng process group {proc.pid}: {error}"
+            for error in errors)
+        output = (_mpam_l3_max_output(proc.pid, capture)
+                  if isinstance(primary_error, _MpamBlocked) else None)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        cleanup_errors.append(
+            f"Failed to terminate stress-ng process group {proc.pid}: {error}")
+    return output
+
+
+def _mpam_quiesce_l3_max_workload(group, deadline, cleanup_errors):
+    """Verify the post-workload task state even when quiescence misses its deadline."""
+    time.sleep(MPAM_L3_MAX_LIVE_QUIESCE_SEC)
+    try:
+        _mpam_require_l3_max_deadline(deadline, "after cleanup quiesce")
+    finally:
+        try:
+            residual_tasks = _mpam_read_group_task_ids(group)
+        except OSError as error:
+            cleanup_errors.append(f"Could not verify residual task state in {group}: {error}")
+        else:
+            if residual_tasks:
+                cleanup_errors.append(
+                    f"residual tasks remained in {group}: {sorted(residual_tasks)}")
+
+
+# Keep lexical capture close, supervisor restoration and primary-error ordering together.
+# TODO: Define a shared ownership/lifecycle boundary before generalizing these resources.
+@contextmanager
+def _mpam_l3_max_workload(group, placement, cleanup_errors):
+    # pylint: disable=too-many-branches
+    """Own supervisor restoration, workload teardown, capture and quiescence."""
+    proc = None
+    supervisor_assigned = False
+    thread_id = None
+    primary_error = None
+    try:
+        thread_id = threading.get_native_id()
+        supervisor_group, supervisor_monitor_group = (
+            _mpam_resctrl_group_for_task(thread_id))
+        try:
+            glt_utils.write_sysfs_value(
+                os.path.join(group, "tasks"), thread_id)
+            supervisor_assigned = True
+            supervisor_tasks = _mpam_read_group_task_ids(group)
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not prove supervisor membership in {group}: {error}"
+            ) from error
+        expected_supervisor_tasks = {str(thread_id)}
+        if supervisor_tasks != expected_supervisor_tasks:
+            raise _MpamBlocked(
+                f"supervisor thread {thread_id} membership in {group}/tasks "
+                f"did not exactly match {sorted(expected_supervisor_tasks)} "
+                f"before launch: {sorted(supervisor_tasks)}.")
+
+        deadline = time.monotonic() + MPAM_L3_MAX_LIVE_OUTER_TIMEOUT_SEC
+        try:
+            capture = tempfile.TemporaryFile(mode="w+b")
+            try:
+                proc = subprocess.Popen(  # pylint: disable=consider-using-with
+                    _mpam_l3_max_stress_argv(placement['node']),
+                    stdout=capture, stderr=subprocess.STDOUT, start_new_session=True)
+            except OSError:
+                capture.close()
+                raise
+        except OSError as error:
+            raise _MpamBlocked(
+                f"Could not launch stress-ng workload: {error}"
+            ) from error
+        _mpam_l3_max_restore_supervisor(
+            thread_id, supervisor_group, supervisor_monitor_group)
+        supervisor_assigned = False
+
+        yield proc, deadline, capture
+    except (_MpamBlocked, ValueError, OSError) as error:
+        primary_error = error
+    finally:
+        if supervisor_assigned:
+            try:
+                _mpam_l3_max_restore_supervisor(
+                    thread_id, supervisor_group, supervisor_monitor_group)
+            except (ValueError, OSError) as error:
+                cleanup_errors.append(str(error))
+        if proc is not None:
+            try:
+                output = _mpam_stop_l3_max_workload(proc, primary_error, cleanup_errors, capture)
+            finally:
+                try:
+                    capture.close()
+                except OSError as error:
+                    cleanup_errors.append(f"Could not close stress-ng output capture: {error}")
+            primary_error = (_MpamBlocked(_mpam_l3_max_blocked_message(primary_error, output))
+                             if isinstance(primary_error, _MpamBlocked) else primary_error)
+            try:
+                _mpam_quiesce_l3_max_workload(group, deadline, cleanup_errors)
+            except _MpamBlocked as error:
+                primary_error = primary_error or error
+    if primary_error is not None:
+        raise primary_error
+
+
+def _mpam_evaluate_l3_max_live_windows(windows):
+    """Evaluate complete low/high per-window medians."""
+    if len(windows) != len(MPAM_L3_MAX_LIVE_PATTERN):
+        raise _MpamBlocked(
+            f"incomplete L3_MAX live window set: {len(windows)}/"
+            f"{len(MPAM_L3_MAX_LIVE_PATTERN)}.")
+    for window in windows:
+        if len(window['samples']) != MPAM_L3_MAX_LIVE_SAMPLE_COUNT:
+            raise _MpamBlocked(
+                f"incomplete sample stream for {window['label']}="
+                f"{window['percentage']}: {len(window['samples'])}/"
+                f"{MPAM_L3_MAX_LIVE_SAMPLE_COUNT}.")
+    observed_pattern = tuple(window['label'] for window in windows)
+    if observed_pattern != MPAM_L3_MAX_LIVE_PATTERN:
+        raise _MpamBlocked(
+            "L3_MAX live windows did not preserve the required low/high "
+            f"sequence: expected {MPAM_L3_MAX_LIVE_PATTERN}, observed "
+            f"{observed_pattern}.")
+    low_medians = [window['median'] for window in windows
+                   if window['label'] == "low"]
+    high_medians = [window['median'] for window in windows
+                    if window['label'] == "high"]
+    if max(low_medians) >= min(high_medians):
+        raise ValueError(
+            "L3_MAX live-effect comparison failed: every low-window median must "
+            f"be below every high-window median; low medians {low_medians}, "
+            f"high medians {high_medians}.")
+    low_center = _median(low_medians)
+    high_center = _median(high_medians)
+    separation = high_center - low_center
+    dispersion = max(
+        max(abs(median - low_center) for median in low_medians),
+        max(abs(median - high_center) for median in high_medians),
+    )
+    if separation <= dispersion:
+        raise ValueError(
+            "L3_MAX live-effect comparison failed: signal separation "
+            f"{separation} is not above dispersion {dispersion}.")
+    if separation < MPAM_L3_MAX_LIVE_MIN_SEPARATION_BYTES:
+        raise ValueError(
+            "L3_MAX live-effect comparison failed: signal separation "
+            f"{separation} bytes is below 1 MiB.")
+    return low_center, high_center, separation, dispersion
 
 
 def _mpam_msc_regions():
@@ -2197,6 +3276,203 @@ def test_mpam_l3_max_schemata(_, logger):  # pylint: disable=too-many-branches
             f"{reason}.")
     if status == "fail":
         GLTCore.GLTTestResult.fail(reason)
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("stress")
+def test_mpam_l3_max_live_effect(_, logger):
+    # pylint: disable=too-many-branches,too-many-nested-blocks
+    """Validate DGX-17928 L3_MAX live effect with stress-ng llc_occupancy."""
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip(
+            "This is not an NVIDIA Vera CPU; test is Vera-specific.")
+    for cli in ("numactl", "stress-ng"):
+        if not glt_utils.is_cli_available(cli):
+            GLTCore.GLTTestResult.skip(
+                f"'{cli}' CLI not available; cannot run L3_MAX live-effect.")
+    try:
+        _mpam_l3_max_require_stress_version()
+    except _MpamBlocked as error:
+        GLTCore.GLTTestResult.skip(str(error))
+    try:
+        _mpam_l3_max_preflight_supervisor_children()
+    except _MpamBlocked as error:
+        GLTCore.GLTTestResult.warn(str(error))
+
+    cleanup_errors = []
+    failure_reason = None
+    blocked_reason = None
+    with resctrl_utils.managed_mount(
+            logger, cleanup_errors=cleanup_errors
+    ) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            failure_reason = "Failed to mount resctrl."
+        else:
+            try:
+                info = _mpam_read_percentage_info("L3_MAX")
+                if info is None:
+                    raise ValueError("info/L3_MAX is absent; L3_MAX resource directory is not exposed.")
+                blocked_reason = _mpam_percentage_policy_reason("L3_MAX", *info)
+                if not blocked_reason:
+                    grid = list(range(info[0], MPAM_PERCENT_MAX + 1, info[1]))
+                    suffix = uuid.uuid4().hex[:8]
+                    group = os.path.join(
+                        resctrl_utils.RESCTRL_MOUNT_POINT,
+                        f"glt_l3_max_{os.getpid()}_{suffix}")
+                    try:
+                        os.mkdir(group)
+                    except FileExistsError:
+                        raise ValueError(
+                            f"resctrl group {group} already exists; refusing to "
+                            "remove a group not created by this test invocation.") from None
+                    schemata_path = os.path.join(group, "schemata")
+                    initial_values = None
+                    try:
+                        schemas = resctrl_utils.read_schemata(schemata_path, ("L3_MAX",))
+                        if "L3_MAX" not in schemas:
+                            raise ValueError(f"L3_MAX resource line is missing from {schemata_path}.")
+                        initial_values = schemas["L3_MAX"]
+                        domains = tuple(initial_values)
+                        pair = _mpam_probe_percentage_pair(
+                            schemata_path, "L3_MAX", domains, initial_values, grid)
+                        if pair is None:
+                            blocked_reason = MPAM_PERCENTAGE_NO_PAIR_REASON.format(
+                                resource="L3_MAX", grid=grid)
+                        else:
+                            low, high = pair
+                            if high - low < MPAM_L3_MAX_LIVE_MIN_SPAN:
+                                raise _MpamBlocked(
+                                    f"L3_MAX selected percentage span {high - low} requires "
+                                    f"at least {MPAM_L3_MAX_LIVE_MIN_SPAN} percentage points.")
+                            placement = _mpam_l3_max_attribution(group)
+                            logger.info("L3_MAX placement node=%s cpus=%s cache IDs=%s.",
+                                        placement['node'], placement['cpus'], placement['cache_ids'])
+                    finally:
+                        try:
+                            if initial_values is not None:
+                                _mpam_restore_percentage_schemata(
+                                    schemata_path, "L3_MAX", domains, initial_values)
+                        except (ValueError, OSError) as error:
+                            cleanup_errors.append(str(error))
+                        finally:
+                            try:
+                                os.rmdir(group)
+                            except OSError as error:
+                                cleanup_errors.append(f"Failed to remove resctrl group {group}: {error}")
+                    if cleanup_errors and not blocked_reason:
+                        raise ValueError("L3_MAX calibration cleanup failed.")
+                    if not blocked_reason:
+                        windows = []
+                        for label in MPAM_L3_MAX_LIVE_PATTERN:
+                            percentage = low if label == "low" else high
+                            suffix = uuid.uuid4().hex[:8]
+                            group = os.path.join(
+                                resctrl_utils.RESCTRL_MOUNT_POINT,
+                                f"glt_l3_max_{os.getpid()}_{suffix}")
+                            try:
+                                os.mkdir(group)
+                            except FileExistsError:
+                                raise ValueError(
+                                    f"resctrl group {group} already exists; refusing to "
+                                    "remove a group not created by this test invocation.") from None
+                            schemata_path = os.path.join(group, "schemata")
+                            initial_values = None
+                            try:
+                                schemas = resctrl_utils.read_schemata(schemata_path, ("L3_MAX",))
+                                if "L3_MAX" not in schemas:
+                                    raise ValueError(f"L3_MAX resource line is missing from {schemata_path}.")
+                                initial_values = schemas["L3_MAX"]
+                                domains = tuple(initial_values)
+                                write_result = _mpam_write_and_require_percentage(
+                                    schemata_path, "L3_MAX", domains, percentage)
+                                logger.info("L3_MAX window %s percentage readback: %s", label, write_result)
+                                occupancy_files = _mpam_l3_max_occupancy_files(group, placement)
+                                prelaunch_occupancy = _mpam_wait_l3_max_clean_baseline(
+                                    group, occupancy_files)
+                                logger.info(
+                                    "L3_MAX window %s prelaunch occupancy=%s.",
+                                    label, prelaunch_occupancy)
+
+                                with _mpam_l3_max_workload(
+                                        group, placement, cleanup_errors) as (proc, deadline, capture):
+                                    logger.info("L3_MAX window %s workload PID=%s.", label, proc.pid)
+                                    _mpam_wait_for_l3_max_membership(
+                                        group, proc, placement, deadline)
+                                    _mpam_sleep_l3_max_with_deadline(
+                                        MPAM_L3_MAX_LIVE_WARMUP_SEC, deadline, "warmup")
+                                    _mpam_wait_for_l3_max_membership(
+                                        group, proc, placement, deadline,
+                                        require_worker_footprint=True)
+                                    samples = _mpam_collect_l3_max_samples(
+                                        proc, deadline, (group, placement, occupancy_files), label, logger)
+                                    stress_result = _mpam_wait_for_l3_max_stress_exit(
+                                        proc, deadline, _mpam_l3_max_stress_argv(placement['node']), capture)
+                                    if _mpam_l3_max_group_exists(proc.pid):
+                                        raise ValueError(
+                                            f"{_mpam_l3_max_stress_result_message(stress_result)} "
+                                            f"Process group {proc.pid} still existed after wait.")
+                                    stress_summary = _mpam_validate_l3_max_stress_result(stress_result)
+                                    _mpam_require_l3_max_deadline(deadline, "stress-ng exit")
+                                    window_median = _median(samples)
+                                    deadline_slack = _mpam_wait_remaining(deadline)
+                                    if stress_result.stdout:
+                                        logger.info(
+                                            "L3_MAX live window %s stress-ng output: %s",
+                                            label, stress_result.stdout)
+                                    logger.info(
+                                        "L3_MAX live window %s stress-ng status: passed=%d skipped=%d "
+                                        "failed=%d metrics_untrustworthy=%d.",
+                                        label, stress_summary['passed'], stress_summary['skipped'],
+                                        stress_summary['failed'], stress_summary['metrics_untrustworthy'])
+                                    logger.info(
+                                        "L3_MAX live window %s deadline slack %.3fs.",
+                                        label, deadline_slack)
+                                    logger.info(
+                                        "L3_MAX window %s median=%s returncode=%s.",
+                                        label, window_median, stress_result.returncode)
+                                if cleanup_errors:
+                                    break
+                                windows.append({"label": label, "percentage": percentage,
+                                                "samples": tuple(samples), "median": window_median})
+                            finally:
+                                try:
+                                    if initial_values is not None:
+                                        _mpam_restore_percentage_schemata(
+                                            schemata_path, "L3_MAX", domains, initial_values)
+                                except (ValueError, OSError) as error:
+                                    cleanup_errors.append(str(error))
+                                finally:
+                                    try:
+                                        os.rmdir(group)
+                                    except OSError as error:
+                                        cleanup_errors.append(f"Failed to remove resctrl group {group}: {error}")
+                            if cleanup_errors:
+                                break
+                        if not cleanup_errors:
+                            low_center, high_center, separation, dispersion = (
+                                _mpam_evaluate_l3_max_live_windows(windows))
+                            logger.info(
+                                "L3_MAX live-effect PASS: low median %.1f, "
+                                "high median %.1f, separation %.1f, dispersion %.1f.",
+                                low_center, high_center, separation, dispersion)
+            except _MpamBlocked as error:
+                blocked_reason = str(error)
+            except (ValueError, OSError) as error:
+                failure_reason = str(error)
+
+    failure_message = _mpam_combined_failure(
+        (failure_reason or blocked_reason)
+        if cleanup_errors else failure_reason, cleanup_errors)
+    if failure_message:
+        GLTCore.GLTTestResult.fail(failure_message)
+    if blocked_reason:
+        GLTCore.GLTTestResult.warn(
+            "L3_MAX live-effect validation could not run: "
+            f"{blocked_reason}")
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
