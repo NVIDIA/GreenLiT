@@ -427,6 +427,25 @@ class TestSchemataParsing(GLTTestBase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def test_read_max_schemata_preserves_decimal_zero_and_integer_domains(self):
+        """MAX calibration retains numeric domain identity and legal zero limits."""
+        for resource in ("L2_MAX", "L3_MAX"):
+            with self.subTest(resource=resource):
+                self.schemata.write_text(f"{resource}:2=0;10=100\n", encoding="ascii")
+                self.assertEqual(
+                    resctrl_utils.read_schemata(self.schemata, (resource,)),
+                    {resource: {2: 0, 10: 100}})
+
+    def test_read_max_schemata_rejects_legacy_permissive_forms(self):
+        """Shared kernel-facing grammar rejects the old MAX parser's extra forms."""
+        for resource in ("L2_MAX", "L3_MAX"):
+            for entry in ("1 = 50", "1=50;", "node=50", "1=-1", "1=+1",
+                          "1=50;1=60", f"1=50\n{resource}:2=60"):
+                with self.subTest(resource=resource, entry=entry):
+                    self.schemata.write_text(f"{resource}:{entry}\n", encoding="ascii")
+                    with self.assertRaises(ValueError):
+                        resctrl_utils.read_schemata(self.schemata, (resource,))
+
     def test_read_schemata_returns_requested_resources_only(self):
         """Unrequested resources are ignored and absent ones are not reported."""
         self.schemata.write_text(

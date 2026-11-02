@@ -1,14 +1,16 @@
 """Unit tests for ARM64 MPAM resctrl schema and workload policy."""
-# pylint: disable=wrong-import-position
+# pylint: disable=wrong-import-position,protected-access,too-many-lines,too-many-public-methods
 
 from contextlib import contextmanager, ExitStack, nullcontext
 import errno
 from io import StringIO
 from itertools import chain, repeat
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 
+from tempfile import TemporaryDirectory
 from tests.test_base import GLTTestBase
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -592,6 +594,330 @@ class TestMpamResctrlInfo(GLTTestBase):
         )
 
 
+class _MpamMaxSchemataHelpers(GLTTestBase):
+    """Shared fixtures for DGX-17928 MPAM percentage-schema unit tests."""
+
+    def setUp(self):
+        """Mock process-group signals for hardware-free MAX unit tests."""
+        super().setUp()
+        self.live_state = None
+        signal_patch = self.mock.patch.object(
+            mpam_resctrl.os, "killpg", side_effect=ProcessLookupError)
+        signal_patch.start()
+        self.addCleanup(signal_patch.stop)
+        for patch in (
+                self.mock.patch.object(mpam_resctrl, "NvDev"),
+                self.mock.patch.object(resctrl_utils, "managed_mount", side_effect=self._mounted)):
+            handle = patch.start()
+            self.addCleanup(patch.stop)
+            if hasattr(handle, "return_value") and patch.attribute == "NvDev":
+                self._patch_vera(handle)
+
+    @staticmethod
+    def _ok_schemata_result():
+        """Return the success value used by write/readback helpers."""
+        return "ok read back exact"
+
+    @staticmethod
+    @contextmanager
+    def _mounted(_logger=None, *, cleanup_errors=None, cleanup_error=None):
+        """Simulate a successful resctrl mount and optional cleanup error."""
+        try:
+            yield True, None
+        finally:
+            if cleanup_errors is not None and cleanup_error is not None:
+                cleanup_errors.append(cleanup_error)
+
+    @staticmethod
+    @contextmanager
+    def _mount_failed_with_cleanup(_logger=None, *, cleanup_errors=None):
+        """Simulate mount failure and append a cleanup failure."""
+        try:
+            yield False, None
+        finally:
+            if cleanup_errors is not None:
+                cleanup_errors.append("umount failed")
+
+    def _patch_vera(self, mock_nvdev, *, vera=True):
+        """Patch NvDev so only Vera detection follows the test flag."""
+        mock_nvdev.return_value.is_cpu_type.side_effect = (
+            lambda name: vera and name == "vera")
+
+    def _seed_percentage_resource(
+            self, root, resource="L3_MAX", *, info=None):
+        """Create percentage resource metadata under a fake resctrl root."""
+        if info is None:
+            info = ("percentage", "1", "1")
+        schema_format, percent_min, percent_gran = info
+        info_dir = root / "info" / resource
+        info_dir.mkdir(parents=True)
+        (info_dir / "schema_format").write_text(
+            f"{schema_format}\n", encoding="utf-8")
+        (info_dir / "percent_min").write_text(
+            f"{percent_min}\n", encoding="utf-8")
+        (info_dir / "percent_gran").write_text(
+            f"{percent_gran}\n", encoding="utf-8")
+
+    @contextmanager
+    def _schemata_environment(self, resource="L3_MAX", *, info=None, initial_line=None):
+        """Emulate kernel-created group files; retain real parser and restoration."""
+        with TemporaryDirectory() as mount:
+            root = Path(mount)
+            self._seed_percentage_resource(root, resource, info=info)
+            mkdir, rmdir = mpam_resctrl.os.mkdir, mpam_resctrl.os.rmdir
+            events = []
+            if initial_line is None:
+                initial_line = f"{resource}:1=100;2=100"
+
+            def create(path, *args, **kwargs):
+                mkdir(path, *args, **kwargs)
+                if Path(path).parent == root and Path(path).name.startswith("glt_"):
+                    (Path(path) / "schemata").write_text(initial_line + "\n", encoding="ascii")
+                    events.append(("mkdir", str(path)))
+
+            def remove(path, *args, **kwargs):
+                if Path(path).parent == root and Path(path).name.startswith("glt_"):
+                    (Path(path) / "schemata").unlink(missing_ok=True)
+                    events.append(("rmdir", str(path)))
+                rmdir(path, *args, **kwargs)
+
+            with self.mock.patch.object(resctrl_utils, "RESCTRL_MOUNT_POINT", mount), \
+                    self.mock.patch.object(resctrl_utils, "managed_mount", side_effect=self._mounted), \
+                    self.mock.patch.object(mpam_resctrl, "NvDev") as nvdev, \
+                    self.mock.patch.object(mpam_resctrl.os, "mkdir", side_effect=create), \
+                    self.mock.patch.object(mpam_resctrl.os, "rmdir", side_effect=remove):
+                self._patch_vera(nvdev)
+                yield root, events
+
+
+class TestMpamMaxDecorated(_MpamMaxSchemataHelpers):
+    """Validate decorated DGX-17928 MPAM L2_MAX/L3_MAX cases."""
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_decorated_success_calls_matching_resource_helper(self, mock_nvdev):
+        """Each decorated MAX case probes and restores only its own resource."""
+        self._patch_vera(mock_nvdev)
+        for resource, entry in (("L2_MAX", mpam_resctrl.test_mpam_l2_max_schemata),):
+            with self.subTest(resource=resource):
+                with self._schemata_environment(resource) as (root, events):
+                    entry(None, self.mock_logger)
+                    self.assertEqual([event[0] for event in events], ["mkdir", "rmdir"])
+                    self.assertIn(f"glt_{resource.lower()}_", events[0][1])
+                    self.assertEqual(list(root.glob("glt_*")), [])
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_l2_max_missing_resource_is_contract_not_exposed_skip(self, mock_nvdev):
+        """Only absent optional L2 skips; required L3 fails after mount."""
+        self._patch_vera(mock_nvdev)
+        with self._schemata_environment("L2_MAX") as (root, events):
+            shutil.rmtree(root / "info" / "L2_MAX")
+            with self.assertRaises(GLTCore.GLTTestSkip) as context:
+                mpam_resctrl.test_mpam_l2_max_schemata(None, self.mock_logger)
+            self.assertEqual(events, [])
+        self.assertIn("info/L2_MAX is absent", str(context.exception))
+        self.assertIn("no L2_MAX assertion was run", str(context.exception))
+        self.assertIn("capability-conditional", str(context.exception))
+        self.assertNotIn("feature-acceptance", str(context.exception))
+        self.assertNotIn("O04", str(context.exception))
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_contract_blocked_maps_to_decorated_warn(self, mock_nvdev):
+        """Real presence plus a blocked probe retains the technical WARN reason."""
+        self._patch_vera(mock_nvdev)
+        for resource, entry in (("L2_MAX", mpam_resctrl.test_mpam_l2_max_schemata),):
+            with self.subTest(resource=resource), self._schemata_environment(resource) as (_root, events):
+                with self.mock.patch.object(mpam_resctrl, "_mpam_probe_percentage_pair",
+                                            return_value=None):
+                    with self.assertRaisesRegex(GLTCore.GLTTestWarn, "no two distinct legal values"):
+                        entry(None, self.mock_logger)
+                self.assertEqual([event[0] for event in events], ["mkdir", "rmdir"])
+
+    def _run_decorated_real_helper_mismatch(self, case):
+        """Drive a decorated L*_MAX case through the real helper cleanup path."""
+        events = []
+        resource = case["resource"]
+        readbacks = list(case["readbacks"])
+        group = f"/fake-{resource.lower()}-group"
+        cleanup_error = case.get(
+            "cleanup_error", f"{resource} unmount cleanup failed")
+
+        @contextmanager
+        def mounted_with_cleanup(_logger, *, cleanup_errors=None):
+            try:
+                yield True, None
+            finally:
+                events.append(("umount", resource))
+                if cleanup_errors is not None and cleanup_error is not None:
+                    cleanup_errors.append(cleanup_error)
+
+        def create_group(path):
+            nonlocal group
+            group = path
+
+        def read(_path, read_resource):
+            self.assertEqual(read_resource, (resource,))
+            _read_domains, read_values, readback = readbacks.pop(0)
+            events.append(("read", readback))
+            return {resource: {int(domain): value for domain, value in read_values.items()}}
+
+        def write(_path, write_resource, domains, value_by_domain):
+            self.assertEqual(write_resource, resource)
+            writeback = f"{resource}:" + ";".join(
+                f"{domain}={value_by_domain[domain]}" for domain in domains)
+            events.append(("write", writeback))
+            return writeback
+
+        def remove_group(path):
+            events.append(("rmdir", path))
+
+        original_fail = mpam_resctrl.GLTCore.GLTTestResult.fail
+
+        def fail(message):
+            events.append(("fail", message))
+            original_fail(message)
+
+        with self.mock.patch.object(mpam_resctrl, "NvDev") as mock_nvdev, \
+                self.mock.patch.object(
+                    resctrl_utils, 'managed_mount',
+                    side_effect=mounted_with_cleanup), \
+                self.mock.patch.object(
+                    mpam_resctrl, "_mpam_read_percentage_info",
+                    return_value=(1, 1)), \
+                self.mock.patch.object(
+                    mpam_resctrl.os, 'mkdir',
+                    side_effect=create_group), \
+                self.mock.patch.object(
+                    resctrl_utils, 'read_schemata',
+                    side_effect=read), \
+                self.mock.patch.object(
+                    mpam_resctrl, "_mpam_write_resource_schemata",
+                    side_effect=write), \
+                self.mock.patch.object(
+                    mpam_resctrl.os, "rmdir", side_effect=remove_group), \
+                self.mock.patch.object(
+                    mpam_resctrl.GLTCore.GLTTestResult, "fail",
+                    side_effect=fail):
+            self._patch_vera(mock_nvdev)
+            with self.assertRaises(GLTCore.GLTTestFail) as context:
+                case["test_case"](None, self.mock_logger)
+
+        self.assertEqual(readbacks, [])
+        self.assertIn(case["expected_write"], str(context.exception))
+        self.assertIn(case["expected_readback"], str(context.exception))
+        self.assertIn("exact per-domain readback is required",
+                      str(context.exception))
+        if cleanup_error is None:
+            self.assertNotIn("cleanup:", str(context.exception))
+        else:
+            self.assertIn(cleanup_error, str(context.exception))
+
+        event_kinds = [event[0] for event in events]
+        rmdir_index = events.index(("rmdir", group))
+        umount_index = events.index(("umount", resource))
+        fail_index = event_kinds.index("fail")
+        self.assertEqual(event_kinds[rmdir_index - 2:rmdir_index],
+                         ["write", "read"])
+        self.assertLess(rmdir_index, umount_index)
+        self.assertLess(umount_index, fail_index)
+
+    def test_decorated_real_helper_mismatches_fail_after_cleanup(self):
+        """Exact readback mismatches fail only after restore, rmdir, and unmount."""
+        cases = (
+            {
+                "name": "l2-upper-wrong-value",
+                "resource": "L2_MAX",
+                "test_case": mpam_resctrl.test_mpam_l2_max_schemata,
+                "readbacks": (
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                    (("1",), {"1": 99}, "L2_MAX:1=99"),
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                ),
+                "expected_write": "wrote 'L2_MAX:1=100'",
+                "expected_readback": "read back 'L2_MAX:1=99'",
+            },
+            {
+                "name": "l2-high-wrong-value",
+                "resource": "L2_MAX",
+                "test_case": mpam_resctrl.test_mpam_l2_max_schemata,
+                "readbacks": (
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                    (("1",), {"1": 100}, "L2_MAX:1=100"),
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                    (("1",), {"1": 1}, "L2_MAX:1=1"),
+                    (("1",), {"1": 99}, "L2_MAX:1=99"),
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                ),
+                "expected_write": "wrote 'L2_MAX:1=100'",
+                "expected_readback": "read back 'L2_MAX:1=99'",
+            },
+            {
+                "name": "l2-low-extra-domain",
+                "resource": "L2_MAX",
+                "test_case": mpam_resctrl.test_mpam_l2_max_schemata,
+                "readbacks": (
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                    (("1",), {"1": 100}, "L2_MAX:1=100"),
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                    (("1", "2"), {"1": 1, "2": 1},
+                     "L2_MAX:1=1;2=1"),
+                    (("1",), {"1": 50}, "L2_MAX:1=50"),
+                ),
+                "expected_write": "wrote 'L2_MAX:1=1'",
+                "expected_readback": "read back 'L2_MAX:1=1;2=1'",
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                self._run_decorated_real_helper_mismatch(case)
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
+    def test_l2_mount_failure_combines_with_mount_cleanup_failure(self, mock_nvdev):
+        """L2 uses the same post-context mount-failure reporting path."""
+        with self._schemata_environment():
+            self._patch_vera(mock_nvdev)
+
+            with self.mock.patch.object(
+                    resctrl_utils, 'managed_mount',
+                    side_effect=self._mount_failed_with_cleanup), \
+                    self.mock.patch.object(
+                        mpam_resctrl, "_mpam_probe_percentage_pair"
+                    ) as helper:
+                with self.assertRaises(GLTCore.GLTTestFail) as context:
+                    mpam_resctrl.test_mpam_l2_max_schemata(None, self.mock_logger)
+
+            self.assertIn("Failed to mount resctrl.", str(context.exception))
+            self.assertIn("umount failed", str(context.exception))
+            helper.assert_not_called()
+
+
+class TestMpamMaxSchemataHelper(_MpamMaxSchemataHelpers):
+    """Validate shared DGX-17928 MPAM percentage-schema helper logic."""
+
+    def test_policy_reason_preserves_exact_diagnostics_and_valid_bounds(self):
+        """Only policy bounds block; valid extremes always contain their first grid value."""
+        for minimum, granularity, field in ((-1, 1, "percent_min"), (100, 1, "percent_min"),
+                                             (1, 0, "percent_gran"), (1, 101, "percent_gran")):
+            value = minimum if field == "percent_min" else granularity
+            bounds = "0 <= percent_min < 100" if field == "percent_min" else "1 <= percent_gran <= 100"
+            self.assertEqual(mpam_resctrl._mpam_percentage_policy_reason("L3_MAX", minimum, granularity),
+                             f"L3_MAX {field} {value} is outside the userspace test-policy range {bounds}.")
+        for minimum, granularity in ((0, 1), (0, 100), (99, 1), (99, 100)):
+            self.assertIsNone(mpam_resctrl._mpam_percentage_policy_reason("L3_MAX", minimum, granularity))
+            self.assertEqual(list(range(minimum, 101, granularity))[0], minimum)
+
+    def test_percentage_metadata_reader_preserves_raw_policy_values(self):
+        """Parsing retains policy facts so decorated cases can decide after cleanup."""
+        for resource in ("L2_MAX", "L3_MAX"):
+            for minimum, granularity in ((-1, 1), (100, 1), (1, 0), (1, 101)):
+                with self.subTest(resource=resource, metadata=(minimum, granularity)):
+                    with self._schemata_environment(
+                            resource, info=("percentage", str(minimum), str(granularity))):
+                        self.assertEqual(
+                            mpam_resctrl._mpam_read_percentage_info(resource),
+                            (minimum, granularity))
+
+
 class TestMpamResctrlMaxLim(GLTTestBase):
     """Check write-access rejection through the public max_lim test."""
 
@@ -649,3 +975,76 @@ class TestMpamResctrlMaxLim(GLTTestBase):
 
 if __name__ == "__main__":
     GLTTestBase.unittest.main()
+
+
+class TestMpamMaxNativeBoundaries(_MpamMaxSchemataHelpers):
+    """Native operation faults must fail after all owned cleanup finishes."""
+
+    @contextmanager
+    def _native_entry_environment(self, resource="L3_MAX"):
+        """Model kernel-created schemata while running the decorated owner."""
+        with TemporaryDirectory() as mount:
+            root = Path(mount)
+            self._seed_percentage_resource(root, resource)
+            mkdir = mpam_resctrl.os.mkdir
+            rmdir = mpam_resctrl.os.rmdir
+            events = []
+
+            def create(path, *args, **kwargs):
+                mkdir(path, *args, **kwargs)
+                (Path(path) / "schemata").write_text(
+                    f"{resource}:1=50;2=50\n", encoding="ascii")
+                events.append("mkdir")
+
+            def remove(path, *args, **kwargs):
+                (Path(path) / "schemata").unlink()
+                rmdir(path, *args, **kwargs)
+                events.append("rmdir")
+
+            @contextmanager
+            def mounted(_logger, **_kwargs):
+                try:
+                    yield True, None
+                finally:
+                    events.append("unmount")
+
+            with ExitStack() as stack:
+                nvdev = stack.enter_context(self.mock.patch.object(mpam_resctrl, "NvDev"))
+                self._patch_vera(nvdev)
+                stack.enter_context(self.mock.patch.object(
+                    resctrl_utils, "RESCTRL_MOUNT_POINT", mount))
+                stack.enter_context(self.mock.patch.object(
+                    resctrl_utils, "managed_mount", side_effect=mounted))
+                stack.enter_context(self.mock.patch.object(
+                    mpam_resctrl.os, "mkdir", side_effect=create))
+                stack.enter_context(self.mock.patch.object(
+                    mpam_resctrl.os, "rmdir", side_effect=remove))
+                stack.enter_context(self.mock.patch.object(
+                    mpam_resctrl.glt_utils, "is_cli_available", return_value=True))
+                stack.enter_context(self.mock.patch.object(
+                    mpam_resctrl, "_mpam_write_and_require_percentage",
+                    return_value="exact readback"))
+                restore = stack.enter_context(self.mock.patch.object(
+                    mpam_resctrl, "_mpam_restore_percentage_schemata"))
+                yield events, restore
+
+    def _native_probe_faults_fail_both_schemata_entries_after_cleanup(self, resource, entry, error_type):
+        """Both MAX policies classify native probe faults as FAIL, never WARN."""
+        with self._native_entry_environment(resource) as (events, restore):
+            with self.mock.patch.object(
+                    mpam_resctrl, "_mpam_probe_percentage_pair",
+                    side_effect=error_type("native probe fault")):
+                with self.assertRaisesRegex(GLTCore.GLTTestFail, "native probe fault"):
+                    entry(None, self.mock_logger)
+            restore.assert_called_once()
+            self.assertEqual(events, ["mkdir", "rmdir", "unmount"])
+
+    def test_native_probe_faults_fail_both_schemata_entries_after_cleanup_l2_max_valueerror(self):
+        """Native ValueError becomes FAIL after L2_MAX cleanup."""
+        self._native_probe_faults_fail_both_schemata_entries_after_cleanup(
+            "L2_MAX", mpam_resctrl.test_mpam_l2_max_schemata, ValueError)
+
+    def test_native_probe_faults_fail_both_schemata_entries_after_cleanup_l2_max_oserror(self):
+        """Native OSError becomes FAIL after L2_MAX cleanup."""
+        self._native_probe_faults_fail_both_schemata_entries_after_cleanup(
+            "L2_MAX", mpam_resctrl.test_mpam_l2_max_schemata, OSError)

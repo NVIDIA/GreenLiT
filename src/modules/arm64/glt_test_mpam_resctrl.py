@@ -30,6 +30,7 @@ import subprocess
 import threading
 import time
 
+import uuid
 from common import glt_core as GLTCore
 from common import glt_utils
 from common import resctrl_utils
@@ -40,6 +41,11 @@ from scripts import check_kernel_config
 PROC_IOMEM = "/proc/iomem"
 MPAM_DEBUGFS_PATH = "/sys/kernel/debug/mpam"
 MPAMF_IDR_HAS_MBW_PART = 1 << 26
+MPAM_PERCENT_MAX = 100
+MPAM_PERCENTAGE_NO_PAIR_REASON = (
+    "{resource} reported grid {grid!r} has no two distinct legal values that "
+    "both differ from the restored initial schemata on every domain."
+)
 MPAM_PLATFORM_CAPABILITIES = {
     "grace": {
         "expected_dirs": ("L3", "L3_MON", "MB"),
@@ -65,6 +71,178 @@ def _read_mb_hlim_schemata(path):
     if schemas["MB"].keys() != schemas["MB_HLIM"].keys():
         raise ValueError(f"MB and MB_HLIM domains do not match in {path}")
     return schemas
+
+
+def _mpam_combined_failure(failure_reason, cleanup_errors):
+    """Return one failure message preserving body and cleanup failures."""
+    if failure_reason and cleanup_errors:
+        return failure_reason + "; cleanup: " + "; ".join(cleanup_errors)
+    if cleanup_errors:
+        return "; ".join(cleanup_errors)
+    return failure_reason
+
+
+def _mpam_read_percentage_info(resource):
+    """Read percentage schema metadata for an MPAM MAX resource."""
+    info_dir = os.path.join(resctrl_utils.RESCTRL_MOUNT_POINT, "info")
+    try:
+        info_stat = os.stat(info_dir)
+    except OSError as error:
+        raise ValueError(
+            f"Could not stat resctrl info directory {info_dir}: {error}"
+        ) from error
+    if not stat.S_ISDIR(info_stat.st_mode):
+        raise ValueError(
+            f"resctrl info path {info_dir} exists but is not a directory."
+        )
+
+    resource_dir = os.path.join(info_dir, resource)
+    try:
+        resource_stat = os.stat(resource_dir)
+    except OSError as error:
+        if error.errno == errno.ENOENT:
+            return None
+        raise ValueError(
+            f"Could not stat {resource} info directory {resource_dir}: {error}"
+        ) from error
+    if not stat.S_ISDIR(resource_stat.st_mode):
+        raise ValueError(
+            f"{resource} info path {resource_dir} exists but is not a directory."
+        )
+
+    try:
+        schema_format = glt_utils.read_sysfs_value(
+            os.path.join(resource_dir, "schema_format"))
+        percent_min = int(glt_utils.read_sysfs_value(
+            os.path.join(resource_dir, "percent_min")))
+        percent_gran = int(glt_utils.read_sysfs_value(
+            os.path.join(resource_dir, "percent_gran")))
+    except (OSError, ValueError) as error:
+        raise ValueError(
+            f"Could not read {resource} percentage info under {resource_dir}: "
+            f"{error}"
+        ) from error
+
+    if schema_format != "percentage":
+        raise ValueError(
+            f"{resource} is not in percentage mode "
+            f"(schema_format={schema_format})."
+        )
+
+    return percent_min, percent_gran
+
+
+def _mpam_percentage_policy_reason(resource, percent_min, percent_gran):
+    """Return the unsupported userspace percentage policy reason, if any."""
+    if not 0 <= percent_min < MPAM_PERCENT_MAX:
+        return (
+            f"{resource} percent_min {percent_min} is outside the "
+            f"userspace test-policy range 0 <= percent_min < "
+            f"{MPAM_PERCENT_MAX}."
+        )
+    if not 1 <= percent_gran <= MPAM_PERCENT_MAX:
+        return (
+            f"{resource} percent_gran {percent_gran} is outside the "
+            f"userspace test-policy range 1 <= percent_gran <= "
+            f"{MPAM_PERCENT_MAX}."
+        )
+    return None
+
+
+def _mpam_write_resource_schemata(schemata_path, resource, domains,
+                                  value_by_domain):
+    """Write one resource's schemata line."""
+    write_line = f"{resource}:" + ";".join(
+        f"{domain}={value_by_domain[domain]}" for domain in domains)
+    try:
+        glt_utils.write_sysfs_value(schemata_path, write_line)
+    except OSError as error:
+        raise ValueError(
+            f"Could not write {resource} schemata {write_line!r} to "
+            f"{schemata_path}: {error}"
+        ) from error
+    return write_line
+
+
+def _mpam_write_and_require_percentage(schemata_path, resource, domains, value):
+    """Write one percentage value and fail if exact readback is not proven."""
+    expected = {domain: value for domain in domains}
+    write_line = _mpam_write_resource_schemata(
+        schemata_path, resource, domains, expected)
+    schemas = resctrl_utils.read_schemata(schemata_path, (resource,))
+    if resource not in schemas:
+        raise ValueError(f"{resource} resource line is missing from {schemata_path}.")
+    read_values = schemas[resource]
+    readback = f"{resource}:" + ";".join(
+        f"{domain}={value}" for domain, value in read_values.items())
+    if read_values != expected:
+        raise ValueError(
+            f"{resource} wrote {write_line!r}, read back "
+            f"{readback!r}; exact per-domain readback is required."
+        )
+    return f"{resource} wrote {write_line!r}, read back {readback!r}."
+
+
+def _mpam_restore_percentage_schemata(schemata_path, resource, domains,
+                                      initial_values):
+    """Restore and exact-read the captured initial schemata values."""
+    write_line = _mpam_write_resource_schemata(
+        schemata_path, resource, domains, initial_values)
+    schemas = resctrl_utils.read_schemata(schemata_path, (resource,))
+    if resource not in schemas:
+        raise ValueError(f"{resource} resource line is missing from {schemata_path}.")
+    read_values = schemas[resource]
+    readback = f"{resource}:" + ";".join(
+        f"{domain}={value}" for domain, value in read_values.items())
+    if read_values != initial_values:
+        raise ValueError(
+            f"Restored {resource} schemata mismatch: wrote {write_line!r}, "
+            f"read back {readback!r}."
+        )
+
+
+def _mpam_value_changes_all_domains(value, initial_values):
+    """Return True when a uniform write differs from every initial domain."""
+    return all(initial != value for initial in initial_values.values())
+
+
+def _mpam_select_distinct_percentage_pair(schemata_path, resource, domains,
+                                          initial_values, grid):
+    """Select deterministic extremal low/high values with exact readback."""
+    selected_low = None
+    for candidate in grid:
+        if not _mpam_value_changes_all_domains(candidate, initial_values):
+            continue
+        _mpam_write_and_require_percentage(
+            schemata_path, resource, domains, candidate)
+        selected_low = candidate
+        break
+
+    selected_high = None
+    for candidate in reversed(grid):
+        if candidate == selected_low:
+            continue
+        if not _mpam_value_changes_all_domains(candidate, initial_values):
+            continue
+        _mpam_write_and_require_percentage(
+            schemata_path, resource, domains, candidate)
+        selected_high = candidate
+        break
+
+    if selected_low is None or selected_high is None:
+        return None
+    return selected_low, selected_high
+
+
+def _mpam_probe_percentage_pair(schemata_path, resource, domains,
+                                initial_values, grid):
+    """Probe the upper bound, restore, then select a distinct low/high pair."""
+    _mpam_write_and_require_percentage(
+        schemata_path, resource, domains, grid[-1])
+    _mpam_restore_percentage_schemata(
+        schemata_path, resource, domains, initial_values)
+    return _mpam_select_distinct_percentage_pair(
+        schemata_path, resource, domains, initial_values, grid)
 
 
 def _cpus_of_node(node) -> list:
@@ -1825,6 +2003,103 @@ def test_mpam_cpuless_numa_domains(_, logger):  # pylint: disable=too-many-branc
         GLTCore.GLTTestResult.skip(
             "No MPAM memory MSC belongs to a CPU-less NUMA node."
         )
+
+
+@GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_mount")
+@GLTCore.GLTTestAttr()
+@GLTCore.GLTPlan("standard")
+@GLTCore.GLTPlan("stress")
+def test_mpam_l2_max_schemata(_, logger):  # pylint: disable=too-many-branches
+    """
+    Verify the Vera MPAM L2_MAX percentage schemata write/readback path.
+
+    JIRA: DGX-17928
+    """
+    if not NvDev().is_cpu_type("vera"):
+        GLTCore.GLTTestResult.skip(
+            "This is not an NVIDIA Vera CPU; test is Vera-specific.")
+
+    cleanup_errors = []
+    status, reason = "ok", ""
+    grid = None
+    with resctrl_utils.managed_mount(
+            logger, cleanup_errors=cleanup_errors) as (mount_succeeded, missing_cli):
+        if missing_cli:
+            GLTCore.GLTTestResult.skip(
+                f"'{missing_cli}' CLI not available. Cannot mount resctrl.")
+        if not mount_succeeded:
+            status, reason = "fail", "Failed to mount resctrl."
+        else:
+            try:
+                info = _mpam_read_percentage_info("L2_MAX")
+                if info is None:
+                    status = "not_exposed"
+                    reason = "info/L2_MAX is absent; L2_MAX resource directory is not exposed."
+                else:
+                    reason = _mpam_percentage_policy_reason("L2_MAX", *info)
+                    if reason:
+                        status = "blocked"
+                    else:
+                        grid = list(range(info[0], MPAM_PERCENT_MAX + 1, info[1]))
+            except (ValueError, OSError) as error:
+                status, reason = "fail", str(error)
+        if status == "ok":
+            try:
+                suffix = uuid.uuid4().hex[:8]
+                group = os.path.join(
+                    resctrl_utils.RESCTRL_MOUNT_POINT,
+                    f"glt_l2_max_{os.getpid()}_{suffix}")
+                try:
+                    os.mkdir(group)
+                except FileExistsError:
+                    raise ValueError(
+                        f"resctrl group {group} already exists; refusing to "
+                        "remove a group not created by this test invocation.") from None
+                schemata_path = os.path.join(group, "schemata")
+                initial_values = None
+                try:
+                    schemas = resctrl_utils.read_schemata(schemata_path, ("L2_MAX",))
+                    if "L2_MAX" not in schemas:
+                        raise ValueError(f"L2_MAX resource line is missing from {schemata_path}.")
+                    initial_values = schemas["L2_MAX"]
+                    domains = tuple(initial_values)
+                    pair = _mpam_probe_percentage_pair(
+                        schemata_path, "L2_MAX", domains, initial_values, grid)
+                    if pair is None:
+                        status = "blocked"
+                        reason = MPAM_PERCENTAGE_NO_PAIR_REASON.format(
+                            resource="L2_MAX", grid=grid)
+                    else:
+                        low, high = pair
+                        logger.info("L2_MAX selected low=%s, high=%s.", low, high)
+                finally:
+                    try:
+                        if initial_values is not None:
+                            _mpam_restore_percentage_schemata(
+                                schemata_path, "L2_MAX", domains, initial_values)
+                    except (ValueError, OSError) as error:
+                        cleanup_errors.append(str(error))
+                    finally:
+                        try:
+                            os.rmdir(group)
+                        except OSError as error:
+                            cleanup_errors.append(f"Failed to remove resctrl group {group}: {error}")
+            except (ValueError, OSError) as error:
+                status, reason = "fail", str(error)
+    if cleanup_errors:
+        GLTCore.GLTTestResult.fail(_mpam_combined_failure(reason, cleanup_errors))
+    if status == "not_exposed":
+        GLTCore.GLTTestResult.skip(
+            "L2_MAX is not exposed on this Vera boot after resctrl "
+            f"prerequisites passed because {reason} L2_MAX is "
+            "capability-conditional, so no L2_MAX assertion was run."
+        )
+    if status == "blocked":
+        GLTCore.GLTTestResult.warn(
+            "L2_MAX percentage schemata could not be validated: "
+            f"{reason}.")
+    if status == "fail":
+        GLTCore.GLTTestResult.fail(reason)
 
 
 @GLTCore.GLTRequires.must_pass("arm64", "test_mpam_resctrl_schemata")
