@@ -141,6 +141,7 @@ sudo rm -rf /usr/local/share/greenlit/linux
 - Run one test case by ID: `sudo glt-test-suite --disruptive --test-case cxl:test_cxl_link_disable_led_error`
 - Run multiple test cases by ID: `sudo glt-test-suite --disruptive --test-case cxl:test_cxl_link_disable_led_error --test-case pci:test_pci_acs_configurability`
 - Verbose output: `sudo glt-test-suite --verbose`
+- Collect `nvidia-bug-report.sh` output into the session log directory after the run (off by default) `sudo glt-test-suite --collect-nv-bug-report`
 - List available tests: `sudo glt-test-suite --list`
 - Display help information: `sudo glt-test-suite --help`
 

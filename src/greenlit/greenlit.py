@@ -305,6 +305,9 @@ def parse_arguments(supported_categories):
                                help="Resume the specific session. (e.g. 1, 2 or -1 for the last session)")
     general_group.add_argument("--verbose", action="store_true", help="Verbose log (logging.debug)")
     general_group.add_argument(
+        "--collect-nv-bug-report", action="store_true",
+        help="Run nvidia-bug-report.sh after the tests and save its output in the session log directory")
+    general_group.add_argument(
         "--ext-dir",
         default="/usr/share/greenlit/executing_dir",
         help="Directory containing external executable tests (default: /usr/share/greenlit/executing_dir)")
@@ -405,15 +408,11 @@ def perform_tests(logger, scheduler):
                 post_hooks.postwarn(scheduler, attr, test_logger)
             # Hook may not return (e.g. reboot); no further tests this run.
 
-    ret, reason = glt_utils.collect_logs(scheduler.log_dir)
-    if not ret:
-        logger.warning(f"Failed to collect logs: {reason}")
-
     show_report(logger, scheduler)
 # pylint: enable=too-many-branches
 
 
-def registry_test_cases(logger, scheduler, verbose=False):
+def registry_test_cases(logger, scheduler, verbose=False, collect_bug_report=False):
     """Register all test cases."""
     if not scheduler.test_categories or not scheduler.test_tags:
         logger.error("categories: %s test tags: %s", scheduler.test_categories, scheduler.test_tags)
@@ -424,6 +423,8 @@ def registry_test_cases(logger, scheduler, verbose=False):
     scheduler.progress_update('Summary', 'Categories', scheduler.test_categories)
 
     scheduler.progress_update('Summary', 'Verbose', bool(verbose))
+
+    scheduler.progress_update('Summary', 'CollectBugReport', bool(collect_bug_report))
 
     for test_obj in scheduler.test_list:
         attr = test_obj.__wrapped__.attr
@@ -500,6 +501,22 @@ def resolve_run_selection(args, supported_categories):
         test_cases=summary.test_cases,
         verbose=requested_verbose or summary.verbose)
     return resume_session_dir, summary, ""
+
+
+def resolve_collect_bug_report(args, scheduler):
+    """Return whether to run nvidia-bug-report.sh, persisting an explicit request.
+
+    A resumed session keeps the choice saved by the original run (e.g. after a
+    reboot), and --collect-nv-bug-report on the resume command turns it on.
+    """
+    saved = any(
+        isinstance(entry.get("Summary"), dict)
+        and entry["Summary"].get("CollectBugReport", False)
+        for entry in scheduler.progress if isinstance(entry, dict))
+    requested = bool(getattr(args, "collect_nv_bug_report", False))
+    if requested and not saved:
+        scheduler.progress_update("Summary", "CollectBugReport", True)
+    return requested or saved
 
 
 def resume_from_session(scheduler, session_dir):
@@ -729,6 +746,7 @@ def test_category_discover():
     return categories
 
 
+# pylint: disable=too-many-branches
 def main():
     """Main function"""
 
@@ -826,10 +844,20 @@ def main():
             print(f"Error: {resume_error}", file=sys.stderr)
             sys.exit(CLI_RUNTIME_ERROR)
     else:
-        registry_test_cases(logger, scheduler, verbose=args.verbose)
+        registry_test_cases(logger, scheduler, verbose=args.verbose,
+                            collect_bug_report=args.collect_nv_bug_report)
+    # Resolve before running tests: a post-hook may reboot and never return,
+    # and the resume-time request must already be saved for the next resume.
+    collect_bug_report = resolve_collect_bug_report(args, scheduler)
     perform_tests(logger, scheduler)
 
+    if collect_bug_report:
+        ret, reason = glt_utils.collect_logs(scheduler.log_dir)
+        if not ret:
+            logger.warning("Failed to collect logs: %s", reason)
+
     logger.info("== Session %s completed ==", session_dir)
+# pylint: enable=too-many-branches
 
 
 if __name__ == "__main__":
