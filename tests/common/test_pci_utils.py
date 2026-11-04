@@ -1,5 +1,6 @@
 """Unit test script for common/pci_utils.py"""
 
+import errno
 import os
 import shutil
 import subprocess
@@ -232,7 +233,7 @@ class TestPciUtils(GLTTestBase):
         self.assertEqual(result, ["0000:e0:00.0"])
         run_mock.assert_called_once_with(
             ["lspci", "-Dnn", "-d", "1a03:1150"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=None,
         )
 
     def test_get_bdfs_by_pci_id_vendor_only(self):
@@ -245,7 +246,7 @@ class TestPciUtils(GLTTestBase):
         self.assertEqual(result, ["0000:e0:00.0"])
         run_mock.assert_called_once_with(
             ["lspci", "-Dnn", "-d", "1a03:"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=None,
         )
 
     def test_get_bdfs_by_pci_id_not_found(self):
@@ -657,18 +658,19 @@ class TestPciUtilsNetAndBlock(GLTTestBase):
 
     def test_iface_pci_bdfs_non_pci(self):
         """A non-PCI interface with no lowers yields an empty set."""
-        with GLTTestBase.unittest.mock.patch(
-            "src.common.pci_utils.os.path.realpath",
-            return_value="/sys/class/net/lo/device",
-        ), GLTTestBase.unittest.mock.patch(
-            "src.common.pci_utils.os.listdir",
-            return_value=["mtu", "operstate"],
-        ), GLTTestBase.unittest.mock.patch(
-            "src.common.pci_utils.glt_utils.read_sysfs_value",
-            side_effect=OSError,
-        ):
-            result = iface_pci_bdfs("lo")
-        self.assertEqual(result, set())
+        for absence in (FileNotFoundError, NotADirectoryError):
+            with GLTTestBase.unittest.mock.patch(
+                "src.common.pci_utils.os.path.realpath",
+                return_value="/sys/class/net/lo/device",
+            ), GLTTestBase.unittest.mock.patch(
+                "src.common.pci_utils.os.listdir",
+                return_value=["mtu", "operstate"],
+            ), GLTTestBase.unittest.mock.patch(
+                "src.common.pci_utils.glt_utils.read_sysfs_value",
+                side_effect=absence,
+            ):
+                result = iface_pci_bdfs("lo")
+            self.assertEqual(result, set())
 
     def test_iface_pci_bdfs_bond(self):
         """A bond descends lower_* and bonding/slaves to physical BDFs."""
@@ -680,47 +682,31 @@ class TestPciUtilsNetAndBlock(GLTTestBase):
                 "/sys/devices/pci0000:00/0000:02:00.0",
         }
 
-        def _listdir(path):
-            if path == "/sys/class/net/bond0":
-                return ["lower_eth0", "bonding", "mtu"]
-            return []
-
-        def _read_sysfs(path):
-            if path == "/sys/class/net/bond0/bonding/slaves":
-                return "eth0 eth1"
-            raise OSError(path)
-
         with GLTTestBase.unittest.mock.patch(
             "src.common.pci_utils.os.path.realpath",
             side_effect=lambda path: realpaths.get(path, path),
         ), GLTTestBase.unittest.mock.patch(
             "src.common.pci_utils.os.listdir",
-            side_effect=_listdir,
-        ), GLTTestBase.unittest.mock.patch(
-            "src.common.pci_utils.glt_utils.read_sysfs_value",
-            side_effect=_read_sysfs,
-        ):
+            return_value=["lower_eth0", "bonding", "mtu"],
+        ) as listing, GLTTestBase.unittest.mock.patch(
+            "src.common.pci_utils.glt_utils.read_sysfs_value", return_value="eth0 eth1",
+        ) as reader:
             result = iface_pci_bdfs("bond0")
+        listing.assert_called_once_with("/sys/class/net/bond0")
+        reader.assert_called_once_with("/sys/class/net/bond0/bonding/slaves")
         self.assertEqual(result, {"0000:01:00.0", "0000:02:00.0"})
 
     def test_iface_pci_bdfs_recursion_guard(self):
         """Mutually-lower interfaces terminate and yield an empty set."""
-        def _listdir(path):
-            if path == "/sys/class/net/vetha":
-                return ["lower_vethb"]
-            if path == "/sys/class/net/vethb":
-                return ["lower_vetha"]
-            return []
-
         with GLTTestBase.unittest.mock.patch(
             "src.common.pci_utils.os.path.realpath",
             side_effect=lambda path: path,
         ), GLTTestBase.unittest.mock.patch(
             "src.common.pci_utils.os.listdir",
-            side_effect=_listdir,
+            side_effect=[["lower_vethb"], ["lower_vetha"]],
         ), GLTTestBase.unittest.mock.patch(
             "src.common.pci_utils.glt_utils.read_sysfs_value",
-            side_effect=OSError,
+            side_effect=FileNotFoundError,
         ):
             result = iface_pci_bdfs("vetha")
         self.assertEqual(result, set())
@@ -853,6 +839,21 @@ class TestPciUtilsNetAndBlock(GLTTestBase):
         ):
             with self.assertRaises(OSError):
                 unsafe_pci_bdfs()
+
+    def test_iface_pci_bdfs_read_error_propagates(self):
+        """A non-absence bond read error cannot certify an empty safety set."""
+        for failure in (PermissionError("denied"), OSError(errno.EIO, "bond I/O failure")):
+            with self.subTest(error=type(failure).__name__):
+                with GLTTestBase.unittest.mock.patch(
+                    "src.common.pci_utils._iface_pci_bdf", return_value=None,
+                ), GLTTestBase.unittest.mock.patch(
+                    "src.common.pci_utils.os.listdir", return_value=[],
+                ), GLTTestBase.unittest.mock.patch(
+                    "src.common.pci_utils.glt_utils.read_sysfs_value", side_effect=failure,
+                ):
+                    with self.assertRaises(OSError) as raised:
+                        iface_pci_bdfs("bond0")
+                self.assertIs(raised.exception, failure)
 
     def test_iface_pci_bdfs_propagates_permission_error(self):
         """Permission errors resolving net sysfs must not look like 'no NIC'."""

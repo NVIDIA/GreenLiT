@@ -81,6 +81,7 @@ _PCI_CLASS_BRIDGE_PREFIX = "0x06"
 
 _BDF_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a-fA-F]$")
 
+
 def _parse_running_kconfig():
     """Return the running kernel's config as a {CONFIG_x: value} dict.
 
@@ -127,30 +128,12 @@ def _skip_reason_endianness():
     return None
 
 
-def _is_arm_smmu_v3_backed(bdf):
-    link = f"/sys/bus/pci/devices/{bdf}/iommu"
-    if not os.path.islink(link):
-        return False
-    target = os.path.realpath(link)
-    for smmu_node in glob.glob("/sys/devices/platform/arm-smmu-v3.*"):
-        if target.startswith(os.path.realpath(smmu_node)):
-            return True
-    return False
-
-
-def _current_driver(bdf):
-    link = f"/sys/bus/pci/devices/{bdf}/driver"
-    if not os.path.islink(link):
-        return None
-    return os.path.basename(os.path.realpath(link))
-
-
 def _display_device_is_safe(bdf):
     """Return whether an idle display device is safe to bind to vfio-pci."""
     path = f"/sys/bus/pci/devices/{bdf}"
-    if _current_driver(bdf) is not None or not os.path.isfile(f"{path}/reset"):
-        return False
     try:
+        if pci_utils.get_pci_driver(bdf) is not None or not os.path.isfile(f"{path}/reset"):
+            return False
         boot_vga = f"{path}/boot_vga"
         if os.path.isfile(boot_vga) and glt_utils.read_sysfs_value(boot_vga) != "0":
             return False
@@ -195,7 +178,7 @@ def _discover_candidate_bdfs(ats_bdfs, logger=None):
             continue
         if not os.path.islink(f"{path}/iommu_group"):
             continue
-        if not _is_arm_smmu_v3_backed(bdf):
+        if not pci_utils.is_arm_smmu_v3_backed(bdf):
             continue
         pci_class = pci_utils.get_pci_class(bdf)
         if not pci_class:
@@ -205,7 +188,7 @@ def _discover_candidate_bdfs(ats_bdfs, logger=None):
             continue
         if pci_class.lower().startswith(_PCI_CLASS_BRIDGE_PREFIX):
             continue
-        if _current_driver(bdf) == "vfio-pci":
+        if pci_utils.get_pci_driver(bdf) == "vfio-pci":
             continue
         candidates.append(bdf)
     candidates.sort(key=lambda b: (0 if b.lower() in ats_bdfs else 1, b))
@@ -222,7 +205,7 @@ def _save_driver_state(store, bdf):
             raw = fh.read().strip()
         orig_override = "" if raw == "(null)" else raw
     store[bdf] = {
-        "orig_driver": _current_driver(bdf) or "",
+        "orig_driver": pci_utils.get_pci_driver(bdf) or "",
         "orig_override": orig_override,
     }
 
@@ -232,7 +215,12 @@ def _restore_driver_state(store, bdf, logger):  # pylint: disable=too-many-retur
     state = store.pop(bdf, None)
     if not state or not os.path.exists(f"/sys/bus/pci/devices/{bdf}"):
         return True
-    if _current_driver(bdf) == "vfio-pci":
+    try:
+        current_driver = pci_utils.get_pci_driver(bdf)
+    except OSError as exc:
+        logger.error("cannot inspect driver for %s during restore: %s", bdf, exc)
+        return False
+    if current_driver == "vfio-pci":
         try:
             with open("/sys/bus/pci/drivers/vfio-pci/unbind", "w", encoding="utf-8") as fh:
                 fh.write(bdf)
@@ -258,10 +246,15 @@ def _restore_driver_state(store, bdf, logger):  # pylint: disable=too-many-retur
     except OSError as exc:
         logger.error("drivers_probe failed for %s: %s", bdf, exc)
         return False
-    if _current_driver(bdf) != orig_driver:
+    try:
+        restored_driver = pci_utils.get_pci_driver(bdf)
+    except OSError as exc:
+        logger.error("cannot verify restored driver for %s: %s", bdf, exc)
+        return False
+    if restored_driver != orig_driver:
         logger.error(
             "failed to restore %s to %s (now %s)", bdf, orig_driver,
-            _current_driver(bdf) or "none")
+            restored_driver or "none")
         return False
     return True
 
@@ -274,7 +267,7 @@ def _bind_vfio_pci(bdf, logger):  # pylint: disable=too-many-return-statements
     if is_display and not _display_device_is_safe(bdf):
         return f"display device {bdf} is not safe to bind"
     subprocess.run(["modprobe", "vfio-pci"], check=False, shell=False)
-    cur = _current_driver(bdf)
+    cur = pci_utils.get_pci_driver(bdf)
     if is_display and cur:
         return f"display device {bdf} became bound to {cur}"
     if cur and cur != "vfio-pci":
@@ -314,7 +307,10 @@ def _bind_usable_candidate(candidates, store, logger):
         if err is None:
             return cand, errors
         errors.append(f"{cand}: {err}")
-        _restore_driver_state(store, cand, logger)
+        if not _restore_driver_state(store, cand, logger):
+            raise OSError(
+                f"{cand}: {err}; driver recovery failed; residual state requires "
+                "manual recovery or reboot")
     return None, errors
 
 
@@ -528,7 +524,11 @@ def test_nested_ste_hitless_update(sd, logger):
     trace_proc = None
     worker_stuck = False
     try:
-        candidates = _discover_candidate_bdfs(ats_bdfs, logger=logger)
+        try:
+            candidates = _discover_candidate_bdfs(ats_bdfs, logger=logger)
+        except OSError as exc:
+            GLTCore.GLTTestResult.fail(
+                f"PCI candidate discovery failed: {exc}", func=test_func)
         if candidates is None:
             GLTCore.GLTTestResult.skip(
                 "cannot determine unsafe PCI BDFs (fail-closed; unable to prove "
@@ -542,8 +542,12 @@ def test_nested_ste_hitless_update(sd, logger):
         # Iterate candidates (ATS-capable first): a bind/vfio-setup failure on
         # one is an environment condition, not a kernel defect, so restore it
         # and try the next; only if NONE bind do we SKIP.
-        bdf, bind_errors = _bind_usable_candidate(
-            candidates, test_func.attr.driver_state, logger)
+        try:
+            bdf, bind_errors = _bind_usable_candidate(
+                candidates, test_func.attr.driver_state, logger)
+        except OSError as exc:
+            GLTCore.GLTTestResult.fail(
+                f"PCI candidate acquisition failed: {exc}", func=test_func)
         if bdf is None:
             GLTCore.GLTTestResult.skip(
                 "no usable vfio-pci endpoint (environment gap, not a kernel "

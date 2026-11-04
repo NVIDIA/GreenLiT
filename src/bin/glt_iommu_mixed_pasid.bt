@@ -1,0 +1,54 @@
+#!/usr/bin/env bpftrace
+// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: GPL-2.0-only
+// Typed, worker-filtered evidence; request context survives return for detach callbacks.
+
+BEGIN
+{
+    printf("{\"event\":\"ready\",\"pid\":%d}\n", $1);
+}
+
+kfunc:vmlinux:iommu_attach_device_pasid
+/pid == $1/
+{
+    @request[tid] = args.pasid;
+    @member[tid] = str(args.dev->kobj.name);
+    $dev = args.dev;
+    $parent = $dev->parent;
+    $gpu_iommu = $dev->iommu;
+    $parent_iommu = $parent->iommu;
+    $gpu_limit = 0;
+    $parent_limit = 0;
+    if ($gpu_iommu != 0) { $gpu_limit = $gpu_iommu->max_pasids; }
+    if ($parent_iommu != 0) { $parent_limit = $parent_iommu->max_pasids; }
+    printf("{\"event\":\"entry\",\"pid\":%d,\"tid\":%d,\"pasid\":%u,\"member\":\"%s\",\"parent\":\"%s\",\"gpu_iommu\":%u,\"parent_iommu\":%u,\"gpu_limit\":%u,\"parent_limit\":%u}\n",
+           pid, tid, args.pasid, str($dev->kobj.name), str($parent->kobj.name),
+           $gpu_iommu != 0, $parent_iommu != 0, $gpu_limit, $parent_limit);
+}
+
+kretfunc:vmlinux:iommu_attach_device_pasid
+/pid == $1/
+{
+    printf("{\"event\":\"return\",\"pid\":%d,\"tid\":%d,\"pasid\":%u,\"member\":\"%s\",\"ret\":%d}\n",
+           pid, tid, @request[tid], @member[tid], retval);
+}
+
+kfunc:vmlinux:arm_smmu_s1_set_dev_pasid
+/pid == $1/
+{
+    printf("{\"event\":\"set\",\"pid\":%d,\"tid\":%d,\"pasid\":%u,\"member\":\"%s\"}\n",
+           pid, tid, args.id, str(args.dev->kobj.name));
+}
+
+kfunc:vmlinux:arm_smmu_blocking_set_dev_pasid
+/pid == $1/
+{
+    printf("{\"event\":\"block\",\"pid\":%d,\"tid\":%d,\"pasid\":%u,\"member\":\"%s\"}\n",
+           pid, tid, args.pasid, str(args.dev->kobj.name));
+}
+
+END
+{
+    clear(@request);
+    clear(@member);
+}

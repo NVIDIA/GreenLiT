@@ -19,6 +19,7 @@ Utilities for inspecting PCI device capabilities via lspci and sysfs.
 
 import os
 import re
+import stat
 import struct
 import subprocess
 from typing import Optional
@@ -46,7 +47,7 @@ _BDF_BARE_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-9a
 BDF_STRICT_RE = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 
 
-def get_bdfs_with_ext_cap(cap_name: str) -> list[str]:
+def get_bdfs_with_ext_cap(cap_name: str, *, timeout=None) -> list[str]:
     """Find all PCI devices that advertise a given extended capability.
 
     Runs ``lspci -Dvv`` and parses the output for capability entries
@@ -55,6 +56,7 @@ def get_bdfs_with_ext_cap(cap_name: str) -> list[str]:
     Args:
         cap_name: Capability name as printed by lspci
                   (e.g. "Access Control Services").
+        timeout: Optional subprocess deadline in seconds; defaults to no deadline.
 
     Returns:
         List of domain-prefixed BDF strings (e.g. "0000:00:1f.0")
@@ -63,7 +65,7 @@ def get_bdfs_with_ext_cap(cap_name: str) -> list[str]:
     try:
         result = subprocess.run(
             ["lspci", "-Dvv"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=timeout,
         )
     except FileNotFoundError:
         return []
@@ -87,13 +89,14 @@ def get_bdfs_with_ext_cap(cap_name: str) -> list[str]:
     return matched_bdfs
 
 
-def get_bdfs_by_pci_id(vendor_id: str, device_id: Optional[str] = None) -> list[str]:
+def get_bdfs_by_pci_id(vendor_id: str, device_id: Optional[str] = None, *, timeout=None) -> list[str]:
     """Find PCI devices matching a vendor (and optionally device) ID.
 
     Args:
         vendor_id: Four-digit hexadecimal PCI vendor ID.
         device_id: Optional four-digit hexadecimal PCI device ID. When
             omitted, all devices from the given vendor are returned.
+        timeout: Optional subprocess deadline in seconds; defaults to no deadline.
 
     Returns:
         List of domain-prefixed BDF strings for matching devices, or empty
@@ -103,7 +106,7 @@ def get_bdfs_by_pci_id(vendor_id: str, device_id: Optional[str] = None) -> list[
     try:
         result = subprocess.run(
             ["lspci", "-Dnn", "-d", pci_id],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, check=False, timeout=timeout,
         )
     except FileNotFoundError:
         return []
@@ -151,6 +154,21 @@ def get_pci_children(parent_bdf: str) -> list[str]:
     except OSError:
         return []
     return [entry for entry in entries if _BDF_BARE_RE.match(entry)]
+
+
+def get_pci_driver(bdf: str) -> Optional[str]:
+    """Return the bound driver, or None for an absent/nonlink driver path.
+
+    Inspection and symlink resolution errors propagate to the caller.
+    """
+    link = f"/sys/bus/pci/devices/{bdf}/driver"
+    try:
+        mode = os.lstat(link).st_mode
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISLNK(mode):
+        return None
+    return os.path.basename(os.path.realpath(link, strict=True))
 
 
 def get_pci_parent(
@@ -315,6 +333,10 @@ def iface_pci_bdfs(iface, _seen=None) -> set:
     Returns:
         set: Lower-cased domain-prefixed BDF strings, or an empty set if no
         physical PCI NIC backs the interface.
+
+    Raises:
+        OSError: if listing the interface directory or reading bonding/slaves
+        fails for a reason other than an absent file or directory component.
     """
     if _seen is None:
         _seen = set()
@@ -337,15 +359,35 @@ def iface_pci_bdfs(iface, _seen=None) -> set:
     try:
         lowers.extend(glt_utils.read_sysfs_value(
             f"/sys/class/net/{iface}/bonding/slaves").split())
-    except PermissionError:
-        raise
-    except OSError:
+    except (FileNotFoundError, NotADirectoryError):
         pass
 
     bdfs = set()
     for lower in lowers:
         bdfs |= iface_pci_bdfs(lower, _seen)
     return bdfs
+
+
+def is_arm_smmu_v3_backed(bdf: str) -> bool:
+    """Return whether the PCI IOMMU link resolves beneath an ARM SMMUv3 node.
+
+    An absent/nonlink IOMMU path returns False; inspection errors propagate.
+    """
+    link = f"/sys/bus/pci/devices/{bdf}/iommu"
+    try:
+        mode = os.lstat(link).st_mode
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISLNK(mode):
+        return False
+    target = os.path.realpath(link, strict=True)
+    with os.scandir("/sys/devices/platform") as entries:
+        for entry in entries:
+            if entry.name.startswith("arm-smmu-v3."):
+                nodepath = os.path.realpath(entry.path, strict=True)
+                if os.path.commonpath((target, nodepath)) == nodepath:
+                    return True
+    return False
 
 
 def is_ats_enabled(bdf: str) -> Optional[bool]:
@@ -486,6 +528,8 @@ def unsafe_pci_bdfs() -> set:
             if bdfs:
                 unsafe.add(bdfs[-1])
     return unsafe
+
+
 def sysfs_path_to_pci_bdf(path: str) -> Optional[str]:
     """Walk a sysfs path upward and return the first valid PCI BDF segment.
 
