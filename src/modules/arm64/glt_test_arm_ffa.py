@@ -409,6 +409,7 @@ def _validate_ffa_firmware_identity(partitions):
 def test_arm_ffa_availability(_, logger):
     """
     Verify ARM FF-A transport is externally usable without internal diags.
+    Architecture: arm64.
 
     This test validates:
     1. CONFIG_ARM_FFA_TRANSPORT is enabled as built-in or module
@@ -421,6 +422,9 @@ def test_arm_ffa_availability(_, logger):
 
     PATCH: https://patch.msgid.link/20260602-b4-ffa-rxtx-map-fixes-v2-1-7cb06508da84@nvidia.com
     """
+    if platform.machine().lower() not in ("arm64", "aarch64", "aarch64_be"):
+        GLTCore.GLTTestResult.skip("FF-A availability validation requires arm64")
+
     # Transport unload/reload cleanup (46dcd68aacca) is outside this
     # functional availability check.
     #
