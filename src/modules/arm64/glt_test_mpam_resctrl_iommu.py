@@ -307,20 +307,26 @@ def test_mpam_resctrl_iommu_group_query(_, logger):
     when the root tasks file names a directory under
     /sys/kernel/iommu_groups. A listed line means the tasks-file walk
     accepted that group as a member of the default resource group. That
-    listing comes from the linux-nvidia assignment series: resctrl
-    assignment 2e9f350f0a33, helpers d2ec08a0ea33, and SMMU get/set
-    668c0fb85146.
+    listing comes from linux-nvidia-6.18: resctrl assignment
+    e82a726ba27e, MPAM partid helpers 5c190e3513a5, and SMMU get/set
+    b8548fcb81ff.
     A group that does not match the default closid is omitted, and an
     empty listing fails this check.
+
+    show_rdt_iommu() obtains the group kset from iommu_get_group_kset()
+    in d5463ce1dd12. Sysfs exposes group IDs but omits each group's
+    partid, so the test cannot determine which other groups should
+    appear in the listing. A single matching entry satisfies the check.
 
     The iommu_group syntax is enabled by mounting resctrl with
     this_is_not_abi. A mount that already includes that option is left in
     place. A mount without it is replaced for the test and restored
     afterward.
 
-    PATCH: NVIDIA SAUCE 2e9f350f0a3338f7a172b11837a95547a05a1275
-    PATCH: d2ec08a0ea333093daa6c8ba6a03cd5803586b7a
-    PATCH: 668c0fb851463efd2444a553685a31fcb1c0d91e
+    PATCH: NVIDIA SAUCE d5463ce1dd12460a9b675609d2adb76af01e4194
+    PATCH: NVIDIA SAUCE e82a726ba27eb1d969c5aa1477f60f67fc199330
+    PATCH: NVIDIA SAUCE 5c190e3513a59892150719c3c5e9a5f7da65c5f2
+    PATCH: NVIDIA SAUCE b8548fcb81ffefce6a1e216722c4f03943dd029f
     """
     skip_reason = _require_kernel_configs()
     if skip_reason:
@@ -366,7 +372,7 @@ def test_mpam_resctrl_iommu_group_assign(_, logger):
     writes the group back to the root tasks file before removing the test
     directories.
 
-    PATCH: NVIDIA SAUCE bf70ae35bce2
+    PATCH: NVIDIA SAUCE e82a726ba27eb1d969c5aa1477f60f67fc199330
     """
     skip_reason = _require_kernel_configs()
     if skip_reason:
