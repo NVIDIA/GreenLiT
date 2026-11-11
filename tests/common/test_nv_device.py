@@ -1,6 +1,7 @@
 """Unit test script for common/nv_device.py"""
 
 import platform
+import shlex
 import subprocess
 from unittest.mock import mock_open
 
@@ -38,20 +39,36 @@ class TestNvDevice(GLTTestBase):
             self.assertFalse(nv_dev.nca_available)
 
     def test_get_nvidia_3d_bdf(self):
-        """Test get_nvidia_3d_bdf method"""
-        # Test with NVIDIA 3D device present
-        with GLTTestBase.unittest.mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value.stdout = "01:00.0\n"
-            result = NvDev.get_nvidia_3d_bdf()
-            self.assertEqual(result, "01:00.0\n")
-            mock_run.assert_called_once()
+        """Keep actual PCI domains so callers can address devices in sysfs."""
+        cases = (
+            ("nonzero domains", "0009:01:00.0\n0002:05:00.1\n",
+             "0009:01:00.0\n0002:05:00.1\n"),
+            ("no devices", "", ""),
+            ("zero domain", "1b:00.0\n43:00.0\n",
+             "0000:1b:00.0\n0000:43:00.0\n"),
+        )
+        for name, short_output, full_output in cases:
+            with self.subTest(name=name):
+                def mock_lspci(command, without_domain=short_output,
+                               with_domain=full_output, **kwargs):
+                    self.assertEqual(kwargs, {
+                        "capture_output": True, "shell": True,
+                        "text": True, "check": False,
+                    })
+                    tokens = shlex.split(command)
+                    lspci_args = tokens[:tokens.index("|")]
+                    self.assertEqual(lspci_args[0], "lspci")
+                    self.assertEqual(lspci_args[lspci_args.index("-d") + 1],
+                                     "10de::302")
+                    stdout = with_domain if "-D" in lspci_args else without_domain
+                    return subprocess.CompletedProcess(command, 0, stdout=stdout)
 
-        # Test without NVIDIA 3D device
-        with GLTTestBase.unittest.mock.patch("subprocess.run") as mock_run:
-            mock_run.return_value.stdout = ""
-            result = NvDev.get_nvidia_3d_bdf()
-            self.assertEqual(result, "")
-            mock_run.assert_called_once()
+                with GLTTestBase.unittest.mock.patch(
+                    "subprocess.run", side_effect=mock_lspci
+                ) as mock_run:
+                    result = NvDev.get_nvidia_3d_bdf()
+                    self.assertEqual(result, full_output)
+                    mock_run.assert_called_once()
 
     def test_get_release_info(self):
         """Test get_release_info method"""
