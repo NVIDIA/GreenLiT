@@ -25,17 +25,23 @@ class TestArmFfaAvailability(GLTTestBase):
         super().setUp()
         self.rxtx_failure = False
         self.ffa_init_logged = True
-        self._start_patch(
-            "src.modules.arm64.glt_test_arm_ffa."
-            "check_kernel_config.parse_kconfig",
-            return_value={
-                arm_ffa.ARM_FFA_CONFIG: "y",
-                arm_ffa.ARM_FFA_SMCCC_CONFIG: "y",
-            },
-        )
-        self._start_patch(
-            "src.modules.arm64.glt_test_arm_ffa._query_ffa_modinfo",
-            return_value=("ffa_module", True),
+        self.transport_mocks = SimpleNamespace(
+            machine=self._start_patch(
+                "src.modules.arm64.glt_test_arm_ffa.platform.machine",
+                return_value="aarch64",
+            ),
+            parse_kconfig=self._start_patch(
+                "src.modules.arm64.glt_test_arm_ffa."
+                "check_kernel_config.parse_kconfig",
+                return_value={
+                    arm_ffa.ARM_FFA_CONFIG: "y",
+                    arm_ffa.ARM_FFA_SMCCC_CONFIG: "y",
+                },
+            ),
+            query_modinfo=self._start_patch(
+                "src.modules.arm64.glt_test_arm_ffa._query_ffa_modinfo",
+                return_value=("ffa_module", True),
+            ),
         )
         self.mock_check_kernel_log = self._start_patch(
             "src.modules.arm64.glt_test_arm_ffa.glt_utils.check_kernel_log",
@@ -121,6 +127,78 @@ class TestArmFfaAvailability(GLTTestBase):
         arm_ffa.test_arm_ffa_availability(None, self.mock_logger)
 
         self.mock_validate_attrs.assert_called_once_with(["arm-ffa-0"])
+
+    def test_preserves_supported_arm_config_validation(self):
+        """Keep configuration failures visible on every supported Arm alias."""
+        probes = (
+            self.transport_mocks.parse_kconfig,
+            self.transport_mocks.query_modinfo,
+            self.mock_check_kernel_log,
+            self.mock_isdir,
+            self.mock_listdir,
+            self.mock_validate_attrs,
+        )
+        for machine in ("aarch64", "arm64", "aarch64_be"):
+            for config_state in ("healthy", "missing", "smccc_disabled"):
+                with self.subTest(machine=machine, config=config_state):
+                    self.transport_mocks.machine.return_value = machine
+                    self.transport_mocks.parse_kconfig.return_value = {
+                        arm_ffa.ARM_FFA_CONFIG: "y",
+                        arm_ffa.ARM_FFA_SMCCC_CONFIG: (
+                            "n" if config_state == "smccc_disabled" else "y"
+                        ),
+                    }
+                    self.transport_mocks.parse_kconfig.side_effect = (
+                        FileNotFoundError("missing config")
+                        if config_state == "missing" else None
+                    )
+                    for probe in probes:
+                        probe.reset_mock()
+
+                    if config_state == "healthy":
+                        arm_ffa.test_arm_ffa_availability(None, self.mock_logger)
+                        self.transport_mocks.query_modinfo.assert_called_once_with()
+                        self.mock_validate_attrs.assert_called_once_with(["arm-ffa-0"])
+                    else:
+                        reason = (
+                            "Kernel config not found" if config_state == "missing"
+                            else "CONFIG_ARM_FFA_SMCCC must be enabled"
+                        )
+                        with self.assertRaisesRegex(GLTCore.GLTTestFail, reason):
+                            arm_ffa.test_arm_ffa_availability(None, self.mock_logger)
+                        self.transport_mocks.query_modinfo.assert_not_called()
+                    self.transport_mocks.parse_kconfig.assert_called_once()
+
+    def test_skips_non_arm_before_transport_probes(self):
+        """Skip ineligible architectures without touching Arm-only interfaces."""
+        probes = (
+            self.transport_mocks.parse_kconfig,
+            self.transport_mocks.query_modinfo,
+            self.mock_check_kernel_log,
+            self.mock_isdir,
+            self.mock_listdir,
+            self.mock_validate_attrs,
+        )
+        for machine in ("x86_64", "i686"):
+            for config_state in ("healthy", "missing"):
+                with self.subTest(machine=machine, config=config_state):
+                    self.transport_mocks.machine.return_value = machine
+                    self.transport_mocks.parse_kconfig.return_value = {
+                        arm_ffa.ARM_FFA_CONFIG: "y",
+                        arm_ffa.ARM_FFA_SMCCC_CONFIG: "y",
+                    }
+                    self.transport_mocks.parse_kconfig.side_effect = (
+                        FileNotFoundError("missing config")
+                        if config_state == "missing" else None
+                    )
+                    for probe in probes:
+                        probe.reset_mock()
+
+                    with self.assertRaisesRegex(GLTCore.GLTTestSkip, "arm64"):
+                        arm_ffa.test_arm_ffa_availability(None, self.mock_logger)
+
+                    for probe in probes:
+                        probe.assert_not_called()
 
 
 class TestArmFfaPartitionAttrs(GLTTestBase):
