@@ -18,16 +18,23 @@ The module hosts the logic of managing test cases
 """
 
 from collections import defaultdict, deque
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from enum import Enum
 from functools import wraps
 import inspect
 import json
+import logging
 import os
-from typing import Callable
+from typing import NoReturn, TypeAlias
+
 from common import glt_logger
 from common import glt_session
 from common import glt_utils
+
+
+# Signature of a post hook: hook(scheduler, attr, logger) -> None.
+PostHook: TypeAlias = Callable[["GLTScheduler", "GLTTestAttr", logging.Logger], None]
 
 
 class PostHooks:
@@ -37,7 +44,7 @@ class PostHooks:
     FAIL → postfail, AFAIL → postafail, WARN → postwarn. Each slot is a callable(scheduler, attr, logger).
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.postsuccess = None  # callable(scheduler, attr, logger)
         self.postskip = None
         self.postafail = None
@@ -50,12 +57,12 @@ class PostHooks:
     @classmethod
     def create(
         cls,
-        postsuccess=None,
-        postskip=None,
-        postafail=None,
-        postfail=None,
-        postwarn=None,
-    ):
+        postsuccess: PostHook | None = None,
+        postskip: PostHook | None = None,
+        postafail: PostHook | None = None,
+        postfail: PostHook | None = None,
+        postwarn: PostHook | None = None,
+    ) -> "PostHooks":
         """
         Build a PostHooks instance for the given callables. Assign the return value
         to your test's attr: my_test.attr.post_hooks = PostHooks.create(...).
@@ -73,7 +80,9 @@ class PostHooks:
     # pylint: enable=unknown-option-value
 
     @staticmethod
-    def for_conditional_reboot(trigger_key: str, condition_fn: Callable[[], bool]):
+    def for_conditional_reboot(
+        trigger_key: str, condition_fn: Callable[[], bool],
+    ) -> PostHook:
         """
         Return a post-hook callable that runs a normal reboot only when progress
         has trigger_key for this test and condition_fn() is true. Use as
@@ -91,11 +100,11 @@ class PostHooks:
 class GLTConditionalCheck:
     """The class to check the condition"""
 
-    def __init__(self):
-        self.all_true = []  # Functions must all return true
-        self.all_false = []  # Functions must all return false
-        self.any_true = []  # At least one must return True
-        self.any_false = []  # At least one must return False
+    def __init__(self) -> None:
+        self.all_true: list[Callable[[], bool]] = []  # Functions must all return true
+        self.all_false: list[Callable[[], bool]] = []  # Functions must all return false
+        self.any_true: list[Callable[[], bool]] = []  # At least one must return True
+        self.any_false: list[Callable[[], bool]] = []  # At least one must return False
 
     def check(self) -> tuple[bool, str]:
         """Validate the conditions for all function groups."""
@@ -104,14 +113,14 @@ class GLTConditionalCheck:
         # Check all_true
         for func in self.all_true:
             if not func():
-                return False, f"{func.__name__} in all_true returned False"
+                return False, f"{getattr(func, '__name__')} in all_true returned False"
             allow = True
             reason += "(ALL TRUE)"
 
         # Check all_false
         for func in self.all_false:
             if func():
-                return False, f"{func.__name__} in all_false returned True"
+                return False, f"{getattr(func, '__name__')} in all_false returned True"
             allow = True
             reason += "(ALL FALSE)"
 
@@ -121,7 +130,7 @@ class GLTConditionalCheck:
             for func in self.any_true:
                 if func():
                     can_do = True
-                    reason += f"(ANY TRUE: {func.desc})"
+                    reason += f"(ANY TRUE: {getattr(func, 'desc')})"
                     break
             if not can_do:
                 return False, "No function in any_true returned True"
@@ -133,7 +142,7 @@ class GLTConditionalCheck:
             for func in self.any_false:
                 if not func():
                     can_do = True
-                    reason += f"(ANY FALSE: {func.desc})"
+                    reason += f"(ANY FALSE: {getattr(func, 'desc')})"
                     break
             if not can_do:
                 return False, "No function in any_false returned False"
@@ -158,20 +167,35 @@ class GLTConditionalSkip(GLTConditionalCheck):
         return self.check()
 
 
+def _get_requires(func: Callable[..., object]) -> "GLTRequires":
+    """Return the requirement set stored on a decorated test, creating it if needed.
+
+    Requirements stay on the wrapped function when one exists, which is where
+    the scheduler reads them. A requirement decorator applied directly, or
+    beneath @GLTTestAttr, has no wrapper yet and stores them on func.
+    """
+    target = getattr(func, "__wrapped__", func)
+    requires = getattr(target, "requires", None)
+    if not isinstance(requires, GLTRequires):
+        requires = GLTRequires()
+        setattr(target, "requires", requires)
+    return requires
+
+
 class GLTRequires:
     """To check reaching requirements before launch"""
 
-    def __init__(self):
-        self.all_true = []  # Functions must all return true
-        self.all_false = []  # Functions must all return false
-        self.any_true = []  # At least one must return True
-        self.any_false = []  # At least one must return False
+    def __init__(self) -> None:
+        self.all_true: list[str] = []  # category:name entries that must pass
+        self.all_false: list[str] = []  # category:name entries that must fail
+        self.any_true: list[str] = []  # at least one must pass
+        self.any_false: list[str] = []  # at least one must fail
 
-    def dependency_names(self):
+    def dependency_names(self) -> list[str]:
         """Return all dependency test IDs referenced by this requirement set."""
         return self.all_true + self.all_false + self.any_true + self.any_false
 
-    def categories(self):
+    def categories(self) -> set[str]:
         """Return the set of category prefixes from "category:name" entries."""
         return {
             dep.split(":", 1)[0]
@@ -180,87 +204,103 @@ class GLTRequires:
         }
 
     @staticmethod
-    def any_fail(category, name):
+    def any_fail(
+        category: str, name: str,
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
         """Decorator for any_fail when discover function"""
 
-        def decorator(func):
-            if not hasattr(func.__wrapped__, "requires"):
-                func.__wrapped__.requires = GLTRequires()
-            func.__wrapped__.requires.any_false.append(f"{category}:{name}")
+        def decorator(func: Callable[..., object]) -> Callable[..., object]:
+            _get_requires(func).any_false.append(f"{category}:{name}")
             return func
 
         return decorator
 
     @staticmethod
-    def any_pass(category, name):
+    def any_pass(
+        category: str, name: str,
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
         """Decorator for any_pass when discover function"""
 
-        def decorator(func):
-            if not hasattr(func.__wrapped__, "requires"):
-                func.__wrapped__.requires = GLTRequires()
-            func.__wrapped__.requires.any_true.append(f"{category}:{name}")
+        def decorator(func: Callable[..., object]) -> Callable[..., object]:
+            _get_requires(func).any_true.append(f"{category}:{name}")
             return func
 
         return decorator
 
-    def can_start(self, sd) -> tuple[bool, str]:
+    def can_start(self, sd: "GLTScheduler") -> tuple[bool, str]:  # pylint: disable=too-many-branches
         """Validate the conditions for all function groups."""
         # Check all_true
         for func in self.all_true:
-            attr = sd.get_test_obj_by_name(func).__wrapped__.attr
-            if attr.result[0] != GLTTestResult.PASS:
-                return False, f"{attr.name} in all_true returned False"
+            test_obj = sd.get_test_obj_by_name(func)
+            if test_obj is None:
+                raise AttributeError(f"{func} is not a scheduled test")
+            attr = _get_wrapped_attr(test_obj)
+            outcome = getattr(attr, "result", None)
+            if outcome is None or outcome[0] != GLTTestResult.PASS:
+                return False, f"{getattr(attr, 'name')} in all_true did not pass"
 
         # Check all_false
         for func in self.all_false:
-            attr = sd.get_test_obj_by_name(func).__wrapped__.attr
-            if attr.result[0] != GLTTestResult.FAIL:
-                return False, f"{attr.name} in all_false returned True"
+            test_obj = sd.get_test_obj_by_name(func)
+            if test_obj is None:
+                raise AttributeError(f"{func} is not a scheduled test")
+            attr = _get_wrapped_attr(test_obj)
+            outcome = getattr(attr, "result", None)
+            if outcome is None or outcome[0] != GLTTestResult.FAIL:
+                return False, f"{getattr(attr, 'name')} in all_false did not fail"
 
         # Check any_true
         if self.any_true:
             result = False
             for func in self.any_true:
-                attr = sd.get_test_obj_by_name(func).__wrapped__.attr
-                if attr.result[0] == GLTTestResult.PASS:
+                test_obj = sd.get_test_obj_by_name(func)
+                if test_obj is None:
+                    raise AttributeError(f"{func} is not a scheduled test")
+                attr = _get_wrapped_attr(test_obj)
+                outcome = getattr(attr, "result", None)
+                if outcome is not None and outcome[0] == GLTTestResult.PASS:
                     result = True
                     break
             if not result:
-                return False, "No function in any_true returned True"
+                return False, "No function in any_true passed"
 
         # Check any_false
         if self.any_false:
             result = False
             for func in self.any_false:
-                attr = sd.get_test_obj_by_name(func).__wrapped__.attr
-                if attr.result[0] == GLTTestResult.FAIL:
+                test_obj = sd.get_test_obj_by_name(func)
+                if test_obj is None:
+                    raise AttributeError(f"{func} is not a scheduled test")
+                attr = _get_wrapped_attr(test_obj)
+                outcome = getattr(attr, "result", None)
+                if outcome is not None and outcome[0] == GLTTestResult.FAIL:
                     result = True
                     break
             if not result:
-                return False, "No function in any_false returned False"
+                return False, "No function in any_false failed"
 
         return True, ""
 
     @staticmethod
-    def must_fail(category, name):
+    def must_fail(
+        category: str, name: str,
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
         """Decorator for must_fail when discover function"""
 
-        def decorator(func):
-            if not hasattr(func.__wrapped__, "requires"):
-                func.__wrapped__.requires = GLTRequires()
-            func.__wrapped__.requires.all_false.append(f"{category}:{name}")
+        def decorator(func: Callable[..., object]) -> Callable[..., object]:
+            _get_requires(func).all_false.append(f"{category}:{name}")
             return func
 
         return decorator
 
     @staticmethod
-    def must_pass(category, name):
+    def must_pass(
+        category: str, name: str,
+    ) -> Callable[[Callable[..., object]], Callable[..., object]]:
         """Decorator for must_pass when discover function"""
 
-        def decorator(func):
-            if not hasattr(func.__wrapped__, "requires"):
-                func.__wrapped__.requires = GLTRequires()
-            func.__wrapped__.requires.all_true.append(f"{category}:{name}")
+        def decorator(func: Callable[..., object]) -> Callable[..., object]:
+            _get_requires(func).all_true.append(f"{category}:{name}")
             return func
 
         return decorator
@@ -295,7 +335,7 @@ class GLTPlanType(Enum):
         self.nested = nested
 
     @classmethod
-    def get_all_nested(cls, plan_value):
+    def get_all_nested(cls, plan_value: str | Iterable[str]) -> set[str]:
         """Return a set of all plans nested under the given plan (including itself)."""
         if isinstance(plan_value, str):
             to_process = [plan_value]
@@ -315,7 +355,7 @@ class GLTPlanType(Enum):
 class GLTPlan:
     """GLT Test Plan"""
 
-    def __init__(self, plan_type):
+    def __init__(self, plan_type: str) -> None:
         valid_values = [t.value for t in GLTPlanType]
         if plan_type not in valid_values:
             raise ValueError(
@@ -323,15 +363,18 @@ class GLTPlan:
             )
         self.plan_type = plan_type
 
-    def __call__(self, func):
+    def __call__(self, func: Callable[..., object]) -> Callable[..., object]:
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: object, **kwargs: object) -> object:
             return func(*args, **kwargs)
 
-        if not hasattr(wrapper, "plans"):
-            setattr(wrapper, "plans", [])
+        plans = getattr(wrapper, "plans", None)
+        if not isinstance(plans, list):
+            plans = []
+            setattr(wrapper, "plans", plans)
 
-        selected_plans = set(wrapper.plans) | {self.plan_type}
+        selected_plans = {plan for plan in plans if isinstance(plan, str)}
+        selected_plans.add(self.plan_type)
         incompatible_plans = {
             GLTPlanType.STANDARD.value,
             GLTPlanType.DISRUPTIVE.value,
@@ -341,25 +384,39 @@ class GLTPlan:
                 "A test case cannot belong to both standard and disruptive plans."
             )
 
-        wrapper.plans.append(self.plan_type)
+        plans.append(self.plan_type)
         return wrapper
 
 
 class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
     """GLT test case attributes"""
 
-    def __init__(self, cat=None, name=None, func=None):
-        self.plans = []
+    def __init__(
+        self,
+        cat: str | None = None,
+        name: str | None = None,
+        func: Callable[..., object] | None = None,
+    ) -> None:
+        self.plans: list[str] = []
         self.category = cat
         self.name = name
         self.func = func
         self.allow_failure = GLTAllowFailure()
         self.conditional_skip = GLTConditionalSkip()
-        self.result = None
+        self.result: tuple["GLTTestResult", str] | None = None
 
-    def __call__(self, func):
+    def __call__(self, func: Callable[..., object]) -> Callable[..., object]:
+        if not self.name:
+            function_name = getattr(func, "__name__", None)
+            if not isinstance(function_name, str):
+                raise TypeError(
+                    "test function __name__ must be str, "
+                    f"got {type(function_name).__name__}"
+                )
+            self.name = function_name
+
         @wraps(func)
-        def wrapper(*args, **kwargs):
+        def wrapper(*args: object, **kwargs: object) -> object:
             return func(*args, **kwargs)
 
         if not hasattr(func, "attr"):
@@ -367,7 +424,7 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
         # The name bound in the test module is this wrapper, not the inner func.
         # Set wrapper.attr so the author can write test_xyz.attr.post_hooks = ...
         # without reaching through __wrapped__.
-        wrapper.attr = self
+        setattr(wrapper, "attr", self)
 
         caller_frame = inspect.stack()[1]
         filepath = caller_frame.filename
@@ -375,17 +432,15 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
         if not self.category:
             self.category = self._extract_cat(filepath)
 
-        if not self.name:
-            self.name = func.__name__
-
         if not self.func:
             self.func = func
 
         if not self.result:
             self.result = (GLTTestResult.NA, "")
 
-        if hasattr(func, "plans"):
-            self.plans = func.plans
+        plans = getattr(func, "plans", None)
+        if isinstance(plans, list) and all(isinstance(plan, str) for plan in plans):
+            self.plans = [plan for plan in plans if isinstance(plan, str)]
 
         return wrapper
 
@@ -398,72 +453,78 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
         raise ValueError(f"Not able to detect category from {filepath}")
 
     # pylint: disable=too-many-branches
-    def dump_attrs(self, logger=None):
+    def dump_attrs(self, logger: logging.Logger | None = None) -> None:
         """Dump test case attributes"""
         if logger is None:
             output = print
         else:
             output = logger.debug
+        func = self.func
         output(f"[{self.category}:{self.name}]")
-        output(f" - function: {self.func}")
+        output(f" - function: {func}")
+        if func is None:
+            return
         if self.plans:
             output(" - plans:")
             for plan in self.plans:
                 output(f"  - {plan}")
-        if hasattr(self.func, "requires"):
+        requires = getattr(func, "requires", None)
+        if isinstance(requires, GLTRequires):
             output(" - requires:")
-            if self.func.requires.all_true:
+            if requires.all_true:
                 output("  - all_true:")
-                for item in self.func.requires.all_true:
+                for item in requires.all_true:
                     output(f"   - [{item}]")
-            if self.func.requires.all_false:
+            if requires.all_false:
                 output("  - all_false:")
-                for item in self.func.requires.all_false:
+                for item in requires.all_false:
                     output(f"   - [{item}]")
-            if self.func.requires.any_true:
+            if requires.any_true:
                 output("  - any_true:")
-                for item in self.func.requires.any_true:
+                for item in requires.any_true:
                     output(f"   - [{item}]")
-            if self.func.requires.any_false:
+            if requires.any_false:
                 output("  - any_false:")
-                for item in self.func.requires.any_false:
+                for item in requires.any_false:
                     output(f"   - [{item}]")
-        if hasattr(self.func.attr, "conditional_skip"):
+        conditional_skip = getattr(getattr(func, "attr", None), "conditional_skip", None)
+        if isinstance(conditional_skip, GLTConditionalSkip):
             output(" - conditional_skip:")
-            if self.func.attr.conditional_skip.all_true:
+            if conditional_skip.all_true:
                 output("  - all_true:")
-                for f in self.func.attr.conditional_skip.all_true:
-                    output(f"   - [{f.desc}]")
-            if self.func.attr.conditional_skip.all_false:
+                for condition in conditional_skip.all_true:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+            if conditional_skip.all_false:
                 output("  - all_false:")
-                for f in self.func.attr.conditional_skip.all_false:
-                    output(f"   - [{f.desc}]")
-            if self.func.attr.conditional_skip.any_true:
+                for condition in conditional_skip.all_false:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+            if conditional_skip.any_true:
                 output("  - any_true:")
-                for f in self.func.attr.conditional_skip.any_true:
-                    output(f"   - [{f.desc}]")
-            if self.func.attr.conditional_skip.any_false:
+                for condition in conditional_skip.any_true:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+            if conditional_skip.any_false:
                 output("  - any_false:")
-                for f in self.func.attr.conditional_skip.any_false:
-                    output(f"   - [{f.desc}]")
-        if hasattr(self.func.attr, "allow_failure"):
+                for condition in conditional_skip.any_false:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+        allow_failure = getattr(getattr(func, "attr", None), "allow_failure", None)
+        if isinstance(allow_failure, GLTAllowFailure):
             output(" - allow_failure:")
-            if self.func.attr.allow_failure.all_true:
+            if allow_failure.all_true:
                 output("  - all_true:")
-                for f in self.func.attr.allow_failure.all_true:
-                    output(f"   - [{f.desc}]")
-            if self.func.attr.allow_failure.all_false:
+                for condition in allow_failure.all_true:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+            if allow_failure.all_false:
                 output("  - all_false:")
-                for f in self.func.attr.allow_failure.all_false:
-                    output(f"   - [{f.desc}]")
-            if self.func.attr.allow_failure.any_true:
+                for condition in allow_failure.all_false:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+            if allow_failure.any_true:
                 output("  - any_true:")
-                for f in self.func.attr.allow_failure.any_true:
-                    output(f"   - [{f.desc}]")
-            if self.func.attr.allow_failure.any_false:
+                for condition in allow_failure.any_true:
+                    output(f"   - [{getattr(condition, 'desc')}]")
+            if allow_failure.any_false:
                 output("  - any_false:")
-                for f in self.func.attr.allow_failure.any_false:
-                    output(f"   - [{f.desc}]")
+                for condition in allow_failure.any_false:
+                    output(f"   - [{getattr(condition, 'desc')}]")
         if self.result:
             output(f" - result: [{self.result[0].value}] {self.result[1]}")
 
@@ -482,6 +543,22 @@ class GLTTestWarn(Exception):
     """Exception class for warned GLT test case"""
 
 
+def _record_test_result(target: object, result: tuple["GLTTestResult", str]) -> None:
+    """Store result on a decorated test, preferring the wrapped function."""
+    wrapped = getattr(target, "__wrapped__", None)
+    if wrapped is not None:
+        attr = getattr(wrapped, "attr", None)
+        if isinstance(attr, GLTTestAttr):
+            attr.result = result
+            return
+        raise AttributeError("wrapped test has no GLTTestAttr")
+    attr = getattr(target, "attr", None)
+    if isinstance(attr, GLTTestAttr):
+        attr.result = result
+        return
+    raise AttributeError("test has no GLTTestAttr")
+
+
 class GLTTestResult(Enum):
     """GLT Test results"""
 
@@ -493,7 +570,7 @@ class GLTTestResult(Enum):
     NA = "N/A"
 
     @classmethod
-    def colors(cls):
+    def colors(cls) -> dict["GLTTestResult", str]:
         """Get the color map"""
         return {
             cls.FAIL: "\033[31m",  # Red
@@ -505,53 +582,56 @@ class GLTTestResult(Enum):
         }
 
     @classmethod
-    def colorize(cls, result):
+    def colorize(cls, result: "GLTTestResult") -> str:
         """Return the colored string"""
         colors = cls.colors()
         color = colors.get(result, "")
         return f"{color}{result.value}\033[0m"  # Reset color
 
     @staticmethod
-    def skip(reason="", func=None):
+    def skip(reason: str = "", func: Callable[..., object] | None = None) -> NoReturn:
         """Skip the test case and apply reason to function"""
+        target: object = func
         if not func:
             caller_frame = inspect.stack()[1]
             caller_func = caller_frame.function
-            func = caller_frame.frame.f_globals.get(caller_func)
-        if hasattr(func, "__wrapped__"):
-            func.__wrapped__.attr.result = (GLTTestResult.SKIP, reason)
-        elif hasattr(func, "attr"):
-            func.attr.result = (GLTTestResult.SKIP, reason)
+            target = caller_frame.frame.f_globals.get(caller_func)
+        _record_test_result(target, (GLTTestResult.SKIP, reason))
 
         raise GLTTestSkip(reason)
 
     @staticmethod
-    def fail(reason="", func=None):
+    def fail(reason: str = "", func: Callable[..., object] | None = None) -> NoReturn:
         """Fail the test case and apply reason to function"""
+        target: object = func
         if not func:
             caller_frame = inspect.stack()[1]
             caller_func = caller_frame.function
-            func = caller_frame.frame.f_globals.get(caller_func)
-        if hasattr(func, "__wrapped__"):
-            func.__wrapped__.attr.result = (GLTTestResult.FAIL, reason)
-        elif hasattr(func, "attr"):
-            func.attr.result = (GLTTestResult.FAIL, reason)
+            target = caller_frame.frame.f_globals.get(caller_func)
+        _record_test_result(target, (GLTTestResult.FAIL, reason))
 
         raise GLTTestFail(reason)
 
     @staticmethod
-    def warn(reason="", func=None):
+    def warn(reason: str = "", func: Callable[..., object] | None = None) -> NoReturn:
         """Warn from the test case and apply reason to function"""
+        target: object = func
         if not func:
             caller_frame = inspect.stack()[1]
             caller_func = caller_frame.function
-            func = caller_frame.frame.f_globals.get(caller_func)
-        if hasattr(func, "__wrapped__"):
-            func.__wrapped__.attr.result = (GLTTestResult.WARN, reason)
-        elif hasattr(func, "attr"):
-            func.attr.result = (GLTTestResult.WARN, reason)
+            target = caller_frame.frame.f_globals.get(caller_func)
+        _record_test_result(target, (GLTTestResult.WARN, reason))
 
         raise GLTTestWarn(reason)
+
+
+def _get_wrapped_attr(test_obj: object) -> object:
+    """Return the attribute record attached to a decorated test."""
+    wrapped = getattr(test_obj, "__wrapped__", None)
+    attr = getattr(wrapped, "attr", None)
+    if attr is None:
+        raise AttributeError("scheduled test has no GLTTestAttr")
+    return attr
 
 
 # pylint: disable=too-many-instance-attributes
@@ -561,19 +641,22 @@ class GLTScheduler:
     Test case will be stored as f"{category}:{test_case}".
     """
 
-    def __init__(self, test_objs, logdir=None):
+    def __init__(
+        self, test_objs: Iterable[Callable[..., object]], logdir: str | None = None,
+    ) -> None:
         self.dependencies = defaultdict(list)
         self.test_categories = []
         self.test_tags = set()
-        self.test_list = []
-        self.test_map = {}
-        self.progress = []
+        self.test_list: list[Callable[..., object]] = []
+        self.test_map: dict[str, Callable[..., object]] = {}
+        self.progress: list[object] = []
         self.log_dir = logdir
         for test_obj in test_objs:
             name = self.get_test_case_name(test_obj)
             self.test_list.append(test_obj)
-            if hasattr(test_obj.__wrapped__, "requires"):
-                reqs = test_obj.__wrapped__.requires
+            wrapped = getattr(test_obj, "__wrapped__", None)
+            reqs = getattr(wrapped, "requires", None)
+            if isinstance(reqs, GLTRequires):
                 if reqs.all_true:
                     for item in reqs.all_true:
                         self.add_dependency(name, item)
@@ -586,63 +669,81 @@ class GLTScheduler:
                 if reqs.any_false:
                     for item in reqs.any_false:
                         self.add_dependency(name, item)
+            elif reqs is not None:
+                raise TypeError(f"{name}: requires must be GLTRequires, got {type(reqs).__name__}")
 
-    def add_dependency(self, case, depends_on):
+    def add_dependency(self, case: str, depends_on: str) -> None:
         """Add a dependency: the case depends on depends_on."""
         self.dependencies[depends_on].append(case)
 
     @staticmethod
-    def get_test_case_name(test_obj):
+    def get_test_case_name(test_obj: Callable[..., object]) -> str:
         """Return the test case name for structuring"""
-        return (
-            f"{test_obj.__wrapped__.attr.category}:"
-            + f"{test_obj.__wrapped__.attr.name}"
-        )
+        attr = _get_wrapped_attr(test_obj)
+        return f"{getattr(attr, 'category')}:{getattr(attr, 'name')}"
 
-    def get_test_obj_by_name(self, name):
-        """Return the test object by test case name"""
+    def get_test_obj_by_name(self, name: str) -> Callable[..., object] | None:
+        """Return the test object by test case name.
+
+        None means the scheduler has no test with that name.
+        """
         return None if not self.test_map else self.test_map.get(name)
 
-    def progress_delete_time(self, item, status, save=True):
+    def progress_delete_time(self, item: str, status: str, save: bool = True) -> None:
         """
         Delete time stamp for a test item.
         item: test case name in string.
         status: 'Start', 'Completed' or custom status for test case itself.
         """
-        for e in self.progress:
-            if item in e:
-                e[item].pop(status, None)
+        for entry in self.progress:
+            if not isinstance(entry, dict):
+                continue
+            record = entry.get(item)
+            if isinstance(record, dict):
+                record.pop(status, None)
 
         if save:
             self.progress_save()
 
-    def progress_check(self, item, k) -> bool:
+    def progress_check(self, item: str, k: str) -> bool:
         """Check if key exists in specific test item"""
-        for ti in self.progress:
-            if item in ti and k in ti[item]:
+        for entry in self.progress:
+            if not isinstance(entry, dict):
+                continue
+            record = entry.get(item)
+            if isinstance(record, dict) and k in record:
                 return True
         return False
 
-    def progress_update(self, item, k, v, save=True):
+    def progress_update(
+        self, item: str, k: str, v: object, save: bool = True,
+    ) -> None:
         """
         Save test progress.
         item: test case name in string.
         k: key to save in dict.
         v: value to save in dict.
         """
-        if any(item in e for e in self.progress):
-            for e in self.progress:
-                if item in e:
-                    e[item].update({k: v})
-        else:
+        updated = False
+        for entry in self.progress:
+            if not isinstance(entry, dict):
+                continue
+            record = entry.get(item)
+            if isinstance(record, dict):
+                record[k] = v
+                updated = True
+        if not updated:
             self.progress.append({item: {k: v}})
 
         if save:
             self.progress_save()
 
-    def progress_read(self, session_dir=None):  # pylint: disable=too-many-branches
+    # pylint: disable=too-many-branches,too-many-return-statements
+    def progress_read(self, session_dir: str | os.PathLike[str] | None = None) -> str:
         """Load the test progress from file."""
         if session_dir is None:
+            if self.log_dir is None:
+                return "Unable to read resume progress: scheduler log directory is unset"
             progress_path = os.path.join(
                 self.log_dir, glt_session.SESSION_PROGRESS_FILE)
         else:
@@ -658,10 +759,17 @@ class GLTScheduler:
         if summary_error:
             return summary_error
 
+        progress = session_progress.progress
+        if not isinstance(progress, list):
+            return (
+                f"Resume progress in {session_progress.progress_path} "
+                "has invalid format (expected a JSON array)")
+
         # Validate all entries before mutating scheduler or test state.
-        resume_test_list = []
-        resume_results = []
-        for item in session_progress.progress:
+        resume_test_list: list[Callable[..., object]] = []
+        resume_results: list[tuple[object, tuple[GLTTestResult, str]]] = []
+        # progress stays object until the cached payload is modeled.
+        for item in progress:  # pylint: disable=not-an-iterable
             if not isinstance(item, dict):
                 continue
             if isinstance(item.get("Summary"), dict):
@@ -670,25 +778,48 @@ class GLTScheduler:
             for case, status in item.items():
                 if not isinstance(status, dict) or not status.get("Category"):
                     continue
-                obj_name = f"{status['Category']}:{case}"
+                category = status["Category"]
+                if not isinstance(category, str):
+                    continue
+                obj_name = f"{category}:{case}"
                 test_obj = self.get_test_obj_by_name(obj_name)
                 if test_obj is None:
                     return (
                         "Resume progress references unknown test case "
                         f"{obj_name}")
-                attr = test_obj.__wrapped__.attr
+                attr = _get_wrapped_attr(test_obj)
                 if "Result" in status:
+                    result_value = status["Result"]
+                    result_reason = status.get("ResultReason")
+                    if not isinstance(result_value, str):
+                        return f"Resume progress Result for {obj_name} is not a string"
+                    if not isinstance(result_reason, str):
+                        return (
+                            f"Resume progress ResultReason for {obj_name} "
+                            "is not a string"
+                        )
+                    try:
+                        parsed_result = GLTTestResult(result_value)
+                    except ValueError:
+                        return (
+                            f"Resume progress result for {obj_name} is invalid: "
+                            f"{result_value}"
+                        )
                     resume_results.append((attr, (
-                        GLTTestResult(status["Result"]),
-                        status["ResultReason"],
+                        parsed_result,
+                        result_reason,
                     )))
                 resume_test_list.append(test_obj)
 
-        self.progress = session_progress.progress
-        self.test_tags = session_progress.summary.test_tags
-        self.test_categories = session_progress.summary.categories
+        summary = session_progress.summary
+        if summary is None:
+            return "Resume progress has no usable summary"
+
+        self.progress = progress
+        self.test_tags = summary.test_tags
+        self.test_categories = summary.categories
         for attr, result in resume_results:
-            attr.result = result
+            setattr(attr, "result", result)
 
         # Update the test list only after finding resumable test entries.
         if resume_test_list:
@@ -696,7 +827,7 @@ class GLTScheduler:
 
         return ""
 
-    def progress_record_time(self, item, status, save=True):
+    def progress_record_time(self, item: str, status: str, save: bool = True) -> None:
         """
         Save time stamp for a test item.
         item: test case name in string.
@@ -705,14 +836,14 @@ class GLTScheduler:
         current_time = datetime.now().strftime(glt_logger.LOGGING_DATE_FORMAT)
         self.progress_update(item, status, current_time, save)
 
-    def progress_save(self):
+    def progress_save(self) -> None:
         """Save test progress to filesystem."""
         with open(
             f"{self.log_dir}/test_progress.json", "w", encoding="UTF-8"
         ) as f:
             json.dump(self.progress, f, indent=4)
 
-    def sort(self):
+    def sort(self) -> None:
         """Topological sort nodes and cover it as test_list."""
         # Count in-degrees (number of dependencies) for each node
         in_degree = {

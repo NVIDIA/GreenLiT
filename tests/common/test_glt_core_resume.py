@@ -132,6 +132,87 @@ class TestGLTSchedulerResume(GLTTestBase):
             external_test.__wrapped__.attr.result,
             (GLTTestResult.NA, ""))
 
+    def test_progress_read_reports_missing_result_reason(self):
+        """A Result without ResultReason is invalid and does not change state."""
+
+        @GLTTestAttr(cat="external", name="test_external")
+        @GLTPlan(GLTPlanType.EXT_EXECUTABLE.value)
+        def external_test():
+            return "external"
+
+        scheduler = GLTScheduler([external_test])
+        scheduler.sort()
+        initial_progress = [{"Current": "progress"}]
+        scheduler.progress = initial_progress
+        scheduler.test_tags = {GLTPlanType.STANDARD.value}
+        scheduler.test_categories = ["current"]
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            _write_session_progress(session_dir, [{
+                "Summary": {
+                    "TestTags": [GLTPlanType.EXT_EXECUTABLE.value],
+                    "Categories": ["external"],
+                }
+            }, {
+                "test_external": {
+                    "Category": "external",
+                    "Result": GLTTestResult.PASS.value,
+                }
+            }])
+
+            progress_error = scheduler.progress_read(session_dir)
+
+        self.assertIn(
+            "Resume progress ResultReason for external:test_external is not a string",
+            progress_error)
+        self.assertIs(scheduler.progress, initial_progress)
+        self.assertEqual(scheduler.test_tags, {GLTPlanType.STANDARD.value})
+        self.assertEqual(scheduler.test_categories, ["current"])
+        self.assertEqual(
+            external_test.__wrapped__.attr.result,
+            (GLTTestResult.NA, ""))
+
+    def test_progress_read_reports_unknown_result_value(self):
+        """An unrecognized Result is invalid and does not change state."""
+
+        @GLTTestAttr(cat="external", name="test_external")
+        @GLTPlan(GLTPlanType.EXT_EXECUTABLE.value)
+        def external_test():
+            return "external"
+
+        scheduler = GLTScheduler([external_test])
+        scheduler.sort()
+        initial_progress = [{"Current": "progress"}]
+        scheduler.progress = initial_progress
+        scheduler.test_tags = {GLTPlanType.STANDARD.value}
+        scheduler.test_categories = ["current"]
+
+        with tempfile.TemporaryDirectory() as session_dir:
+            _write_session_progress(session_dir, [{
+                "Summary": {
+                    "TestTags": [GLTPlanType.EXT_EXECUTABLE.value],
+                    "Categories": ["external"],
+                }
+            }, {
+                "test_external": {
+                    "Category": "external",
+                    "Result": "NOT_A_RESULT",
+                    "ResultReason": "completed",
+                }
+            }])
+
+            progress_error = scheduler.progress_read(session_dir)
+
+        self.assertIn(
+            "Resume progress result for external:test_external is invalid",
+            progress_error)
+        self.assertIs(scheduler.progress, initial_progress)
+        self.assertEqual(scheduler.test_tags, {GLTPlanType.STANDARD.value})
+        self.assertEqual(scheduler.test_categories, ["current"])
+        self.assertEqual(
+            external_test.__wrapped__.attr.result,
+            (GLTTestResult.NA, ""))
+
     def test_progress_read_reports_missing_progress_file(self):
         """An I/O failure is returned without changing scheduler state."""
 

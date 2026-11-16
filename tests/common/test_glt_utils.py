@@ -586,6 +586,26 @@ class TestGLTUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                     )
                     mock_run.reset_mock()
 
+    def test_compare_version_dpkg_rejects_an_undecided_result(self):
+        """dpkg with no successful comparison is an error, not a numeric answer."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available",
+            side_effect=lambda cli: cli == "dpkg",
+        ), GLTTestBase.unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = GLTTestBase.unittest.mock.Mock(returncode=2)
+            with self.assertRaises(ValueError):
+                compare_version("1.0", "2.0")
+
+    def test_compare_version_rpm_rejects_an_unknown_code(self):
+        """rpmdev-vercmp codes other than 0, 11, and 12 are an error."""
+        with GLTTestBase.unittest.mock.patch(
+            "src.common.glt_utils.is_cli_available",
+            side_effect=lambda cli: cli == "rpmdev-vercmp",
+        ), GLTTestBase.unittest.mock.patch("subprocess.run") as mock_run:
+            mock_run.return_value = GLTTestBase.unittest.mock.Mock(returncode=2)
+            with self.assertRaises(ValueError):
+                compare_version("1.0", "2.0")
+
     def test_create_cache_session(self):
         """Test create_cache_session function"""
         fixed_datetime = "2024-01-01-12:00:00"

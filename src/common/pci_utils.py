@@ -266,7 +266,7 @@ def get_pci_class(bdf: str) -> Optional[str]:
         return None
 
 
-def default_route_ifaces() -> set:
+def default_route_ifaces() -> set[str]:
     """Return the interface names holding an IPv4 or IPv6 default route.
 
     Reads /proc/net/route (IPv4) and /proc/net/ipv6_route (IPv6). Returns
@@ -319,7 +319,7 @@ def _iface_pci_bdf(iface):
     return base if bdf_component_re.match(base) else None
 
 
-def iface_pci_bdfs(iface, _seen=None) -> set:
+def iface_pci_bdfs(iface: str, _seen: set[str] | None = None) -> set[str]:
     """Return the PCI BDF(s) of the physical NIC(s) backing `iface`.
 
     A directly PCI-backed interface maps to its own BDF; bond/bridge/VLAN
@@ -425,7 +425,7 @@ def is_ats_enabled(bdf: str) -> Optional[bool]:
     return None
 
 
-def mounted_block_devices() -> set:
+def mounted_block_devices() -> set[str]:
     """Return base names of block devices backing mounted filesystems.
 
     Parses /proc/mounts and resolves each /dev/* mount source through
@@ -451,7 +451,7 @@ def mounted_block_devices() -> set:
     return devs
 
 
-def block_device_physical_leaves(dev, _seen=None) -> set:
+def block_device_physical_leaves(dev: str, _seen: set[str] | None = None) -> set[str]:
     """Return the physical leaf block devices backing `dev`.
 
     Recursively walks /sys/class/block/<dev>/slaves so stacked devices
@@ -492,7 +492,7 @@ def _pci_path_bdfs(sysfs_path: str) -> set:
     }
 
 
-def unsafe_pci_bdfs() -> set:
+def unsafe_pci_bdfs() -> set[str]:
     """BDFs that must never be unbound for destructive PCI rebinds.
 
     Computes:
@@ -574,7 +574,7 @@ def bdf_in_translated_domain(bdf: str) -> bool:
     return group_type in ("DMA", "DMA-FQ")
 
 
-def pci_bdfs_backing_mount(mountpoint: str = "/") -> set:
+def pci_bdfs_backing_mount(mountpoint: str = "/") -> set[str]:
     """Return the PCI BDFs of the physical devices backing ``mountpoint``.
 
     Resolves the mount source through ``mounted_block_devices`` and

@@ -15,11 +15,12 @@
 
 """Read the firmware-advertised TPM2 FF-A identity independently of Linux discovery."""
 
+import os
 import struct
 from pathlib import Path
 
 
-def read_tpm2_ffa_partition(table_path):
+def read_tpm2_ffa_partition(table_path: str | os.PathLike[str]) -> int | None:
     """Validate an ACPI TPM2 table and return its FF-A partition ID, or None.
 
     ACPI fields are little-endian regardless of the running kernel's endian.

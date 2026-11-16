@@ -1,4 +1,5 @@
 """Unit test script for common/glt_core.py"""
+# pylint: disable=too-many-lines
 
 import os
 
@@ -19,7 +20,7 @@ from src.common.glt_core import (
 )
 
 
-class TestGLTCore(GLTTestBase):
+class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
     """Test Class for GLT Core"""
 
     def test_conditional_check(self):
@@ -241,6 +242,29 @@ class TestGLTCore(GLTTestBase):
             auto_name_func.__wrapped__.attr.name, "auto_name_func"
         )
 
+        class CallableWithoutName:
+            """Callable with no __name__, which a test function always has."""
+
+            def __call__(self):
+                return None
+
+        with self.assertRaisesRegex(TypeError, "__name__ must be str"):
+            GLTTestAttr(cat="test_cat")(CallableWithoutName())
+
+        class CallableWithNonStringName:
+            """Callable whose looked-up __name__ is not a str."""
+
+            def __call__(self):
+                return None
+
+            def __getattr__(self, name):
+                if name == "__name__":
+                    return 1
+                raise AttributeError(name)
+
+        with self.assertRaisesRegex(TypeError, "__name__ must be str"):
+            GLTTestAttr(cat="test_cat")(CallableWithNonStringName())
+
         # Test with multiple decorators in real-world style
         @GLTTestAttr(cat="arm64")
         @GLTPlan("standard")
@@ -430,7 +454,7 @@ class TestGLTCore(GLTTestBase):
         requires.all_true = ["fail_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("fail_test in all_true returned False", reason)
+        self.assertIn("fail_test in all_true did not pass", reason)
 
         requires = GLTRequires()
         requires.all_false = ["fail_test"]
@@ -441,7 +465,7 @@ class TestGLTCore(GLTTestBase):
         requires.all_false = ["pass_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("pass_test in all_false returned True", reason)
+        self.assertIn("pass_test in all_false did not fail", reason)
 
         requires = GLTRequires()
         requires.any_true = ["pass_test", "fail_test"]
@@ -452,7 +476,7 @@ class TestGLTCore(GLTTestBase):
         requires.any_true = ["fail_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertEqual(reason, "No function in any_true returned True")
+        self.assertEqual(reason, "No function in any_true passed")
 
         requires = GLTRequires()
         requires.any_false = ["fail_test", "pass_test"]
@@ -463,7 +487,7 @@ class TestGLTCore(GLTTestBase):
         requires.any_false = ["pass_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertEqual(reason, "No function in any_false returned False")
+        self.assertEqual(reason, "No function in any_false failed")
 
     def test_requires_dependency_names(self):
         """GLTRequires exposes all referenced dependency test IDs."""
@@ -583,6 +607,44 @@ class TestGLTCore(GLTTestBase):
         self.assertEqual(
             warn_test_func.__wrapped__.attr.result[1], "Warn reason"
         )
+
+    def test_record_result_requires_glt_test_attr(self):
+        """fail/skip/warn raise when the target has no GLTTestAttr."""
+        recorded = GLTTestAttr(cat="test_cat", name="bare")
+        recorded.result = (GLTTestResult.NA, "")
+
+        class BareTest:
+            """Callable with a GLTTestAttr and no wrapper."""
+
+            attr = recorded
+
+        try:
+            GLTTestResult.fail("bare fail", BareTest())
+        except GLTTestFail:
+            pass
+        self.assertEqual(recorded.result, (GLTTestResult.FAIL, "bare fail"))
+
+        class PlainTest:
+            """Callable with neither a wrapper nor a GLTTestAttr."""
+
+        with self.assertRaisesRegex(AttributeError, "test has no GLTTestAttr"):
+            GLTTestResult.skip("missing", PlainTest())
+
+        class WrongAttr:
+            """Callable whose attr is not a GLTTestAttr."""
+
+            attr = "not a test attribute"
+
+        with self.assertRaisesRegex(AttributeError, "test has no GLTTestAttr"):
+            GLTTestResult.warn("wrong", WrongAttr())
+
+        class WrappedWithoutAttr:
+            """Wrapper whose inner object has no GLTTestAttr."""
+
+            __wrapped__ = PlainTest()
+
+        with self.assertRaisesRegex(AttributeError, "wrapped test has no GLTTestAttr"):
+            GLTTestResult.fail("wrapped", WrappedWithoutAttr())
 
     def test_scheduler(self):
         """Test the GLTScheduler class"""
@@ -737,6 +799,10 @@ class TestGLTCore(GLTTestBase):
         mock_afail_attr.result = (GLTTestResult.AFAIL, "Allowed Failure")
         mock_afail_attr.name = "afail_test"
 
+        mock_missing_attr = self.mock.MagicMock()
+        mock_missing_attr.result = None
+        mock_missing_attr.name = "missing_test"
+
         # Create mock test objects
         def create_mock_test(attr):
             mock_test = self.mock.MagicMock()
@@ -749,9 +815,10 @@ class TestGLTCore(GLTTestBase):
         mock_skip_test = create_mock_test(mock_skip_attr)
         mock_na_test = create_mock_test(mock_na_attr)
         mock_afail_test = create_mock_test(mock_afail_attr)
+        mock_missing_test = create_mock_test(mock_missing_attr)
 
         # Setup scheduler mock
-        def get_test_by_name(name):
+        def get_test_by_name(name):  # pylint: disable=too-many-return-statements
             if "pass" in name:
                 return mock_pass_test
             if "afail" in name:  # Check this FIRST before "fail"
@@ -762,6 +829,8 @@ class TestGLTCore(GLTTestBase):
                 return mock_skip_test
             if "na" in name:
                 return mock_na_test
+            if "missing" in name:
+                return mock_missing_test
             return None
 
         mock_sd.get_test_obj_by_name.side_effect = get_test_by_name
@@ -771,42 +840,67 @@ class TestGLTCore(GLTTestBase):
         requires.all_true = ["skip_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("skip_test in all_true returned False", reason)
+        self.assertIn("skip_test in all_true did not pass", reason)
 
         # Test 2: must_fail with skipped dependency - should prevent start
         requires = GLTRequires()
         requires.all_false = ["skip_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("skip_test in all_false returned True", reason)
+        self.assertIn("skip_test in all_false did not fail", reason)
 
         # Test 3: must_pass with NA dependency - should prevent start
         requires = GLTRequires()
         requires.all_true = ["na_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("na_test in all_true returned False", reason)
+        self.assertIn("na_test in all_true did not pass", reason)
 
         # Test 4: must_fail with AFAIL dependency - should prevent start (AFAIL != FAIL)
         requires = GLTRequires()
         requires.all_false = ["afail_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("afail_test in all_false returned True", reason)
+        self.assertIn("afail_test in all_false did not fail", reason)
+
+        # A missing result did not pass and did not fail.
+        requires = GLTRequires()
+        requires.all_true = ["missing_test"]
+        can_start, reason = requires.can_start(mock_sd)
+        self.assertFalse(can_start)
+        self.assertIn("missing_test in all_true did not pass", reason)
+
+        requires = GLTRequires()
+        requires.all_false = ["missing_test"]
+        can_start, reason = requires.can_start(mock_sd)
+        self.assertFalse(can_start)
+        self.assertIn("missing_test in all_false did not fail", reason)
+
+        requires = GLTRequires()
+        requires.any_true = ["missing_test"]
+        can_start, reason = requires.can_start(mock_sd)
+        self.assertFalse(can_start)
+        self.assertEqual(reason, "No function in any_true passed")
+
+        requires = GLTRequires()
+        requires.any_false = ["missing_test"]
+        can_start, reason = requires.can_start(mock_sd)
+        self.assertFalse(can_start)
+        self.assertEqual(reason, "No function in any_false failed")
 
         # Test 5: any_pass with all skipped dependencies - should prevent start
         requires = GLTRequires()
         requires.any_true = ["skip_test", "na_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertEqual(reason, "No function in any_true returned True")
+        self.assertEqual(reason, "No function in any_true passed")
 
         # Test 6: any_fail with all skipped dependencies - should prevent start
         requires = GLTRequires()
         requires.any_false = ["skip_test", "na_test"]
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertEqual(reason, "No function in any_false returned False")
+        self.assertEqual(reason, "No function in any_false failed")
 
         # Test 7: any_pass with mixed results - should allow if at least one passes
         requires = GLTRequires()
@@ -833,7 +927,7 @@ class TestGLTCore(GLTTestBase):
         requires.any_false = ["fail_test"]  # This would pass
         can_start, reason = requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("skip_test in all_true returned False", reason)
+        self.assertIn("skip_test in all_true did not pass", reason)
 
     def test_requires_edge_cases(self):
         """Test GLTRequires edge cases and error conditions"""
@@ -923,14 +1017,20 @@ class TestGLTCore(GLTTestBase):
         self.assertIn("cat3:test3", mixed_requirements.__wrapped__.requires.any_true)
         self.assertIn("cat4:test4", mixed_requirements.__wrapped__.requires.any_false)
 
-        # Test 4: Decorator creates requires attribute if it doesn't exist
+        # Test 4: A requirement decorator works before the test is wrapped.
         def plain_func():
             return "plain"
 
-        # Apply decorator to function without GLTTestAttr
-        with self.assertRaises(AttributeError):
-            # This should fail because plain_func doesn't have __wrapped__
-            GLTRequires.must_pass("cat", "test")(plain_func)
+        decorated = GLTRequires.must_pass("cat", "test")(plain_func)
+        self.assertIn("cat:test", getattr(decorated, "requires").all_true)
+
+        @GLTTestAttr(cat="test_cat", name="require_first")
+        @GLTRequires.must_pass("cat", "test")
+        def require_first():
+            return "wrapped"
+
+        self.assertIn("cat:test", require_first.__wrapped__.requires.all_true)
+        self.assertIn("cat:test", GLTScheduler([require_first]).dependencies)
 
     def test_requires_real_world_scenarios(self):
         """Test real-world scenarios for GLTRequires"""
@@ -960,7 +1060,7 @@ class TestGLTCore(GLTTestBase):
         # GPU benchmark should not start because GPU detection was skipped
         can_start, reason = gpu_benchmark_test.__wrapped__.requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("gpu_detection in all_true returned False", reason)
+        self.assertIn("gpu_detection in all_true did not pass", reason)
 
         # Scenario 2: Cleanup test that expects certain tests to fail
         @GLTTestAttr(cat="stress", name="memory_leak_test")
@@ -985,7 +1085,7 @@ class TestGLTCore(GLTTestBase):
 
         can_start, reason = memory_cleanup_test.__wrapped__.requires.can_start(mock_sd)
         self.assertFalse(can_start)
-        self.assertIn("memory_leak_test in all_false returned True", reason)
+        self.assertIn("memory_leak_test in all_false did not fail", reason)
 
 
 if __name__ == "__main__":

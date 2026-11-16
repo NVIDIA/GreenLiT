@@ -9,6 +9,7 @@ Guidance for AI coding agents working in this repository.
 | Project overview & usage | `docs/user-guides/user-manual.md` |
 | Architecture & source layout | `docs/developer-docs/architecture.md` |
 | Writing test cases | `docs/developer-docs/writing-test-cases.md` |
+| Function type contract (`src/common`) | `docs/developer-docs/writing-test-cases.md#function-type-contract` |
 | Development setup & tooling | `docs/developer-docs/development-setup.md` |
 | Test configuration (YAML) | `docs/user-guides/configuration.md` |
 | Commit conventions | `CONTRIBUTING.md` |
@@ -33,7 +34,11 @@ unrelated violation or environment problem prevents a clean run, report the
 blocker and exit code explicitly; do not claim the check passed.
 
 Before creating a commit or MR, follow [Running Local Checks](docs/developer-docs/development-setup.md#running-local-checks).
-Skip checks whose tools are unavailable, except the contract check.
+Skip checks whose tools are unavailable, except the contract check. `ruff` (`ANN201`, `ANN401`) and `ty` enforce the
+[function type contract](docs/developer-docs/writing-test-cases.md#function-type-contract)
+on `src/common`. `ANN401` rejects `Any`; name the real type instead. Run
+the checkers with the other local checks. If either tool is missing, say so;
+do not claim that the type check passed.
 
 ## Boundaries
 

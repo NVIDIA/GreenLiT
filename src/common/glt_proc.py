@@ -21,7 +21,7 @@ import re
 from common.cpu_topology import parse_cpu_mask
 
 
-def process_tree(pid):
+def process_tree(pid: int | str) -> tuple[dict[str, set[str]], dict[str, set[str]]]:
     """Return recursive process IDs, thread IDs, and direct edges."""
     tids_by_pid = {}
     children_by_pid = {}
@@ -63,13 +63,13 @@ def process_tree(pid):
     return tids_by_pid, children_by_pid
 
 
-def process_comm(pid):
+def process_comm(pid: int | str) -> str:
     """Return /proc/<pid>/comm for one process."""
     with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
         return f.read().strip()
 
 
-def task_cpu(task_id):
+def task_cpu(task_id: int | str) -> int:
     """Return the last observed CPU for one task from /proc/<tid>/stat."""
     with open(f"/proc/{task_id}/stat", "r", encoding="utf-8") as f:
         line = f.read().strip()
@@ -80,7 +80,7 @@ def task_cpu(task_id):
     return int(fields[36])
 
 
-def task_allowed_cpus(task_id):
+def task_allowed_cpus(task_id: int | str) -> set[int]:
     """Return the Linux CPU affinity mask for one task/process."""
     with open(f"/proc/{task_id}/status", "r", encoding="utf-8") as f:
         for line in f:
@@ -89,7 +89,7 @@ def task_allowed_cpus(task_id):
     raise ValueError(f"missing Cpus_allowed_list for task {task_id}")
 
 
-def _numa_maps_line_is_anonymous(line):
+def _numa_maps_line_is_anonymous(line: str) -> bool:
     """Return True for workload anonymous mappings relevant to stress-ng --vm."""
     fields = line.split()
     if len(fields) < 2:
@@ -103,7 +103,7 @@ def _numa_maps_line_is_anonymous(line):
         for field in fields[1:])
 
 
-def task_anonymous_numa_pages_by_node(task_id):
+def task_anonymous_numa_pages_by_node(task_id: int | str) -> dict[int, int]:
     """Return workload anonymous page counts from /proc/<pid>/numa_maps."""
     pages_by_node = {}
     with open(f"/proc/{task_id}/numa_maps", "r", encoding="utf-8") as f:

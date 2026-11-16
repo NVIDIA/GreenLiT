@@ -18,8 +18,10 @@ External test launcher.
 
 This module is used to discover and run external test cases.
 """
+import logging
 import os
 import subprocess
+from collections.abc import Callable
 from enum import IntEnum
 from common import glt_core as GLTCore
 
@@ -36,8 +38,19 @@ class GLTExtShellExitCode(IntEnum):
     SKIP = 4
 
 
-def _generate_test_func(exe_path, relative_name):
-    def test_func(sd, logger):
+def _generate_test_func(
+    exe_path: str | os.PathLike[str], relative_name: str,
+) -> Callable[[GLTCore.GLTScheduler, logging.Logger], None]:
+    def test_func(sd: GLTCore.GLTScheduler, logger: logging.Logger) -> None:
+        attr = getattr(test_func, "attr", None)
+        if not isinstance(attr, GLTCore.GLTTestAttr):
+            raise AttributeError("external test has no GLTTestAttr")
+        # TODO: make GLTScheduler.log_dir a plain str, then drop these None checks.
+        # relative_name is checked only to stay consistent with the log_dir check.
+        if sd.log_dir is None:
+            raise TypeError("External test scheduler log directory is unset")
+        if relative_name is None:
+            raise TypeError("External test relative name is unset")
         workdir = os.path.join(sd.log_dir, CATEGORY_NAME, relative_name)
         env = os.environ.copy()
         env["GTL_WORKDIR"] = workdir
@@ -51,19 +64,19 @@ def _generate_test_func(exe_path, relative_name):
                 capture_output=True)
             logger.debug("Result: %s", result)
             if result.returncode == GLTExtShellExitCode.PASS:
-                test_func.attr.result = (
+                attr.result = (
                     GLTCore.GLTTestResult.PASS,
                     f"Finished {exe_path}. Exit code: {result.returncode}. PASS. " +
                     "Stdout: " + result.stdout.decode("utf-8", errors="replace") +
                     ",Stderr: " + result.stderr.decode("utf-8", errors="replace"))
-                logger.info(f"Finished {exe_path}: {test_func.attr.result[0].value}: {test_func.attr.result[1]}")
+                logger.info(f"Finished {exe_path}: {attr.result[0].value}: {attr.result[1]}")
             elif result.returncode == GLTExtShellExitCode.XFAIL:
-                test_func.attr.result = (
+                attr.result = (
                     GLTCore.GLTTestResult.AFAIL,
                     f"Finished {exe_path}. Exit code: {result.returncode}. Test is expected to fail and did fail. " +
                     "Stdout: " + result.stdout.decode("utf-8", errors="replace") +
                     ",Stderr: " + result.stderr.decode("utf-8", errors="replace"))
-                logger.info(f"Finished {exe_path}: {test_func.attr.result[0].value}: {test_func.attr.result[1]}")
+                logger.info(f"Finished {exe_path}: {attr.result[0].value}: {attr.result[1]}")
             elif result.returncode == GLTExtShellExitCode.XPASS:
                 GLTCore.GLTTestResult.fail(
                     f"Finished {exe_path}. Exit code: {result.returncode}. Test is expected to fail but did pass. " +
@@ -89,13 +102,15 @@ def _generate_test_func(exe_path, relative_name):
     return test_func
 
 
-def discover(current_dir, root_dir) -> list[callable]:
+def discover(
+    current_dir: str | os.PathLike[str], root_dir: str | os.PathLike[str],
+) -> list[Callable[..., object]]:
     '''Recursively discover all executables under current_dir (DFS).
 
     Discovery is session-independent: the workdir for each external test
     is resolved lazily from scheduler.log_dir at execution time.
     '''
-    tests = []
+    tests: list[Callable[..., object]] = []
     dirs = []
     files = []
     entries = sorted(os.listdir(current_dir))
@@ -115,8 +130,8 @@ def discover(current_dir, root_dir) -> list[callable]:
         func = _generate_test_func(fpath, relpath_to_name)
         attr = GLTCore.GLTTestAttr(cat=CATEGORY_NAME, name=relpath_to_name, func=func)
         attr.plans = [GLTCore.GLTPlanType.EXT_EXECUTABLE.value]
-        func.attr = attr
-        func.__name__ = relpath_to_name
+        setattr(func, "attr", attr)
+        setattr(func, "__name__", relpath_to_name)
         wrapped_func = attr(func)
         tests.append(wrapped_func)
     return tests

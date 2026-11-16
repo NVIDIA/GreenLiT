@@ -16,13 +16,14 @@
 """Helpers for running perf commands and selftests across perf versions."""
 
 import json
+import logging
 import platform
 import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Optional, TypeAlias
 
 PERF_VERSION_TIMEOUT_SECONDS = 5
 PERF_TEST_TIMEOUT_SECONDS = 120
@@ -56,8 +57,34 @@ class PerfTestResult:
     test_name: Optional[str] = None
 
 
-def get_perf_list_json(perf_cmd: str, logger) -> list:
-    """Return parsed JSON entries from ``perf list -j``."""
+# One ``perf list -j`` object. GreenLiT reads Unit, EventName, MetricName,
+# MetricGroup, Encoding, PublicDescription, and BriefDescription.
+PerfListEntry: TypeAlias = dict[str, str]
+
+
+def _perf_list_entries(payload: object) -> list[PerfListEntry]:
+    """Return perf-list entries, or raise ValueError when payload is not that array."""
+    if not isinstance(payload, list):
+        raise ValueError("perf list JSON output is not an array")
+    entries: list[PerfListEntry] = []
+    for item in payload:
+        if not isinstance(item, dict):
+            raise ValueError("perf list JSON entry is not an object")
+        entry: dict[str, str] = {}
+        for key, value in item.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise ValueError("perf list JSON fields must be strings")
+            entry[key] = value
+        entries.append(entry)
+    return entries
+
+
+def get_perf_list_json(perf_cmd: str, logger: logging.Logger) -> list[PerfListEntry]:
+    """Return parsed JSON entries from ``perf list -j``.
+
+    Each entry is an object of strings. GreenLiT reads Unit, EventName,
+    MetricName, MetricGroup, Encoding, PublicDescription, and BriefDescription.
+    """
     try:
         cmd_output = subprocess.run(
             [perf_cmd, "list", "-j"],
@@ -91,13 +118,14 @@ def get_perf_list_json(perf_cmd: str, logger) -> list:
             f"Failed to parse perf list JSON output: {exc}"
         ) from exc
 
-    if not isinstance(perf_list_json, list):
-        raise ValueError("perf list JSON output is not an array")
-    return perf_list_json
+    return _perf_list_entries(perf_list_json)
 
 
-def get_perf_version(logger=None) -> str:
-    """Return the perf userspace version string when available."""
+def get_perf_version(logger: logging.Logger | None = None) -> str | None:
+    """Return the perf userspace version string.
+
+    None means perf is missing or the version query failed.
+    """
     try:
         result = subprocess.run(
             ["perf", "--version"],
@@ -109,14 +137,14 @@ def get_perf_version(logger=None) -> str:
     except OSError as err:
         if logger:
             logger.debug("Unable to query perf version: %s", err)
-        return ""
+        return None
 
     if result.returncode != 0:
         if logger:
             reason = (result.stderr or result.stdout or "").strip()
             logger.debug("Unable to query perf version: %s",
                          reason or f"return code {result.returncode}")
-        return ""
+        return None
 
     return (result.stdout or result.stderr).strip()
 
@@ -130,13 +158,13 @@ def _parse_major_minor(version_text: str) -> Optional[tuple[int, int]]:
 
 
 def get_perf_kernel_version_warning(
-    perf_version: str,
+    perf_version: str | None,
     kernel_release: str,
     linux_tools_dir: Path = Path("/usr/lib/linux-tools"),
 ) -> str:
     """Return a warning when perf userspace may not match the running kernel."""
     warnings = []
-    perf_major_minor = _parse_major_minor(perf_version)
+    perf_major_minor = _parse_major_minor(perf_version or "")
     kernel_major_minor = _parse_major_minor(kernel_release)
     if perf_major_minor and kernel_major_minor and \
             perf_major_minor != kernel_major_minor:
@@ -191,7 +219,7 @@ def _summarize_output(output: str) -> str:
     return "\n".join(lines[-10:])
 
 
-def natural_sort_key(path: Path):
+def natural_sort_key(path: Path) -> tuple[int | str, ...]:
     """Return a key that sorts embedded numeric components numerically."""
     return tuple(
         int(part) if part.isdigit() else part
@@ -203,7 +231,9 @@ ARM_PMU_EVENT_SOURCE_PATH = Path("/sys/bus/event_source/devices")
 BRBE_ALLOWED_BRANCH_RECORD_COUNTS = frozenset((8, 16, 32, 64))
 
 
-def read_brbe_capabilities(event_source_path=ARM_PMU_EVENT_SOURCE_PATH):
+def read_brbe_capabilities(
+    event_source_path: Path = ARM_PMU_EVENT_SOURCE_PATH,
+) -> dict[str, int]:
     """Return BRBE branch-record counts for all visible Arm PMUv3 devices."""
     event_source_path = Path(event_source_path)
     try:

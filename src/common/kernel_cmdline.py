@@ -224,7 +224,9 @@ class KernelCmdlineBackend:
         del parameter
         return False
 
-    def append_parameter(self, parameter: str, transaction_id=None) -> KernelParameterResult:
+    def append_parameter(
+        self, parameter: str, transaction_id: str | None = None,
+    ) -> KernelParameterResult:
         """Append a parameter through this backend and tag it as GLT-owned."""
         valid, reason = validate_kernel_parameter(parameter)
         if not valid:
@@ -236,7 +238,9 @@ class KernelCmdlineBackend:
         del parameter, transaction_id
         return KernelParameterResult(False, "kernel command-line backend is unsupported", backend=self.name)
 
-    def check_parameter(self, parameter: str, transaction_id=None) -> KernelParameterResult:
+    def check_parameter(
+        self, parameter: str, transaction_id: str | None = None,
+    ) -> KernelParameterResult:
         """Check current, persistent, and GLT-owned state for a parameter."""
         valid, reason = validate_kernel_parameter(parameter)
         active = self.is_parameter_active(parameter)
@@ -259,7 +263,9 @@ class KernelCmdlineBackend:
             reboot_required=active != configured,
         )
 
-    def remove_parameter(self, parameter: str, transaction_id=None) -> KernelParameterResult:
+    def remove_parameter(
+        self, parameter: str, transaction_id: str | None = None,
+    ) -> KernelParameterResult:
         """Remove a parameter only from GLT-owned persistent boot config."""
         valid, reason = validate_kernel_parameter(parameter)
         if not valid:
@@ -884,11 +890,15 @@ class KernelCmdlineManager:
                 return cls(backend_cls(transaction_root=transaction_root))
         return cls(UnsupportedBackend(transaction_root=transaction_root))
 
-    def append_parameter(self, parameter: str, transaction_id=None) -> KernelParameterResult:
+    def append_parameter(
+        self, parameter: str, transaction_id: str | None = None,
+    ) -> KernelParameterResult:
         """Append parameter and tag it as GLT-owned."""
         return self.backend.append_parameter(parameter, transaction_id=transaction_id)
 
-    def check_parameter(self, parameter: str, transaction_id=None) -> KernelParameterResult:
+    def check_parameter(
+        self, parameter: str, transaction_id: str | None = None,
+    ) -> KernelParameterResult:
         """Check active/configured/GLT-owned parameter state."""
         return self.backend.check_parameter(parameter, transaction_id=transaction_id)
 
@@ -896,6 +906,8 @@ class KernelCmdlineManager:
         """Return whether parameter is present in the running kernel cmdline."""
         return self.backend.is_parameter_active(parameter)
 
-    def remove_parameter(self, parameter: str, transaction_id=None) -> KernelParameterResult:
+    def remove_parameter(
+        self, parameter: str, transaction_id: str | None = None,
+    ) -> KernelParameterResult:
         """Remove parameter from GLT-owned boot config."""
         return self.backend.remove_parameter(parameter, transaction_id=transaction_id)

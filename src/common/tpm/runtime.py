@@ -15,6 +15,8 @@
 
 """Ordinary TPM runtime identity and response helpers, without test registration."""
 
+import logging
+import os
 import re
 import uuid
 from pathlib import Path
@@ -26,7 +28,7 @@ from common.tpm import ARM_FFA_TPM_UUID
 from scripts import check_kernel_config
 
 
-def find_ffa_tpm_endpoint(partition_id, devices_path):
+def find_ffa_tpm_endpoint(partition_id: int, devices_path: str | os.PathLike[str]) -> Path:
     """Require the ACPI-advertised endpoint to bind the architected TPM driver."""
     for endpoint in sorted(Path(devices_path).iterdir()):
         endpoint_uuid = uuid.UUID(glt_utils.read_sysfs_value(endpoint / "uuid"))
@@ -46,7 +48,9 @@ def find_ffa_tpm_endpoint(partition_id, devices_path):
     )
 
 
-def find_tpm_resource_managers(tpm_class, device_directory):
+def find_tpm_resource_managers(
+    tpm_class: str | os.PathLike[str], device_directory: str | os.PathLike[str],
+) -> list[Path]:
     """Enumerate resource managers for ACPI TPM2 CRB devices.
 
     Callers first validate TPM2 method 15 and the expected bound FF-A endpoint.
@@ -84,7 +88,7 @@ def find_tpm_resource_managers(tpm_class, device_directory):
     return resources
 
 
-def load_modular_tpm_drivers(logger, config_path, timeout):
+def load_modular_tpm_drivers(logger: logging.Logger, config_path: str, timeout: float) -> None:
     """Load configured modules before checking binding; retain runtime-only fallback."""
     try:
         config = check_kernel_config.parse_kconfig(config_path)
@@ -106,7 +110,7 @@ def load_modular_tpm_drivers(logger, config_path, timeout):
         )
 
 
-def validate_tpm_properties(output):
+def validate_tpm_properties(output: str) -> None:
     """Require an actual TPM2 family response from the explicit device TCTI."""
     try:
         properties = yaml.safe_load(output)

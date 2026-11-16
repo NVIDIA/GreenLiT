@@ -18,11 +18,13 @@ The utilities for GreenLit
 """
 
 # pylint: disable=consider-using-with,too-many-lines
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 import glob
 import json
+import logging
 import os
 import platform
 import re
@@ -32,7 +34,7 @@ import subprocess
 import tempfile
 from typing import TypeAlias
 
-from common.kernel_cmdline import KernelCmdlineManager
+from common.kernel_cmdline import KernelCmdlineManager, KernelParameterResult
 from common.nv_device import NvDev
 from scripts import check_kernel_config
 
@@ -76,7 +78,7 @@ class _JournalKernelLogCheckpoint:
 KernelLogCheckpoint: TypeAlias = _JournalKernelLogCheckpoint
 
 
-def is_secure_boot_enabled():
+def is_secure_boot_enabled() -> bool:
     """Check if UEFI Secure Boot is enabled.
 
     Tries mokutil first (most reliable), falls back to reading the
@@ -112,7 +114,7 @@ def is_secure_boot_enabled():
         return False
 
 
-def has_mok_keys():
+def has_mok_keys() -> bool:
     """Check if MOK signing keys are available.
 
     Returns:
@@ -122,13 +124,13 @@ def has_mok_keys():
         os.path.isfile(MOK_CERTIFICATE)
 
 
-def read_sysfs_value(path):
+def read_sysfs_value(path: str | os.PathLike[str]) -> str:
     """Read a sysfs file and return its stripped value."""
     with open(path, 'r', encoding='utf-8') as f:
         return f.read().strip()
 
 
-def write_sysfs_value(path, value):
+def write_sysfs_value(path: str | os.PathLike[str], value: str | int) -> None:
     """Write a value to a sysfs file."""
     with open(path, 'w', encoding='utf-8') as f:
         f.write(f"{value}\n")
@@ -188,7 +190,7 @@ def _get_kernel_cmdline_transaction_root(session_dir):
     return os.path.join(session_dir, "boot-config")
 
 
-def module_unload_unavailable_reason():
+def module_unload_unavailable_reason() -> str:
     """Return why the running kernel config cannot support a temporary module."""
     config_path = "/boot/config-" + platform.release()
     try:
@@ -208,7 +210,9 @@ def module_unload_unavailable_reason():
     return ""
 
 
-def sign_kernel_module(module_path, logger=None):
+def sign_kernel_module(
+    module_path: str | os.PathLike[str], logger: logging.Logger | None = None,
+) -> bool:
     """Sign a kernel module with MOK key for Secure Boot.
 
     If Secure Boot is not enabled, this is a no-op and returns True.
@@ -262,7 +266,9 @@ def sign_kernel_module(module_path, logger=None):
     return True
 
 
-def arm_for_reset(testcase, sd):
+# sd is a GLTScheduler. It stays unannotated because glt_core imports this
+# module, so naming GLTScheduler here is a circular import.
+def arm_for_reset(testcase: str, sd) -> bool:
     """Arm the system for potential hardware reset"""
     sd.progress_record_time(testcase, "MightReset")
     start_systemd_timer()
@@ -470,7 +476,7 @@ def list_journal_boots() -> list[JournalBoot]:
 
 
 @contextmanager
-def chdir_managed(path):
+def chdir_managed(path: str) -> Generator[None, None, None]:
     """
     Resource managed chdir
     Also updates PWD environment variable for subprocess compatibility
@@ -602,7 +608,7 @@ def get_kernel_log(
     return result.stdout
 
 
-def collect_logs(directory) -> tuple[bool, str]:
+def collect_logs(directory: str | os.PathLike[str] | None) -> tuple[bool, str]:
     """
     Collect logs under specified directory.
     Return False if failed to collect logs.
@@ -614,7 +620,7 @@ def collect_logs(directory) -> tuple[bool, str]:
 
     try:
         # Use shell=False to prevent command injection (CWE-78)
-        output_file = f"{directory}/glt-nvidia-bug-report"
+        output_file = f"{os.fspath(directory)}/glt-nvidia-bug-report"
         subprocess.run(["nvidia-bug-report.sh", "--safe-mode", "--output-file", output_file],
                        shell=False, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, PermissionError, FileNotFoundError, OSError) as e:
@@ -623,121 +629,92 @@ def collect_logs(directory) -> tuple[bool, str]:
     return (True, "")
 
 
-def compare_version(version1, version2):
+def _version_order(version1: str, version2: str) -> int:
+    """Return -1, 0, or 1 by comparing parsed Linux version components."""
+    v1 = parse_linux_version(version1)
+    v2 = parse_linux_version(version2)
+    result = 0
+
+    for i in range(max(len(v1), len(v2))):
+        if i >= len(v1):
+            return -1
+        if i >= len(v2):
+            return 1
+        left = v1[i]
+        right = v2[i]
+        if left == right:
+            continue
+        if isinstance(left, int) and isinstance(right, int):
+            return 1 if left > right else -1
+        return 1 if str(left) > str(right) else -1
+    return result
+
+
+def compare_version(version1: str, version2: str) -> int:
+    """Compare two version strings.
+
+    Returns 0 when the versions are equal, 1 when version1 is newer, and -1
+    when version1 is older. Raises ValueError when the comparison cannot be
+    done. 0 is only equality, never a missing answer.
     """
-    Compares two version strings using either rpmdev-vercmp,
-    dpkg --compare-versions or basic version comparison.
-
-    Args:
-        version1 (str): The first version string.
-        version2 (str): The second version string.
-
-    Returns:
-        0 if versions are equal.
-        1 if version1 > version2.
-        -1 if version1 < version2.
-        None if an error occurred.
-    """
-    result = None
-
-    # Try dpkg --compare-versions first
+    if not isinstance(version1, str) or not isinstance(version2, str):
+        raise ValueError(f"Invalid version: {version1} {version2}")
     if is_cli_available("dpkg"):
         return compare_version_dpkg(version1, version2)
-
-    #  Try rpmdev-vercmp if available and dpkg comparison failed
-    if is_cli_available("rpmdev-vercmp") and result is None:
+    if is_cli_available("rpmdev-vercmp"):
         return compare_version_rpm(version1, version2)
-
-    # Fallback to basic linux kernel version comparison if other methods failed
-    if result is None:
-        v1 = parse_linux_version(version1)
-        v2 = parse_linux_version(version2)
-
-        # Compare components one by one
-        for i in range(max(len(v1), len(v2))):
-            # Treat missing components as lower than any existing component
-            if i >= len(v1):
-                result = -1
-                break
-            if i >= len(v2):
-                result = 1
-                break
-
-            # Compare components
-            if v1[i] != v2[i]:
-                # For numeric components, compare as numbers
-                if isinstance(v1[i], int) and isinstance(v2[i], int):
-                    result = 1 if v1[i] > v2[i] else -1
-                # For string components or mixed, compare as strings
-                else:
-                    str1 = str(v1[i])
-                    str2 = str(v2[i])
-                    result = 1 if str1 > str2 else -1
-                break
-
-        # If we get here and result is still None, versions are equal
-        if result is None:
-            result = 0
-
-    return result
+    try:
+        return _version_order(version1, version2)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"Invalid version: {version1} {version2}") from error
 
 
-def compare_version_dpkg(version1, version2):
+def compare_version_dpkg(version1: str, version2: str) -> int:
+    """Compare two version strings with dpkg --compare-versions.
+
+    Returns 0, 1, or -1. Raises ValueError when dpkg cannot decide.
     """
-    Compares two version strings using dpkg --compare-versions.
-
-    Args:
-        version1 (str): The first version string.
-        version2 (str): The second version string.
-
-    Returns:
-        0 if versions are equal.
-        1 if version1 > version2.
-        -1 if version1 < version2.
-        None if an error occurred.
-    """
-    result = None
-
-    # Use shell=False to prevent command injection (CWE-78)
-    gt_result = subprocess.run(["dpkg", "--compare-versions", version1, "gt", version2],
-                               shell=False, check=False)
-    lt_result = subprocess.run(["dpkg", "--compare-versions", version1, "lt", version2],
-                               shell=False, check=False)
-    eq_result = subprocess.run(["dpkg", "--compare-versions", version1, "eq", version2],
-                               shell=False, check=False)
+    try:
+        # Use shell=False to prevent command injection (CWE-78)
+        gt_result = subprocess.run(
+            ["dpkg", "--compare-versions", version1, "gt", version2],
+            shell=False, check=False)
+        lt_result = subprocess.run(
+            ["dpkg", "--compare-versions", version1, "lt", version2],
+            shell=False, check=False)
+        eq_result = subprocess.run(
+            ["dpkg", "--compare-versions", version1, "eq", version2],
+            shell=False, check=False)
+    except OSError as error:
+        raise ValueError(f"Invalid version: {version1} {version2}") from error
 
     if gt_result.returncode == 0:
-        result = 1
-    elif lt_result.returncode == 0:
-        result = -1
-    elif eq_result.returncode == 0:
-        result = 0
-    return result
+        return 1
+    if lt_result.returncode == 0:
+        return -1
+    if eq_result.returncode == 0:
+        return 0
+    raise ValueError(f"Invalid version: {version1} {version2}")
 
 
-def compare_version_rpm(version1, version2):
+def compare_version_rpm(version1: str, version2: str) -> int:
+    """Compare two version strings with rpmdev-vercmp.
+
+    Returns 0, 1, or -1. Raises ValueError when rpmdev-vercmp cannot decide.
     """
-    Compares two version strings using rpmdev-vercmp.
-
-    Args:
-        version1 (str): The first version string.
-        version2 (str): The second version string.
-
-    Returns:
-        0 if versions are equal.
-        1 if version1 > version2.
-        -1 if version1 < version2.
-    """
-    result = None
-    # Use shell=False to prevent command injection (CWE-78)
-    cmd_result = subprocess.run(["rpmdev-vercmp", version1, version2], shell=False, check=False)
+    try:
+        # Use shell=False to prevent command injection (CWE-78)
+        cmd_result = subprocess.run(
+            ["rpmdev-vercmp", version1, version2], shell=False, check=False)
+    except OSError as error:
+        raise ValueError(f"Invalid version: {version1} {version2}") from error
     if cmd_result.returncode == 0:
-        result = 0
-    elif cmd_result.returncode == 11:
-        result = 1
-    elif cmd_result.returncode == 12:
-        result = -1
-    return result
+        return 0
+    if cmd_result.returncode == 11:
+        return 1
+    if cmd_result.returncode == 12:
+        return -1
+    raise ValueError(f"Invalid version: {version1} {version2}")
 
 
 def create_cache_session() -> str:
@@ -748,7 +725,7 @@ def create_cache_session() -> str:
     return cache_dir
 
 
-def get_cache_session_list() -> list:
+def get_cache_session_list() -> list[str]:
     """Returns a list of cached session path"""
     cache_dir = "/var/cache/greenlit"
     if not os.path.isdir(cache_dir):
@@ -763,7 +740,7 @@ def get_cache_session_list() -> list:
     return sorted(files)
 
 
-def get_cpu_model_name(logger) -> str | None:
+def get_cpu_model_name(logger: logging.Logger) -> str | None:
     """
     Get the CPU model name from lscpu output.
 
@@ -789,13 +766,13 @@ def get_cpu_model_name(logger) -> str | None:
     return None
 
 
-def is_cli_available(cli) -> bool:
+def is_cli_available(cli: str) -> bool:
     """Check a cli available"""
     path = shutil.which(cli)
     return path is not None
 
 
-def is_efi_system():
+def is_efi_system() -> bool:
     """
     Check if the system is using EFI.
 
@@ -805,7 +782,7 @@ def is_efi_system():
     return os.path.exists("/sys/firmware/efi")
 
 
-def is_kexec_boot():
+def is_kexec_boot() -> bool:
     """
     Check if system has booted via our kexec path by looking for the
     GLT-specific marker in the kernel command line.
@@ -819,7 +796,7 @@ def is_kexec_boot():
     return "glt_kexec_boot=1" in cmdline
 
 
-def log_system_info(logger):
+def log_system_info(logger: logging.Logger) -> None:
     """
     Log system information such as distro, architecture, kernel version and
     BaseOS details
@@ -873,7 +850,7 @@ def log_system_info(logger):
     logger.info("============================")
 
 
-def parse_linux_version(version):
+def parse_linux_version(version: str) -> list[int | str]:
     """Parse Linux kernel version string into comparable components.
 
     Examples:
@@ -902,7 +879,11 @@ def parse_linux_version(version):
     return parts
 
 
-def append_kernel_parameter(parameter, test_case_name=None, session_dir=None) -> tuple[bool, str]:
+def append_kernel_parameter(
+    parameter: str,
+    test_case_name: str | None = None,
+    session_dir: str | os.PathLike[str] | None = None,
+) -> tuple[bool, str]:
     """
     Append a kernel parameter through the detected boot backend.
 
@@ -924,7 +905,11 @@ def append_kernel_parameter(parameter, test_case_name=None, session_dir=None) ->
     return result.ok, result.reason
 
 
-def check_kernel_parameter(parameter, test_case_name=None, session_dir=None):
+def check_kernel_parameter(
+    parameter: str,
+    test_case_name: str | None = None,
+    session_dir: str | os.PathLike[str] | None = None,
+) -> KernelParameterResult:
     """
     Check whether a kernel parameter is active, configured, or GreenLiT-owned.
 
@@ -944,7 +929,11 @@ def check_kernel_parameter(parameter, test_case_name=None, session_dir=None):
     )
 
 
-def remove_kernel_parameter(parameter, test_case_name=None, session_dir=None) -> tuple[bool, str]:
+def remove_kernel_parameter(
+    parameter: str,
+    test_case_name: str | None = None,
+    session_dir: str | os.PathLike[str] | None = None,
+) -> tuple[bool, str]:
     """
     Remove a kernel parameter only from GreenLiT-owned boot config.
 
@@ -966,7 +955,9 @@ def remove_kernel_parameter(parameter, test_case_name=None, session_dir=None) ->
     return result.ok, result.reason
 
 
-def reboot(testcase, sd):
+# sd is a GLTScheduler. It stays unannotated because glt_core imports this
+# module, so naming GLTScheduler here is a circular import.
+def reboot(testcase: str, sd) -> bool:
     """Reboot system with saving status"""
     if not is_systemd_running():
         os.kill(os.getpid(), signal.SIGTERM)
@@ -1102,7 +1093,13 @@ def _kexec_failure_after_load(reason: str) -> tuple[bool, str]:
 
 
 # pylint: disable=too-many-return-statements,too-many-branches
-def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | None]:
+# sd is a GLTScheduler. It stays unannotated because glt_core imports this
+# module, so naming GLTScheduler here is a circular import.
+def reboot_with_kexec(
+    testcase: str,
+    sd,
+    custom_cmdline: str | None = None,
+) -> tuple[bool, str | None]:
     """
     Reboot using kexec, recording progress so the test can resume after boot.
     On success, triggers the kexec reboot and does not return (process exits
@@ -1122,7 +1119,9 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
         return (False, "kexec CLI not found, please install kexec-tools")
 
     if custom_cmdline is not None and any(c in custom_cmdline for c in "\n\r\0"):
-        return False
+        return False, (
+            "custom kernel command line contains a newline, carriage return, or NUL"
+        )
 
     kernel_loaded = False
     try:
@@ -1218,7 +1217,14 @@ def reboot_with_kexec(testcase, sd, custom_cmdline=None) -> tuple[bool, str | No
     return (True, None)
 
 
-def handle_kexec_flow(test_name, sd, logger, custom_cmdline=None):
+# sd is a GLTScheduler. It stays unannotated because glt_core imports this
+# module, so naming GLTScheduler here is a circular import.
+def handle_kexec_flow(
+    test_name: str,
+    sd,
+    logger: logging.Logger,
+    custom_cmdline: str | None = None,
+) -> tuple[bool, str | None]:
     """
     Generic kexec boot flow handler.
 
@@ -1252,7 +1258,11 @@ def handle_kexec_flow(test_name, sd, logger, custom_cmdline=None):
     return (True, None)
 
 
-def reboot_with_reisub(testcase, sd) -> tuple[bool, str | None]:
+# sd is a GLTScheduler. It stays unannotated because glt_core imports this
+# module, so naming GLTScheduler here is a circular import.
+def reboot_with_reisub(
+    testcase: str, sd,
+) -> tuple[bool, str | None]:
     """
     Magic reboot system with saving status
     Useful when there's kernel process lockup
@@ -1291,7 +1301,7 @@ def reboot_with_reisub(testcase, sd) -> tuple[bool, str | None]:
     return (True, None)
 
 
-def start_systemd_timer(timer="greenlit", start=True):
+def start_systemd_timer(timer: str = "greenlit", start: bool = True) -> bool:
     """Start or stop systemd timer."""
     if start:
         operation = "start"
@@ -1304,7 +1314,7 @@ def start_systemd_timer(timer="greenlit", start=True):
     return bool(p.returncode == 0)
 
 
-def systemd_enable(service="greenlit", enable=True):
+def systemd_enable(service: str = "greenlit", enable: bool = True) -> bool:
     """Enable or Disable systemd service."""
     if enable:
         operation = "enable"
@@ -1316,7 +1326,7 @@ def systemd_enable(service="greenlit", enable=True):
     return bool(p.returncode == 0)
 
 
-def is_systemd_running():
+def is_systemd_running() -> bool:
     """Check if the system is running with systemd."""
     try:
         with open('/proc/1/comm', 'r', encoding='utf-8') as f:

@@ -18,7 +18,6 @@
 from dataclasses import dataclass
 import json
 import os
-from typing import Any
 
 
 SESSION_MODULE_NAME = "glt-test-suite"
@@ -40,23 +39,30 @@ class GLTSessionProgress:
     """Cached session progress plus parsed stable metadata."""
 
     progress_path: str
-    progress: Any
+    # TODO: type the cached progress payload. It is loaded JSON, not a modeled record yet.
+    progress: object
     summary: GLTSessionSummary | None
 
-    def summary_error(self):
-        """Return why the cached session summary cannot be used."""
+    def summary_error(self) -> str:
+        """Return why the cached session summary cannot be used.
+
+        An empty string means the summary is usable.
+        """
         if self.summary is not None:
             return ""
         return get_session_summary_error(self.progress, self.progress_path)
 
 
-def get_session_progress_path(session_dir):
+def get_session_progress_path(session_dir: str | os.PathLike[str]) -> str:
     """Return the progress JSON path for a cached GreenLiT session dir."""
     return os.path.join(session_dir, SESSION_MODULE_NAME, SESSION_PROGRESS_FILE)
 
 
-def parse_session_summary(progress):
-    """Return saved summary metadata from a loaded progress payload."""
+def parse_session_summary(progress: object) -> GLTSessionSummary | None:
+    """Return saved summary metadata from a loaded progress payload.
+
+    None means the payload has no usable Summary entry.
+    """
     if not isinstance(progress, list):
         return None
 
@@ -92,8 +98,11 @@ def parse_session_summary(progress):
         verbose=verbose)
 
 
-def get_session_summary_error(progress, progress_path):
-    """Return why a loaded progress payload has no usable summary."""
+def get_session_summary_error(progress: object, progress_path: str) -> str:
+    """Return why a loaded progress payload has no usable summary.
+
+    An empty string means the summary is usable.
+    """
     if not isinstance(progress, list):
         return (
             f"Resume progress in {progress_path} has invalid format "
@@ -126,7 +135,7 @@ def get_session_summary_error(progress, progress_path):
     return ""
 
 
-def read_progress_file(progress_path):
+def read_progress_file(progress_path: str | os.PathLike[str]) -> GLTSessionProgress:
     """Read a progress JSON file and parse its summary."""
     with open(progress_path, "r", encoding="UTF-8") as progress_file:
         progress = json.load(progress_file)
@@ -134,6 +143,6 @@ def read_progress_file(progress_path):
     summary = parse_session_summary(progress)
 
     return GLTSessionProgress(
-        progress_path=progress_path,
+        progress_path=os.fspath(progress_path),
         progress=progress,
         summary=summary)

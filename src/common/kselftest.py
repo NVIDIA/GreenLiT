@@ -33,13 +33,13 @@ ALL_KSELFTEST_TARGET_TESTS = f"TARGETS='{' '.join(TEST_TARGETS)}'"
 class Kselftest:
     """This class provides functionalities for running kselftests."""
 
-    def __init__(self, log_file):
+    def __init__(self, log_file: str | os.PathLike[str]) -> None:
         """Init process for Kselftest class.
             1. Check if linux root directory is valid or not.
             2. Create log file if needed.
 
         Args:
-            log_file (str): The log file name.
+            log_file: Path of the log file.
         """
 
         # Get linux build root directory from linux_env module
@@ -57,19 +57,19 @@ class Kselftest:
         self.linux_root_directory = None
 
     @staticmethod
-    def execute_command(command, cwd):
+    def execute_command(command: str, cwd: str | os.PathLike[str] | None) -> bool:
         """Executes a shell command and returns its output.
 
         Args:
             command (str): The shell command to execute.
-            cwd (str): The directory to use as the working directory.
+            cwd: Path of the directory to use as the working directory.
 
         Returns:
             True: if no errors.
             False: if detect errors during command execution.
         """
 
-        if not os.path.isdir(cwd):
+        if cwd is None or not os.path.isdir(cwd):
             print(f"Folder '{cwd}' does not exist.")
             return False
 
@@ -86,7 +86,7 @@ class Kselftest:
                               cmd_output.stderr).decode("latin-1")
             print(cmd_output_str)
             logging.info(cmd_output_str)
-        except (UnicodeDecodeError, subprocess.CalledProcessError) as error:
+        except subprocess.CalledProcessError as error:
             print(traceback.format_exc())
             logging.error("traceback: %s", traceback.format_exc())
             print(error.stdout)
@@ -94,10 +94,14 @@ class Kselftest:
             print(error.stderr)
             logging.error("Error error.stderr: %s", error.stderr)
             return False
+        except UnicodeDecodeError:
+            print(traceback.format_exc())
+            logging.error("traceback: %s", traceback.format_exc())
+            return False
 
         return True
 
-    def build_targets_test(self, target):
+    def build_targets_test(self, target: str) -> bool:
         """Executes a shell command to build kselftest case and returns
            its output.
 
@@ -135,7 +139,7 @@ class Kselftest:
 
         return True
 
-    def run_targets_test(self, target, root_permission=False):
+    def run_targets_test(self, target: str, root_permission: bool = False) -> bool:
         """Executes a shell command to run kselftest case and returns
            True or False.
 
@@ -168,11 +172,11 @@ class Kselftest:
         return True
 
     @staticmethod
-    def check_log(log_file):
+    def check_log(log_file: str | os.PathLike[str]) -> bool:
         """Check kselftest test log whether all test case pass.
 
         Args:
-            log_file (str): The kselftest test log file.
+            log_file: Path of the kselftest log file.
             It should be in greenlit root directory.
 
         Returns:
@@ -209,7 +213,7 @@ class Kselftest:
         return True
 
 
-def main():
+def main() -> int:
     """
     Main entry point of this python script.
 
