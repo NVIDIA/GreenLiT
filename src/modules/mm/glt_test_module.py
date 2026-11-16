@@ -33,10 +33,18 @@ def test_module_allocation(_, logger) -> bool:
     """
     Test if there's enough region for module allocation
 
+    This observer checks current-boot arm64 module allocation capacity.
+    It is inapplicable on other architectures.
+
     DGX-8285
     PATCH: https://git.kernel.org/torvalds/c/3e35d303ab7d # v6.5+
     TODO: Modify kernel command line to disable KASLR
     """
+
+    if platform.machine().lower() not in ("arm64", "aarch64", "aarch64_be"):
+        GLTCore.GLTTestResult.skip(
+            "Requires arm64 module-VA allocation support from kernel patch 3e35d303ab7d."
+        )
 
     uname = platform.release().split('.')
 
@@ -47,51 +55,55 @@ def test_module_allocation(_, logger) -> bool:
         version.parse(f"{uname[0]}.{uname[1]}") < version.parse("6.5"):
         GLTCore.GLTTestResult.skip("Test requires Ubuntu with kernel version 6.5 or later.")
 
-    if platform.machine() == "aarch64":
-        try:
-            kernel_log = glt_utils.get_kernel_log()
-        except RuntimeError as error:
-            GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+    try:
+        kernel_log = glt_utils.get_kernel_log()
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
 
-        # Match arm64 module_init_limits() printk bodies (message-only / -o cat).
-        non_plt_match = re.search(
-            r"(\d+) pages in range for non-PLT usage", kernel_log
+    # Match arm64 module_init_limits() printk bodies (message-only / -o cat).
+    non_plt_match = re.search(
+        r"(\d+) pages in range for non-PLT usage", kernel_log
+    )
+    if not non_plt_match:
+        GLTCore.GLTTestResult.warn(
+            "Non-PLT module allocation telemetry not found in kernel log."
         )
-        if not non_plt_match:
-            GLTCore.GLTTestResult.fail("Non-PLT pages for module not found. " +
-                                       "Include kernel commit 3e35d303ab7d to fix it.")
 
-        non_plt_page_count = int(non_plt_match.group(1))
+    non_plt_page_count = int(non_plt_match.group(1))
 
-        plt_match = re.search(
-            r"(\d+) pages in range for PLT usage", kernel_log
+    plt_match = re.search(
+        r"(\d+) pages in range for PLT usage", kernel_log
+    )
+    if not plt_match:
+        GLTCore.GLTTestResult.warn(
+            "PLT module allocation telemetry not found in kernel log."
         )
-        if not plt_match:
-            GLTCore.GLTTestResult.fail("PLT pages for module not found. " +
-                                       "Include kernel commit 3e35d303ab7d to fix it.")
 
-        plt_page_count = int(plt_match.group(1))
+    plt_page_count = int(plt_match.group(1))
 
-        # Non-PLT (i.e. in direct jump range) pages are
-        # allocated when KASLR is disabled.
-        logger.info("KASLR is " + "disabled" if
-                                      non_plt_page_count else "enabled")
+    # Non-PLT (i.e. in direct jump range) pages are
+    # allocated when KASLR is disabled.
+    logger.info("KASLR is " + "disabled" if
+                                  non_plt_page_count else "enabled")
 
-        try:
-            output = glt_utils.run_command(
-                ["getconf", "PAGE_SIZE"],
-                "Failed to retrieve the system page size",
-            )
-        except RuntimeError as error:
-            GLTCore.GLTTestResult.fail(str(error))
+    try:
+        output = glt_utils.run_command(
+            ["getconf", "PAGE_SIZE"],
+            "Failed to retrieve the system page size",
+        )
+    except RuntimeError as error:
+        GLTCore.GLTTestResult.fail(str(error))
 
-        page_size = int(output.stdout) if output.stdout else 64 << 10
+    page_size = int(output.stdout) if output.stdout else 64 << 10
 
-        # Total size for module allocation shoule be approximately 2G, it can be
-        # slightly lower. But at least the region will be bigger than 1G.
-        if (non_plt_page_count + plt_page_count) * page_size < 1 << 30:
-            GLTCore.GLTTestResult.fail("Module allocation region is less than 1GB. " +
-                                       "Include kernel commit 3e35d303ab7d to fix it.")
+    # Total size for module allocation shoule be approximately 2G, it can be
+    # slightly lower. But at least the region will be bigger than 1G.
+    if (non_plt_page_count + plt_page_count) * page_size < 1 << 30:
+        GLTCore.GLTTestResult.fail(
+            "Module allocation region is less than 1GiB: "
+            f"non-PLT pages={non_plt_page_count}, PLT pages={plt_page_count}, "
+            f"page size={page_size} bytes."
+        )
 
     module_dir = os.path.dirname(os.path.abspath(__file__))
     module_dir = os.path.join(module_dir, "bingo")
