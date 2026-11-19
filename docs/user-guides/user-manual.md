@@ -160,6 +160,25 @@ rejects it if it does not belong to the disruptive plan. Test cases required by
 `@GLTRequires` are added automatically. `glt-test-suite` rejects combining
 `--test-case` with `--list`, `--resume`, or category flags such as `--pci`.
 
+#### Cacheable PFNMAP KVM memory
+
+If `virt:test_kvm_cacheable_pfnmap` skips because all compatible Grace GPUs are
+owned by the NVIDIA driver, use a separate test session on a reserved host:
+
+1. Run the tests that need the NVIDIA driver in the normal boot first.
+2. For systems using loadable GPU drivers, use the bootloader's temporary entry
+   editor to append `module_blacklist=nvidia,nouveau` to the kernel command line
+   for one boot. See the [kernel parameter documentation](https://docs.kernel.org/admin-guide/kernel-parameters.html).
+3. Run only this testcase. It selects an unused GPU and handles its temporary
+   VFIO binding and cleanup:
+
+   ```bash
+   sudo glt-test-suite --disruptive --test-case virt:test_kvm_cacheable_pfnmap
+   ```
+
+4. Reboot with the normal kernel command line and confirm `nvidia-smi` works
+   before resuming GPU/CUDA tests or full test plans.
+
 #### Mixed-PASID IOMMU attach
 
 `iommu:test_mixed_pasid_attach` is an opt-in disruptive test for Ubuntu ARM64

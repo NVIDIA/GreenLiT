@@ -43,6 +43,7 @@ include = [
     "src/modules/i2c/kretprobes/*",
     "src/modules/iommu/cmdqv_hyp_own/*",
     "src/modules/iommu/sva_invalidate/*",
+    "src/modules/virt/kvm_cacheable_pfnmap/*",
     "src/modules/mm/bingo/*",
     "src/modules/mm/contpte_access_flags/*",
     "src/modules/mm/hotplug_tlb/*",
