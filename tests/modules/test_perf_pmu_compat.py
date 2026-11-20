@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for PMU perf compatibility."""
 # pylint: disable=wrong-import-position,protected-access,unused-argument,too-many-public-methods,duplicate-code
 

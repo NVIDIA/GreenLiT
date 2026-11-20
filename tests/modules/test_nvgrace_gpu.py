@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Hardware-independent checks for NVGrace CXL readiness patch detection."""
 # pylint: disable=wrong-import-position
 import sys

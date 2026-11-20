@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 obj-m := test_dma_alloc.o
 
 KDIR ?= /lib/modules/$(shell uname -r)/build

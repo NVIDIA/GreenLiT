@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for CPU frequency stress test helpers."""
 # pylint: disable=protected-access,too-many-arguments,too-many-public-methods
 

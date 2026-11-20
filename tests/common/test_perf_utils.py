@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for common/perf_utils.py."""
 # pylint: disable=duplicate-code,too-many-public-methods,wrong-import-position
 
