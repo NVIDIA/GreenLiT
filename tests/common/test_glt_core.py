@@ -110,6 +110,17 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         self.assertTrue(allow)
         self.assertIn("ALL TRUE", reason)
 
+    def test_conditional_check_accepts_lambdas_without_descriptions(self):
+        """Passing any_true and any_false conditions can be plain callables."""
+        check = GLTConditionalCheck()
+        check.any_true.append(lambda: True)
+        check.any_false.append(lambda: False)
+
+        self.assertEqual(
+            check.check(),
+            (True, "(ANY TRUE: <lambda>)(ANY FALSE: <lambda>)"),
+        )
+
     def test_allow_failure(self):
         """Test the GLTAllowFailure class"""
         allow_failure = GLTAllowFailure()
@@ -340,6 +351,10 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         test_attrs_func.__wrapped__.attr.conditional_skip.any_true.append(
             test_condition
         )
+        attr = test_attrs_func.__wrapped__.attr
+        attr.conditional_skip.any_true.append(lambda: False)
+        attr.conditional_skip.all_true.append(lambda: False)
+        attr.allow_failure.all_true.append(lambda: False)
 
         # Set test result
         test_attrs_func.__wrapped__.attr.result = (
@@ -361,8 +376,8 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         with self.mock.patch("builtins.print", mock_print):
             test_attrs_func.__wrapped__.attr.dump_attrs()
 
-        # Verify output was generated
-        self.assertTrue(len(output) > 0)
+        self.assertEqual(output.count("   - [test description]"), 2)
+        self.assertEqual(output.count("   - [<lambda>]"), 3)
 
     def test_test_exceptions(self):
         """Test GLTTestSkip, GLTTestFail, and GLTTestWarn exceptions"""

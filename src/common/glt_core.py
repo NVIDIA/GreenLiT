@@ -98,6 +98,11 @@ class PostHooks:
         return hook
 
 
+def _condition_description(condition: Callable[[], bool]) -> object:
+    """Return a condition description or its callable name."""
+    return getattr(condition, "desc", getattr(condition, "__name__", type(condition).__name__))
+
+
 class GLTConditionalCheck:
     """The class to check the condition"""
 
@@ -131,7 +136,8 @@ class GLTConditionalCheck:
             for func in self.any_true:
                 if func():
                     can_do = True
-                    reason += f"(ANY TRUE: {getattr(func, 'desc')})"
+                    desc = _condition_description(func)
+                    reason += f"(ANY TRUE: {desc})"
                     break
             if not can_do:
                 return False, "No function in any_true returned True"
@@ -143,7 +149,8 @@ class GLTConditionalCheck:
             for func in self.any_false:
                 if not func():
                     can_do = True
-                    reason += f"(ANY FALSE: {getattr(func, 'desc')})"
+                    desc = _condition_description(func)
+                    reason += f"(ANY FALSE: {desc})"
                     break
             if not can_do:
                 return False, "No function in any_false returned False"
@@ -494,38 +501,38 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
             if conditional_skip.all_true:
                 output("  - all_true:")
                 for condition in conditional_skip.all_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if conditional_skip.all_false:
                 output("  - all_false:")
                 for condition in conditional_skip.all_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if conditional_skip.any_true:
                 output("  - any_true:")
                 for condition in conditional_skip.any_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if conditional_skip.any_false:
                 output("  - any_false:")
                 for condition in conditional_skip.any_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
         allow_failure = getattr(getattr(func, "attr", None), "allow_failure", None)
         if isinstance(allow_failure, GLTAllowFailure):
             output(" - allow_failure:")
             if allow_failure.all_true:
                 output("  - all_true:")
                 for condition in allow_failure.all_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if allow_failure.all_false:
                 output("  - all_false:")
                 for condition in allow_failure.all_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if allow_failure.any_true:
                 output("  - any_true:")
                 for condition in allow_failure.any_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if allow_failure.any_false:
                 output("  - any_false:")
                 for condition in allow_failure.any_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
         if self.result:
             output(f" - result: [{self.result[0].value}] {self.result[1]}")
 
