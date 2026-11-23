@@ -728,6 +728,20 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
                         scheduler.progress_check("test1", "Start")
                     )
 
+    def test_scheduler_sort_ignores_empty_dependency_entry(self):
+        """Looking up an unselected test does not add a dependency edge."""
+
+        @GLTTestAttr(cat="test_cat", name="test_selected")
+        def test_selected():
+            return "selected"
+
+        scheduler = GLTScheduler([test_selected])
+        self.assertEqual(scheduler.dependencies["test_cat:test_unselected"], [])
+
+        scheduler.sort()
+
+        self.assertEqual(scheduler.test_list, [test_selected])
+
     def test_scheduler_sort_rejects_missing_dependency(self):
         """Scheduler sort reports dependencies that reference missing tests."""
 
@@ -763,6 +777,49 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             "test_cat:test_dependency",
             str(ctx.exception))
         self.assertIn("not in the scheduler", str(ctx.exception))
+
+    def test_scheduler_sort_rejects_cycle(self):
+        """Scheduler sort reports a dependency cycle."""
+
+        @GLTRequires.must_pass("test_cat", "test_b")
+        @GLTTestAttr(cat="test_cat", name="test_a")
+        def test_a():
+            return "a"
+
+        @GLTRequires.must_pass("test_cat", "test_a")
+        @GLTTestAttr(cat="test_cat", name="test_b")
+        def test_b():
+            return "b"
+
+        scheduler = GLTScheduler([test_a, test_b])
+
+        with self.assertRaises(ValueError) as ctx:
+            scheduler.sort()
+
+        self.assertIn("Cycle detected in dependencies", str(ctx.exception))
+
+    def test_scheduler_sort_reorders_dependencies(self):
+        """Scheduler sort orders prerequisites before dependent tests."""
+
+        @GLTTestAttr(cat="test_cat", name="test1")
+        def test1():
+            return "test1"
+
+        @GLTRequires.must_pass("test_cat", "test1")
+        @GLTTestAttr(cat="test_cat", name="test2")
+        def test2():
+            return "test2"
+
+        @GLTRequires.must_pass("test_cat", "test2")
+        @GLTTestAttr(cat="test_cat", name="test3")
+        def test3():
+            return "test3"
+
+        scheduler = GLTScheduler([test3, test2, test1])
+
+        scheduler.sort()
+
+        self.assertEqual(scheduler.test_list, [test1, test2, test3])
 
     def test_plan_nesting(self):
         """Test the GLTPlanType.get_all_nested method"""
