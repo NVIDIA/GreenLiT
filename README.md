@@ -7,6 +7,8 @@ GreenLiT provides an automated, reliable, and extensible testing framework for v
 
 ## Getting Started
 
+**NOTICE AND DISCLAIMER: This software automatically retrieves, accesses or interacts with external materials.  Those retrieved materials are not distributed with this software and are governed solely by separate terms, conditions and licenses.  You are solely responsible for finding, reviewing and complying with all applicable terms, conditions, and licenses, and for verifying the security, integrity and suitability of any retrieved materials for your specific use case. This software is provided "AS IS", without warranty of any kind. The author makes no representations or warranties regarding any retrieved materials, and assumes no liability for any losses, damages, liabilities or legal consequences from your use or inability to use this software or any retrieved materials. Use this software and the retrieved materials at your own risk.**
+
 ### Option A: Direct Installation
 Clone this repository and run the installer:
 
@@ -94,4 +96,4 @@ GreenLiT also supports Poetry for development installation. See the [Development
 ## License
 GreenLiT is licensed under Apache-2.0 except where individual files specify another license. See [`LICENSE`](LICENSE) for the Apache-2.0 license text.
 
-Files marked `SPDX-License-Identifier: GPL-2.0-only` are covered by [`LICENSES/GPL-2.0-only.txt`](LICENSES/GPL-2.0-only.txt).
+Files marked `SPDX-License-Identifier: GPL-2.0-only` are covered by [`LICENSES/GPL-2.0-only.txt`](LICENSES/GPL-2.0-only.txt). A file with an `SPDX-License-Identifier` header is covered by exactly one license, the one it names; the two licenses do not both apply to the same file. Files without such a header are covered by Apache-2.0.

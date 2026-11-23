@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for DGX-16331 CPPC online-CPU coverage."""
 # pylint: disable=wrong-import-position,protected-access,too-many-public-methods
 

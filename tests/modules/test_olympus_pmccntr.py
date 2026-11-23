@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for NVIDIA Olympus PMCCNTR_EL0 coverage."""
 # pylint: disable=duplicate-code,protected-access,too-many-public-methods
 

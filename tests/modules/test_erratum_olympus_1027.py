@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for NVIDIA Olympus T410-OLY-1027 erratum coverage."""
 
 from tests.test_base import GLTTestBase
