@@ -14,11 +14,9 @@
 # limitations under the License.
 
 """Test Vera SMT-aware asymmetric-capacity wakeup placement."""
-# pylint: disable=too-many-lines
 
 import ctypes
 import os
-import re
 import select
 import subprocess
 import sys
@@ -27,15 +25,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from common import glt_core as GLTCore
+from common.cpu.activity import (
+    CpuActivity as _CpuActivity,
+    ObserverUnavailable as _ObserverUnavailable,
+    activity_delta as _activity_delta,
+    cpu_stayed_quiet as _cpu_stayed_quiet,
+    read_cpu_activity as _read_cpu_activity,
+)
 from common.cpu_topology import parse_cpu_mask
 from common.nv_device import NvDev
 
 
 CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
 NODE_SYSFS_ROOT = Path("/sys/devices/system/node")
-CPU_STAT_PATH = Path("/proc/stat")
-SCHEDSTAT_PATH = Path("/proc/schedstat")
-SUPPORTED_SCHEDSTAT_VERSIONS = frozenset({15, 16, 17})
 
 FIX_COMMIT = "25a32e400a14"
 FIX_SUBJECT = "sched/fair: Prefer fully-idle SMT cores in asym-capacity idle selection"
@@ -91,16 +93,6 @@ class _TrialLayout:
 
 
 @dataclass(frozen=True)
-class _CpuActivity:
-    """Per-CPU activity counters used to reject contaminated trials."""
-
-    busy_ticks: int
-    idle_ticks: int
-    runtime_ns: int
-    timeslices: int
-
-
-@dataclass(frozen=True)
 class _WakeupTrial:
     """One uncontaminated wakeup placement observation."""
 
@@ -111,10 +103,6 @@ class _WakeupTrial:
 
 class _TrialContended(RuntimeError):
     """The selected CPUs did not remain quiet enough for a kernel verdict."""
-
-
-class _ObserverUnavailable(RuntimeError):
-    """Required scheduler activity accounting is unsupported or unavailable."""
 
 
 class _ProbeInconclusive(RuntimeError):
@@ -238,171 +226,6 @@ def _process_state(pid, proc_root=Path("/proc")):
     if command_end < 0 or len(stat_text) <= command_end + 2:
         raise RuntimeError(f"Cannot parse wakee state from {stat_path}")
     return stat_text[command_end + 2]
-
-
-def _read_cpu_ticks(cpus, stat_path):
-    """Read busy and idle ticks for requested CPUs from /proc/stat."""
-    tick_activity = {}
-    try:
-        stat_lines = Path(stat_path).read_text(encoding="ascii").splitlines()
-    except (OSError, UnicodeError) as err:
-        raise RuntimeError(f"Cannot read per-CPU activity from {stat_path}: {err}") from err
-
-    for line in stat_lines:
-        fields = line.split()
-        if not fields:
-            continue
-        cpu_text = fields[0][3:] if fields[0].startswith("cpu") else ""
-        if not cpu_text.isdigit():
-            continue
-        cpu = int(cpu_text)
-        if cpu not in cpus:
-            continue
-        if cpu in tick_activity or len(fields) < 9:
-            raise RuntimeError(f"Malformed CPU activity row in {stat_path}: {line!r}")
-        try:
-            counters = [int(value) for value in fields[1:9]]
-        except ValueError as err:
-            raise RuntimeError(
-                f"Malformed CPU activity row in {stat_path}: {line!r}"
-            ) from err
-        if any(value < 0 for value in counters):
-            raise RuntimeError(f"Negative CPU activity counter in {stat_path}: {line!r}")
-
-        idle = counters[3]
-        iowait = counters[4]
-        tick_activity[cpu] = (sum(counters) - idle - iowait, idle)
-
-    missing_cpus = cpus - tick_activity.keys()
-    if missing_cpus:
-        raise RuntimeError(
-            f"Missing CPU activity rows in {stat_path}: {sorted(missing_cpus)}"
-        )
-    return tick_activity
-
-
-def _read_cpu_schedstat(cpus, schedstat_path):
-    """Read high-resolution runtime and timeslice counts for requested CPUs."""
-    try:
-        schedstat_lines = Path(schedstat_path).read_text(
-            encoding="ascii"
-        ).splitlines()
-    except (FileNotFoundError, PermissionError) as err:
-        raise _ObserverUnavailable(
-            f"Cannot read per-CPU scheduler activity from {schedstat_path}: {err}"
-        ) from err
-    except OSError as err:
-        raise RuntimeError(
-            f"Cannot read per-CPU scheduler activity from {schedstat_path}: {err}"
-        ) from err
-    except UnicodeError as err:
-        raise RuntimeError(
-            f"Cannot decode per-CPU scheduler activity from {schedstat_path}: {err}"
-        ) from err
-    version_line = schedstat_lines[0] if schedstat_lines else ""
-    version_match = re.fullmatch(r"version ([0-9]{1,10})", version_line)
-    if version_match is None:
-        raise RuntimeError(f"Missing schedstat version in {schedstat_path}")
-    schedstat_version = int(version_match.group(1))
-    if schedstat_version not in SUPPORTED_SCHEDSTAT_VERSIONS:
-        raise _ObserverUnavailable(
-            f"Unsupported schedstat version {schedstat_version} in {schedstat_path}"
-        )
-
-    activity = {}
-    for line in schedstat_lines[1:]:
-        fields = line.split()
-        if (
-                not fields
-                or not fields[0].startswith("cpu")
-                or not fields[0][3:].isdigit()):
-            continue
-        cpu_text = fields[0][3:]
-        cpu = int(cpu_text)
-        if cpu not in cpus:
-            continue
-        if cpu in activity or len(fields) < 10:
-            raise RuntimeError(
-                f"Malformed CPU scheduler activity row in {schedstat_path}: {line!r}"
-            )
-        try:
-            runtime_ns = int(fields[7])
-            timeslices = int(fields[9])
-        except ValueError as err:
-            raise RuntimeError(
-                f"Malformed CPU scheduler activity row in {schedstat_path}: {line!r}"
-            ) from err
-        if runtime_ns < 0 or timeslices < 0:
-            raise RuntimeError(
-                f"Negative CPU scheduler activity counter in {schedstat_path}: "
-                f"{line!r}"
-            )
-        activity[cpu] = (runtime_ns, timeslices)
-
-    missing_cpus = cpus - activity.keys()
-    if missing_cpus:
-        raise RuntimeError(
-            f"Missing CPU scheduler activity rows in {schedstat_path}: "
-            f"{sorted(missing_cpus)}"
-        )
-    return activity
-
-
-def _read_cpu_activity(
-        cpus, stat_path=CPU_STAT_PATH, schedstat_path=SCHEDSTAT_PATH):
-    """Read tick and high-resolution activity for requested logical CPUs."""
-    requested_cpus = set(cpus)
-    sched_activity = _read_cpu_schedstat(requested_cpus, schedstat_path)
-    tick_activity = _read_cpu_ticks(requested_cpus, stat_path)
-    return {
-        cpu: _CpuActivity(
-            busy_ticks=tick_activity[cpu][0],
-            idle_ticks=tick_activity[cpu][1],
-            runtime_ns=sched_activity[cpu][0],
-            timeslices=sched_activity[cpu][1],
-        )
-        for cpu in requested_cpus
-    }
-
-
-def _activity_delta(before, after, cpu):
-    """Return monotonic activity deltas for one CPU."""
-    try:
-        before_cpu = before[cpu]
-        after_cpu = after[cpu]
-    except KeyError as err:
-        raise RuntimeError(f"Missing CPU {cpu} from activity snapshot") from err
-    before_values = (
-        before_cpu.busy_ticks,
-        before_cpu.idle_ticks,
-        before_cpu.runtime_ns,
-        before_cpu.timeslices,
-    )
-    after_values = (
-        after_cpu.busy_ticks,
-        after_cpu.idle_ticks,
-        after_cpu.runtime_ns,
-        after_cpu.timeslices,
-    )
-    if any(after_value < before_value for before_value, after_value in zip(
-            before_values, after_values)):
-        raise RuntimeError(f"CPU {cpu} activity counters moved backwards")
-    return _CpuActivity(
-        busy_ticks=after_cpu.busy_ticks - before_cpu.busy_ticks,
-        idle_ticks=after_cpu.idle_ticks - before_cpu.idle_ticks,
-        runtime_ns=after_cpu.runtime_ns - before_cpu.runtime_ns,
-        timeslices=after_cpu.timeslices - before_cpu.timeslices,
-    )
-
-
-def _cpu_stayed_quiet(before, after, cpu):
-    """Return whether a CPU accrued idle time without task activity."""
-    delta = _activity_delta(before, after, cpu)
-    return (
-        delta.runtime_ns == 0
-        and delta.timeslices == 0
-        and delta.idle_ticks > 0
-    )
 
 
 def _core_stayed_quiet(before, after, core):

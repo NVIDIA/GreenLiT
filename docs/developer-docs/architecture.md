@@ -15,6 +15,7 @@ greenlit/
 ├── src/                    # Test framework source code
 │   ├── bin/                # Private runtime helpers packaged as wheel data
 │   ├── common/             # Framework and cross-subsystem APIs
+│   │   ├── cpu/            # Shared CPU and scheduler activity helpers
 │   │   ├── tpm/            # Shared TPM ACPI and runtime helpers
 │   │   └── virt/           # Libvirt/QEMU helper APIs for tests
 │   ├── greenlit/           # Main package
