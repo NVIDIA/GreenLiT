@@ -14,11 +14,14 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
-PERF_EVENT_DIR="/sys/bus/event_source/devices"
-TEST_DURATION=0.1  # seconds for perf stat tests
+PERF_EVENT_DIR="${PERF_EVENT_DIR:-/sys/bus/event_source/devices}"
+SOC_SYSFS_ROOT="${SOC_SYSFS_ROOT:-/sys/devices}"
+CPUINFO_PATH="${CPUINFO_PATH:-/proc/cpuinfo}"
+TEST_DURATION="${TEST_DURATION:-0.1}"  # seconds for perf stat tests
 FAILED_TESTS=0
 PASSED_TESTS=0
 SKIPPED_TESTS=0
+INCONCLUSIVE_TESTS=0
 
 # Exit codes
 EXIT_PASS=0    # Test passed successfully
@@ -40,17 +43,22 @@ log_error() {
 
 log_pass() {
     echo -e "${GREEN}[PASS]${NC} $1"
-    ((PASSED_TESTS++))
+    PASSED_TESTS=$((PASSED_TESTS + 1))
 }
 
 log_fail() {
     echo -e "${RED}[FAIL]${NC} $1"
-    ((FAILED_TESTS++))
+    FAILED_TESTS=$((FAILED_TESTS + 1))
 }
 
 log_skip() {
     echo -e "${YELLOW}[SKIP]${NC} $1"
-    ((SKIPPED_TESTS++))
+    SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+}
+
+log_inconclusive() {
+    log_skip "$1"
+    INCONCLUSIVE_TESTS=$((INCONCLUSIVE_TESTS + 1))
 }
 
 # Check if running as root (needed for some perf operations)
@@ -58,7 +66,6 @@ check_root() {
     if [ "$EUID" -ne 0 ]; then
         log_warn "Not running as root. Some tests may fail due to permissions."
         log_warn "Consider running with: sudo $0"
-        return 1
     fi
     return 0
 }
@@ -68,7 +75,7 @@ check_t410_platform() {
     log_info "Checking T410 (Vera) platform..."
     local t410_soc_id="jep106:036b:0410"
 
-    for soc_dir in /sys/devices/soc*; do
+    for soc_dir in "${SOC_SYSFS_ROOT}"/soc*; do
         [ -r "$soc_dir/soc_id" ] || continue
         local soc_id
         soc_id=$(cat "$soc_dir/soc_id" 2>/dev/null)
@@ -106,7 +113,8 @@ check_perf() {
 test_pmu_present() {
     local pmu_pattern=$1
     local description=$2
-    
+    local requirement=${3:-optional}
+
     log_info "Testing $description..."
     
     # Use glob pattern directly instead of ls
@@ -118,7 +126,11 @@ test_pmu_present() {
     done
     
     if [ ${#pmu_devices[@]} -eq 0 ]; then
-        log_skip "$description - No devices found matching pattern: $pmu_pattern"
+        if [ "$requirement" = "required" ]; then
+            log_fail "$description - Required device missing; pattern: $pmu_pattern"
+        else
+            log_skip "$description - No devices found matching pattern: $pmu_pattern"
+        fi
         return 1
     fi
     
@@ -159,71 +171,88 @@ test_pmu_present() {
     return 0
 }
 
-# Get first available event for a PMU
-get_first_event() {
+# Get the generic event used for the no-traffic smoke test
+get_smoke_event() {
     local pmu_name=$1
     local pmu_path="${PERF_EVENT_DIR}/${pmu_name}"
-    
-    # Try to find 'cycles' event first as it's most common
-    if [ -f "$pmu_path/events/cycles" ]; then
+
+    if [ -r "$pmu_path/events/cycles" ]; then
         echo "cycles"
         return 0
     fi
-    
-    # Otherwise, get the first available event
-    local first_event
-    first_event=$(find "$pmu_path/events/" -maxdepth 1 -type f 2>/dev/null | head -1)
-    if [ -n "$first_event" ]; then
-        basename "$first_event"
-        return 0
-    fi
-    
     return 1
 }
 
-# Test if we can count events with perf stat
+parse_perf_count() {
+    local perf_output=$1
+    local expected_event=$2
+
+    awk -F ',' -v expected="$expected_event" '
+        {
+            for (field = 1; field <= 3; field++) {
+                gsub(/^[ \t]+|[ \t]+$/, "", $field)
+            }
+            if ($3 == expected) {
+                print $1
+                found = 1
+                exit
+            }
+        }
+        END {
+            if (!found) {
+                exit 1
+            }
+        }
+    ' <<< "$perf_output"
+}
+
+# Test generic counter activity without claiming event-specific traffic coverage
 test_pmu_operational() {
     local pmu_name=$1
     local description=$2
-    
+
     if [ ! -d "${PERF_EVENT_DIR}/${pmu_name}" ]; then
-        log_skip "$description - PMU $pmu_name not present"
-        return 1
+        log_inconclusive "$description - PMU $pmu_name disappeared before perf stat"
+        return 0
     fi
-    
-    # Get first available event
+
     local event
-    event=$(get_first_event "$pmu_name")
-    if [ -z "$event" ]; then
-        log_skip "$description - No events available"
-        return 1
+    if ! event=$(get_smoke_event "$pmu_name"); then
+        log_inconclusive "$description - No cycles event; event-specific workload is required"
+        return 0
     fi
-    
-    log_info "Testing $description: $PERF stat -a -e ${pmu_name}/${event}/ sleep $TEST_DURATION"
-    
-    # Run perf stat and capture output
+
+    local event_spec="${pmu_name}/${event}/"
+    log_info "Testing $description: $PERF stat -x, -a -e ${event_spec} -- sleep $TEST_DURATION"
+
     local perf_output
-    if perf_output=$($PERF stat -a -e "${pmu_name}/${event}/" sleep $TEST_DURATION 2>&1); then
-        # Check if we got a valid count (not <not counted> or <not supported>)
-        if echo "$perf_output" | grep -q "not counted\|not supported"; then
-            log_fail "$description - Event not counted"
-            echo "$perf_output" | grep -A 2 -B 2 "$pmu_name"
-            return 1
-        else
-            log_pass "$description - Event counted successfully (${event})"
-            # Show the counter value
-            local count_line
-            count_line=$(echo "$perf_output" | grep "$pmu_name" || echo "")
-            if [ -n "$count_line" ]; then
-                echo "  $count_line"
-            fi
-            return 0
-        fi
-    else
+    if ! perf_output=$("$PERF" stat -x, -a -e "$event_spec" -- sleep "$TEST_DURATION" 2>&1); then
         log_fail "$description - perf stat failed"
         echo "$perf_output" | head -20
         return 1
     fi
+
+    local count
+    if ! count=$(parse_perf_count "$perf_output" "$event_spec"); then
+        log_fail "$description - No CSV count found for ${event_spec}"
+        echo "$perf_output" | head -20
+        return 1
+    fi
+    if [ "$count" = "<not counted>" ] || [ "$count" = "<not supported>" ]; then
+        log_fail "$description - Event unavailable: $count"
+        return 1
+    fi
+    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+        log_fail "$description - Invalid ${event_spec} count: $count"
+        return 1
+    fi
+    if [[ "$count" =~ ^0+$ ]]; then
+        log_inconclusive "$description - cycles count is zero without event-specific traffic"
+        return 0
+    fi
+
+    log_pass "$description - cycles counter activity observed (count=$count)"
+    return 0
 }
 
 # List all events for a PMU
@@ -255,20 +284,20 @@ test_vendor_events() {
     local cpu_partnum=""
     local cpu_implementer=""
     
-    if [ -r "/proc/cpuinfo" ]; then
-        cpu_implementer=$(grep -m1 "CPU implementer" /proc/cpuinfo | awk '{print $4}')
-        cpu_partnum=$(grep -m1 "CPU part" /proc/cpuinfo | awk '{print $4}')
+    if [ -r "$CPUINFO_PATH" ]; then
+        cpu_implementer=$(grep -m1 "CPU implementer" "$CPUINFO_PATH" | awk '{print $4}')
+        cpu_partnum=$(grep -m1 "CPU part" "$CPUINFO_PATH" | awk '{print $4}')
     fi
     
     # Check for NVIDIA implementer (0x4e) and Olympus part (0x100 or 0x010 depending on format)
     if [ "$cpu_implementer" != "0x4e" ]; then
-        log_skip "CPU vendor events - Not running on NVIDIA CPU (implementer=$cpu_implementer)"
+        log_fail "CPU vendor events - T410 has no NVIDIA CPU implementer (implementer=$cpu_implementer)"
         return 1
     fi
     
     # Part number can be reported as 0x100 (12-bit) or 0x010 (short form)
     if [ "$cpu_partnum" != "0x100" ] && [ "$cpu_partnum" != "0x010" ]; then
-        log_skip "CPU vendor events - Not Olympus CPU (part=$cpu_partnum, expected 0x100/0x010)"
+        log_fail "CPU vendor events - T410 has no Olympus CPU part (part=$cpu_partnum, expected 0x100/0x010)"
         return 1
     fi
     
@@ -276,8 +305,9 @@ test_vendor_events() {
     
     # Check if perf can list vendor events
     local vendor_events_output
-    if ! vendor_events_output=$($PERF list 2>&1); then
-        log_warn "perf list failed, skipping vendor events test"
+    if ! vendor_events_output=$("$PERF" list 2>&1); then
+        log_fail "CPU vendor events - perf list failed"
+        echo "$vendor_events_output" | head -20
         return 1
     fi
     
@@ -288,75 +318,76 @@ test_vendor_events() {
     echo "  Checking for vendor events:"
     for event in "${test_events[@]}"; do
         # Check both raw event name and potential aliases
-        if echo "$vendor_events_output" | grep -qi "$event"; then
+        if echo "$vendor_events_output" | grep -Eqi "^[[:space:]]*${event}([[:space:]]|$)"; then
             echo "    ✓ $event - available"
             found_events=$((found_events + 1))
         fi
     done
     
     if [ $found_events -eq 0 ]; then
-        log_skip "CPU vendor events - No vendor events found in perf list"
+        log_fail "CPU vendor events - No expected events found in perf list"
         return 1
     fi
-    
-    # Try to count a basic CPU event
-    log_info "Testing CPU core event counting: $PERF stat -e cycles -a sleep $TEST_DURATION"
-    
+
+    log_info "Testing CPU core event counting: $PERF stat -x, -e cycles -a -- sleep $TEST_DURATION"
+
     local perf_output
-    set +e  # Temporarily disable exit on error
-    perf_output=$($PERF stat -e cycles -a sleep $TEST_DURATION 2>&1)
-    local perf_exit=$?
-    set -e  # Re-enable exit on error
-    
+    local perf_exit=0
+    perf_output=$("$PERF" stat -x, -e cycles -a -- sleep "$TEST_DURATION" 2>&1) || perf_exit=$?
     if [ $perf_exit -ne 0 ]; then
         log_fail "CPU vendor events - perf stat failed (exit code: $perf_exit)"
         echo "$perf_output" | head -10
         return 1
     fi
-    
-    if echo "$perf_output" | grep -q "not counted\|not supported"; then
-        log_fail "CPU vendor events - cycles event not counted"
-        return 1
-    else
-        log_pass "CPU vendor events - Core PMU operational"
-        local count_line
-        count_line=$(echo "$perf_output" | grep "cycles" | head -1 || echo "")
-        if [ -n "$count_line" ]; then
-            echo "  $count_line"
+
+    local count
+    if ! count=$(parse_perf_count "$perf_output" "cycles"); then
+        if ! count=$(parse_perf_count "$perf_output" "cpu-cycles"); then
+            log_fail "CPU vendor events - No CSV count found for cycles"
+            echo "$perf_output" | head -10
+            return 1
         fi
-        
-        # Check if vendor-specific metrics are loaded (informational only)
-        echo ""
-        echo "  Checking for vendor-specific metrics (from JSON files):"
-        set +e  # Don't fail on grep mismatches
-        local has_metrics=0
-        
-        # Check for some Tegra410 Olympus specific metrics
-        if $PERF list metric 2>/dev/null | grep -qi "backend_bound"; then
-            echo "    ✓ backend_bound metric found"
-            has_metrics=1
-        fi
-        
-        if $PERF list metric 2>/dev/null | grep -qi "ipc\|instructions.*per.*cycle"; then
-            echo "    ✓ IPC metric found"
-            has_metrics=1
-        fi
-        
-        if $PERF list metric 2>/dev/null | grep -qi "frontend_bound"; then
-            echo "    ✓ frontend_bound metric found"
-            has_metrics=1
-        fi
-        
-        set -e  # Re-enable exit on error
-        
-        if [ $has_metrics -eq 1 ]; then
-            echo "  ✓ Vendor events/metrics loaded from JSON files"
-        else
-            echo "  ○ Vendor events not loaded (using standard ARM events only)"
-        fi
-        
-        return 0
     fi
+    if [ "$count" = "<not counted>" ] || [ "$count" = "<not supported>" ]; then
+        log_fail "CPU vendor events - cycles event unavailable: $count"
+        return 1
+    fi
+    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+        log_fail "CPU vendor events - Invalid cycles count: $count"
+        return 1
+    fi
+    if [[ "$count" =~ ^0+$ ]]; then
+        log_inconclusive "CPU vendor events - cycles count is zero"
+        return 1
+    fi
+    log_pass "CPU vendor events - Core PMU counter activity observed (count=$count)"
+
+    echo ""
+    echo "  Checking for vendor-specific metrics (from JSON files):"
+    local has_metrics=0
+
+    if "$PERF" list metric 2>/dev/null | grep -qi "backend_bound"; then
+        echo "    ✓ backend_bound metric found"
+        has_metrics=1
+    fi
+
+    if "$PERF" list metric 2>/dev/null | grep -qi "ipc\|instructions.*per.*cycle"; then
+        echo "    ✓ IPC metric found"
+        has_metrics=1
+    fi
+
+    if "$PERF" list metric 2>/dev/null | grep -qi "frontend_bound"; then
+        echo "    ✓ frontend_bound metric found"
+        has_metrics=1
+    fi
+
+    if [ $has_metrics -eq 1 ]; then
+        echo "  ✓ Vendor events/metrics loaded from JSON files"
+    else
+        echo "  ○ Vendor events not loaded (using standard ARM events only)"
+    fi
+
+    return 0
 }
 
 # Main test execution
@@ -389,14 +420,14 @@ main() {
     echo "----------------------------------------"
     echo "Test 1: UCF (Unified Coherence Fabric) PMU"
     echo "----------------------------------------"
-    if test_pmu_present "nvidia_ucf_pmu_*" "UCF PMU"; then
+    if test_pmu_present "nvidia_ucf_pmu_*" "UCF PMU" "required"; then
         # List available UCF PMUs and test each
         for pmu_dev in "${PERF_EVENT_DIR}"/nvidia_ucf_pmu_*; do
             [ -e "$pmu_dev" ] || continue
             local pmu_name
             pmu_name=$(basename "$pmu_dev")
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -405,13 +436,13 @@ main() {
     echo "----------------------------------------"
     echo "Test 2: PCIE PMU"
     echo "----------------------------------------"
-    if test_pmu_present "nvidia_pcie_pmu_*" "PCIE PMU"; then
+    if test_pmu_present "nvidia_pcie_pmu_*" "PCIE PMU" "required"; then
         for pmu_dev in "${PERF_EVENT_DIR}"/nvidia_pcie_pmu_*; do
             [ -e "$pmu_dev" ] || continue
             local pmu_name
             pmu_name=$(basename "$pmu_dev")
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -420,13 +451,13 @@ main() {
     echo "----------------------------------------"
     echo "Test 3: PCIE-TGT PMU"
     echo "----------------------------------------"
-    if test_pmu_present "nvidia_pcie_tgt_pmu_*" "PCIE-TGT PMU"; then
+    if test_pmu_present "nvidia_pcie_tgt_pmu_*" "PCIE-TGT PMU" "required"; then
         for pmu_dev in "${PERF_EVENT_DIR}"/nvidia_pcie_tgt_pmu_*; do
             [ -e "$pmu_dev" ] || continue
             local pmu_name
             pmu_name=$(basename "$pmu_dev")
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -441,7 +472,7 @@ main() {
             local pmu_name
             pmu_name=$(basename "$pmu_dev")
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -462,7 +493,7 @@ main() {
             fi
             
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -477,7 +508,7 @@ main() {
             local pmu_name
             pmu_name=$(basename "$pmu_dev")
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -492,7 +523,7 @@ main() {
             local pmu_name
             pmu_name=$(basename "$pmu_dev")
             list_pmu_events "$pmu_name"
-            test_pmu_operational "$pmu_name" "$pmu_name basic event"
+            test_pmu_operational "$pmu_name" "$pmu_name basic event" || true
         done
     fi
     echo ""
@@ -537,6 +568,9 @@ main() {
     if [ $FAILED_TESTS -gt 0 ]; then
         log_error "Some tests failed. Check output above for details."
         exit $EXIT_FAIL
+    elif [ $INCONCLUSIVE_TESTS -gt 0 ]; then
+        log_warn "Some PMU operational checks were inconclusive; full coverage is not established."
+        exit $EXIT_SKIP
     elif [ $PASSED_TESTS -eq 0 ] && [ $SKIPPED_TESTS -gt 0 ]; then
         log_warn "All tests were skipped - no PMUs found on this system."
         exit $EXIT_SKIP
@@ -549,5 +583,6 @@ main() {
     fi
 }
 
-# Run main function
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
