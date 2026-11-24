@@ -214,6 +214,10 @@ class TestArmSpePmu(GLTTestBase):
 
     def setUp(self):
         super().setUp()
+        machine_patch = self.mock.patch.object(
+            glt_test_pmu.platform, "machine", return_value="aarch64")
+        self.mock_machine = machine_patch.start()
+        self.addCleanup(machine_patch.stop)
         glt_test_pmu.test_arm_spe_pmu.attr.result = (
             GLTCore.GLTTestResult.NA, "")
         self.mock_sd.log_dir = tempfile.mkdtemp(prefix="arm_spe_pmu_")
@@ -267,6 +271,25 @@ class TestArmSpePmu(GLTTestBase):
     def _record_cmd_args(self, mock_popen):
         record_call = self._record_call(mock_popen)
         return record_call.args[0] if record_call.args else record_call[0][0]
+
+    def test_arm_spe_pmu_arm64_alias_preserves_config_failure(self):
+        """The arm64 spelling retains the existing disabled-config failure."""
+        self.mock_machine.return_value = "arm64"
+        with self._patch_prereqs() as mocks:
+            self._configure_prereqs(mocks)
+            mocks["check_kernel_config"].parse_kconfig.return_value = {}
+
+            with self.assertRaisesRegex(GLTCore.GLTTestFail, "CONFIG_ARM_SPE_PMU"):
+                glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+        mocks["check_kernel_config"].parse_kconfig.assert_called_once()
+        mocks["_select_arm_spe_pmu_cpu"].assert_not_called()
+
+    def test_arm_spe_pmu_keeps_identity_and_plans(self):
+        """Architecture eligibility must preserve selection by ID and plan."""
+        attr = glt_test_pmu.test_arm_spe_pmu.attr
+        self.assertEqual(f"{attr.category}:{attr.name}", "arm64:test_arm_spe_pmu")
+        self.assertEqual(set(attr.plans), {"standard", "stress"})
 
     def test_arm_spe_pmu_pass_when_all_strings_present(self):
         """Full SPE report with thrash workload passes."""
@@ -576,3 +599,15 @@ class TestArmSpePmu(GLTTestBase):
                 glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
 
         self.assertEqual(mock_run.call_count, 1)
+
+    def test_arm_spe_pmu_x86_skips_before_prerequisites(self):
+        """x86_64 skips before kernel configuration and PMU discovery."""
+        self.mock_machine.return_value = "x86_64"
+        with self._patch_prereqs() as mocks:
+            with self.assertRaises(GLTCore.GLTTestSkip) as raised:
+                glt_test_pmu.test_arm_spe_pmu(self.mock_sd, self.mock_logger)
+
+        self.assertEqual(
+            str(raised.exception), "ARM SPE PMU coverage is ARM64-only.")
+        mocks["check_kernel_config"].parse_kconfig.assert_not_called()
+        mocks["_select_arm_spe_pmu_cpu"].assert_not_called()

@@ -59,6 +59,7 @@ GENERIC_FALLBACK_PMU_FAMILIES = (
     "nvidia_uncore_pmu",
 )
 
+
 def _normalize_nvidia_pmu_name(pmu_name):
     """Return the PMU family name without instance-specific suffixes."""
     normalized_name = pmu_name.lower()
@@ -100,6 +101,7 @@ def _parse_nvidia_perf_units(perf_list_json):
         for item in perf_list_json
         if isinstance(item, dict)
     )
+
 
 ARM_SPE_EVENT_SOURCE_PATH = "/sys/bus/event_source/devices"
 ARM_SPE_PMUS = ("arm_spe_0", "arm_spe_1", "arm_spe_2", "arm_spe_3")
@@ -753,8 +755,11 @@ def test_perf_cspmu_rejects_foreign_events(_, logger):
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
-def test_arm_spe_pmu(sd, logger):
+def test_arm_spe_pmu(sd, logger):  # pylint: disable=too-many-branches
     """Verify ARM SPE PMU support with a deterministic LLC-thrash workload."""
+    if platform.machine() not in ("aarch64", "arm64"):
+        GLTCore.GLTTestResult.skip("ARM SPE PMU coverage is ARM64-only.")
+
     kconfig_path = "/boot/config-" + platform.uname().release
     try:
         kconfig = check_kernel_config.parse_kconfig(kconfig_path)

@@ -448,6 +448,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
             thrash_script_path = os.path.join(tmpdir, "arm_spe_llc_thrash.py")
 
             with self.mock.patch.object(
+                glt_test_pmu.platform, "machine", return_value="aarch64"
+            ), self.mock.patch.object(
                 glt_test_pmu.check_kernel_config,
                 "parse_kconfig",
                 return_value={"CONFIG_ARM_SPE_PMU": "y"},
@@ -509,6 +511,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
     def test_arm_spe_pmu_fails_when_no_perf_command_exists(self):
         """ARM SPE smoke test fails before record when no usable perf exists."""
         with self.mock.patch.object(
+            glt_test_pmu.platform, "machine", return_value="aarch64"
+        ), self.mock.patch.object(
             glt_test_pmu.check_kernel_config,
             "parse_kconfig",
             return_value={"CONFIG_ARM_SPE_PMU": "y"},
@@ -535,6 +539,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.mock_sd.log_dir = tmpdir
             with self.mock.patch.object(
+                glt_test_pmu.platform, "machine", return_value="aarch64"
+            ), self.mock.patch.object(
                 glt_test_pmu.check_kernel_config,
                 "parse_kconfig",
                 return_value={"CONFIG_ARM_SPE_PMU": "y"},
@@ -573,6 +579,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with tempfile.TemporaryDirectory() as tmpdir:
             self.mock_sd.log_dir = tmpdir
             with self.mock.patch.object(
+                glt_test_pmu.platform, "machine", return_value="aarch64"
+            ), self.mock.patch.object(
                 glt_test_pmu.check_kernel_config,
                 "parse_kconfig",
                 return_value={"CONFIG_ARM_SPE_PMU": "y"},
