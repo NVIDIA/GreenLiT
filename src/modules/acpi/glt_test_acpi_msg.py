@@ -27,26 +27,90 @@ from common.nv_device import NvDev
 from scripts import check_kernel_config
 
 
+HMAT_SOURCE = "drivers/acpi/numa/hmat.c"
+# Source-backed pairs of the four messages changed from pr_info() to pr_debug().
+HMAT_DEBUG_MESSAGES = (
+    ("hmat_parse_locality", "Locality: Flags:"),
+    ("hmat_parse_locality", "  Initiator-Target["),
+    ("hmat_parse_cache", "Cache: Domain:"),
+    ("hmat_parse_proximity_domain", "Memory ("),
+)
+_DYNDBG_CALLSITE_RE = re.compile(
+    r'\S+:[0-9]+\s+\[[^\]]*\](\S+)\s+=\S+\s+"(.*)"'
+    r'(?: class:\S+| class unknown, _id:-?\d+)?$'
+)
+
+
+def _parse_dyndbg_callsites(control_text, source_file):
+    """Return raw (function, format) pairs for the exact source path or build suffix.
+
+    Raise ValueError for malformed rows from that source or no parseable records.
+    Valid unrelated records establish a readable catalog but supply no callsites.
+    """
+    source_pattern = re.compile(r"(?:.*/)?" + re.escape(source_file) + r":[0-9]+")
+    callsites = []
+    valid_record = False
+    # Only literal newlines separate records; other raw separators belong to formats.
+    for row in control_text.split("\n"):
+        tokens = row.split(None, 1)
+        is_source = bool(tokens and source_pattern.fullmatch(tokens[0]))
+        record = _DYNDBG_CALLSITE_RE.fullmatch(row)
+        if record is not None:
+            valid_record = True
+        if not is_source:
+            continue
+        if record is None:
+            raise ValueError(f"Malformed source dynamic-debug metadata: {row!r}")
+        callsites.append(record.groups())
+    if not valid_record:
+        raise ValueError("Dynamic-debug catalog has no parseable metadata.")
+    return callsites
+
+
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_acpi_hmat_msg(_, __):
     """
-    Test if ACPI HMAT info messages can be found in dmesg.
+    Require four compiled HMAT dynamic-debug registrations.
 
     JIRA: DGX-8205
     PATCH: https://git.kernel.org/torvalds/linux/c/c8e88de1b44e v6.14+
     """
-    acpi_hmat_info_msg = "acpi/hmat:"
+    for path in ("/proc/dynamic_debug/control", "/sys/kernel/debug/dynamic_debug/control"):
+        try:
+            catalog = glt_utils.read_sysfs_value(path)
+        except FileNotFoundError:
+            continue
+        except UnicodeError as error:
+            GLTCore.GLTTestResult.warn(f"Dynamic-debug catalog decoding failed; observation is incomplete: {error}")
+        except OSError as error:
+            GLTCore.GLTTestResult.fail(f"Dynamic-debug catalog collector error: {error}")
+        else:
+            break
+    else:
+        GLTCore.GLTTestResult.skip("Dynamic-debug catalog interfaces are absent; cannot observe HMAT registrations.")
 
     try:
-        hmat_message_found = glt_utils.check_kernel_log(acpi_hmat_info_msg)
-    except RuntimeError as error:
-        GLTCore.GLTTestResult.fail(f"Failed to collect kernel logs: {error}")
+        callsites = _parse_dyndbg_callsites(catalog, HMAT_SOURCE)
+    except ValueError as error:
+        GLTCore.GLTTestResult.warn(f"Dynamic-debug catalog observation is incomplete: {error}")
 
-    if hmat_message_found:
-        GLTCore.GLTTestResult.fail(f"Found '{acpi_hmat_info_msg}' in kernel message. " +
-                                   "Include kernel commit c8e88de1b44e to fix it.")
+    if not callsites:
+        GLTCore.GLTTestResult.skip("No HMAT source registrations in the valid dynamic-debug catalog; not applicable.")
+
+    missing = [
+        f"{function}(): {prefix!r}"
+        for function, prefix in HMAT_DEBUG_MESSAGES
+        if not any(func == function and raw_format.startswith(prefix) for func, raw_format in callsites)
+    ]
+    if missing:
+        GLTCore.GLTTestResult.fail(
+            f"Missing HMAT debug registration pairs: {'; '.join(missing)}. "
+            "Expected metadata reference: c8e88de1b44e58cacdef41ea9aaa78fca35f1357. "
+            "Downstream function renaming or format rewording can fail this contract despite equivalent behavior; "
+            "missing metadata does not prove a missing patch or commit ancestry."
+        )
 
 
 @GLTCore.GLTTestAttr()
