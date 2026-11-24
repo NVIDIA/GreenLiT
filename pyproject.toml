@@ -54,9 +54,12 @@ include = [
 
 [tool.poetry.dependencies]
 python = ">=3.10"
-pyyaml = "^6.0.1"
-packaging = "^25.0"
-pydantic = "^2.11"
+pyyaml = ">=6.0.4,<7"
+packaging = ">=22.0"
+pydantic = [
+    { version = "^2.11", python = "<3.14" },
+    { version = "^2.12", python = ">=3.14" },
+]
 
 [tool.poetry.scripts]
 glt-test-suite = "greenlit.greenlit:main"
