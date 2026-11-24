@@ -17,11 +17,12 @@
 The module hosts the logic of managing test cases
 """
 
-from collections import defaultdict, deque
+from collections import defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from enum import Enum
 from functools import wraps
+from graphlib import CycleError, TopologicalSorter
 import inspect
 import json
 import logging
@@ -97,6 +98,11 @@ class PostHooks:
         return hook
 
 
+def _condition_description(condition: Callable[[], bool]) -> object:
+    """Return a condition description or its callable name."""
+    return getattr(condition, "desc", getattr(condition, "__name__", type(condition).__name__))
+
+
 class GLTConditionalCheck:
     """The class to check the condition"""
 
@@ -130,7 +136,8 @@ class GLTConditionalCheck:
             for func in self.any_true:
                 if func():
                     can_do = True
-                    reason += f"(ANY TRUE: {getattr(func, 'desc')})"
+                    desc = _condition_description(func)
+                    reason += f"(ANY TRUE: {desc})"
                     break
             if not can_do:
                 return False, "No function in any_true returned True"
@@ -142,7 +149,8 @@ class GLTConditionalCheck:
             for func in self.any_false:
                 if not func():
                     can_do = True
-                    reason += f"(ANY FALSE: {getattr(func, 'desc')})"
+                    desc = _condition_description(func)
+                    reason += f"(ANY FALSE: {desc})"
                     break
             if not can_do:
                 return False, "No function in any_false returned False"
@@ -493,38 +501,38 @@ class GLTTestAttr:  # pylint: disable=too-many-instance-attributes
             if conditional_skip.all_true:
                 output("  - all_true:")
                 for condition in conditional_skip.all_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if conditional_skip.all_false:
                 output("  - all_false:")
                 for condition in conditional_skip.all_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if conditional_skip.any_true:
                 output("  - any_true:")
                 for condition in conditional_skip.any_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if conditional_skip.any_false:
                 output("  - any_false:")
                 for condition in conditional_skip.any_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
         allow_failure = getattr(getattr(func, "attr", None), "allow_failure", None)
         if isinstance(allow_failure, GLTAllowFailure):
             output(" - allow_failure:")
             if allow_failure.all_true:
                 output("  - all_true:")
                 for condition in allow_failure.all_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if allow_failure.all_false:
                 output("  - all_false:")
                 for condition in allow_failure.all_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if allow_failure.any_true:
                 output("  - any_true:")
                 for condition in allow_failure.any_true:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
             if allow_failure.any_false:
                 output("  - any_false:")
                 for condition in allow_failure.any_false:
-                    output(f"   - [{getattr(condition, 'desc')}]")
+                    output(f"   - [{_condition_description(condition)}]")
         if self.result:
             output(f" - result: [{self.result[0].value}] {self.result[1]}")
 
@@ -845,40 +853,37 @@ class GLTScheduler:
 
     def sort(self) -> None:
         """Topological sort nodes and cover it as test_list."""
-        # Count in-degrees (number of dependencies) for each node
-        in_degree = {
-            self.get_test_case_name(node): 0 for node in self.test_list
+        tests_by_name = {
+            self.get_test_case_name(node): node for node in self.test_list
         }
         for dependency_id, dependent_ids in self.dependencies.items():
             for dependent_id in dependent_ids:
-                if dependency_id not in in_degree:
+                if dependency_id not in tests_by_name:
                     raise ValueError(
                         f"Dependency {dependency_id} required by "
                         f"{dependent_id} not found")
-                if dependent_id not in in_degree:
+                if dependent_id not in tests_by_name:
                     raise ValueError(
                         f"Test {dependent_id} depends on {dependency_id} "
                         "but is not in the scheduler")
-                in_degree[dependent_id] += 1
 
-        # Collect nodes with no dependencies
-        queue = deque(self.test_list)
-        total_nodes = len(self.test_list)
-        self.test_list = []
+        # Register all tests first so initially ready tests keep their input order.
+        sorter = TopologicalSorter()
+        for node in self.test_list:
+            sorter.add(node)
+        for dependency_id, dependent_ids in self.dependencies.items():
+            if not dependent_ids:
+                continue
+            prerequisite = tests_by_name[dependency_id]
+            for dependent_id in dependent_ids:
+                sorter.add(tests_by_name[dependent_id], prerequisite)
 
-        while queue:
-            node = queue.popleft()
-            test_case_name = self.get_test_case_name(node)
-            if in_degree[test_case_name] == 0:
-                for dependent_id in self.dependencies[test_case_name]:
-                    in_degree[dependent_id] -= 1
-                self.test_list.append(node)
-            else:
-                queue.append(node)
+        try:
+            ordered = list(sorter.static_order())
+        except CycleError as error:
+            raise ValueError("Cycle detected in dependencies") from error
 
-        if len(self.test_list) != total_nodes:
-            raise ValueError("Cycle detected in dependencies")
-
+        self.test_list = ordered
         for case in self.test_list:
             name = self.get_test_case_name(case)
             self.test_map[name] = case
