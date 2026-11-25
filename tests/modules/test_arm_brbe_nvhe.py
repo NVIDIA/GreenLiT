@@ -104,7 +104,7 @@ class TestBrbeNvheMetadata(GLTTestBase):
             "arm64:test_brbe_nvhe_host_isolation",
         )
         self.assertFalse(
-            getattr(test_case.__wrapped__, "requires", GLTCore.GLTRequires()).all_true
+            test_case.attr.requires.all_true
         )
         hooks = brbe_nvhe.test_brbe_nvhe_host_isolation.attr.post_hooks
         for outcome in ("postsuccess", "postskip", "postafail", "postfail", "postwarn"):
@@ -997,26 +997,34 @@ class TestBrbeNvheBootLifecycle(GLTTestBase):
 
                 body = self.mock.Mock(spec=[], side_effect=measurement_result)
                 body.attr = attr
+                original_allow_failure = attr.allow_failure
+                expected_reason = str(exception) if exception else ""
                 if verdict == core.GLTTestResult.AFAIL:
-                    body.allow_failure = self.mock.Mock(spec=["can_fail"])
-                    body.allow_failure.can_fail.return_value = (False, str(exception))
+                    allowed = self.mock.Mock()
+                    allowed.can_fail.return_value = (True, "(ANY TRUE: known issue)")
+                    allowed.all_true = []
+                    allowed.all_false = []
+                    allowed.any_true = []
+                    allowed.any_false = []
+                    attr.allow_failure = allowed
+                    # The runner keeps the failure reason and appends the matching rule.
+                    expected_reason += " (ANY TRUE: known issue)"
 
                 def request_reboot(
-                    test_name, sd, current=scheduler, outcome=verdict, error=exception
+                    test_name, sd, current=scheduler, outcome=verdict, reason=expected_reason
                 ):
                     self.assertEqual(test_name, TEST_NAME)
                     self.assertIs(sd, current)
                     self.assertEqual(sd.values["Result"], outcome.value)
-                    self.assertEqual(
-                        sd.values["ResultReason"], str(error) if error else ""
-                    )
+                    self.assertEqual(sd.values["ResultReason"], reason)
                     self.assertIn("Completed", sd.values)
                     self.assertNotIn(brbe_nvhe.BRBE_NVHE_OWNERSHIP_TOKEN, sd.values)
                     raise SystemExit(0)
 
-                with self.mock.patch.object(
-                brbe_nvhe.GLTCore.GLTRequires, "can_start", return_value=(True, "")
-                ), self.mock.patch.object(
+                try:
+                    with self.mock.patch.object(
+                    brbe_nvhe.GLTCore.GLTRequires, "can_start", return_value=(True, "")
+                    ), self.mock.patch.object(
                     attr, "func", body
                 ), self.mock.patch.object(
                     attr, "result", (core.GLTTestResult.PASS, "")
@@ -1034,28 +1042,30 @@ class TestBrbeNvheBootLifecycle(GLTTestBase):
                 ) as reboot, self.mock.patch.object(
                     greenlit.glt_utils, "collect_logs", return_value=(True, "")
                 ), self.mock.patch.object(greenlit, "show_report") as report:
-                    self.mock_logger.getChild.return_value.error.reset_mock()
-                    if cleanup_ok:
-                        with self.assertRaises(SystemExit):
+                        self.mock_logger.getChild.return_value.error.reset_mock()
+                        if cleanup_ok:
+                            with self.assertRaises(SystemExit):
+                                greenlit.perform_tests(self.mock_logger, scheduler)
+                        else:
                             greenlit.perform_tests(self.mock_logger, scheduler)
-                    else:
-                        greenlit.perform_tests(self.mock_logger, scheduler)
-                        self.mock_logger.getChild.return_value.error.assert_called()
-                        self.assertIn(brbe_nvhe.BRBE_NVHE_OWNERSHIP_TOKEN, scheduler.values)
-                        report.assert_called_once()
-                    body.assert_called_once()
-                    self.assertEqual(remove.call_count, 3)
-                    self.assertEqual(reboot.call_count, int(cleanup_ok))
+                            self.mock_logger.getChild.return_value.error.assert_called()
+                            self.assertIn(brbe_nvhe.BRBE_NVHE_OWNERSHIP_TOKEN, scheduler.values)
+                            report.assert_called_once()
+                        body.assert_called_once()
+                        self.assertEqual(remove.call_count, 3)
+                        self.assertEqual(reboot.call_count, int(cleanup_ok))
 
-                    resumed = _ProgressScheduler(scheduler.values.copy())
-                    resumed.test_categories = scheduler.test_categories
-                    resumed.test_tags = scheduler.test_tags
-                    resumed.test_list = scheduler.test_list
-                    resumed.log_dir = scheduler.log_dir
-                    greenlit.perform_tests(self.mock_logger, resumed)
-                    body.assert_called_once()
-                    self.assertEqual(reboot.call_count, int(cleanup_ok))
-                    self.assertEqual(resumed.values["Result"], verdict.value)
+                        resumed = _ProgressScheduler(scheduler.values.copy())
+                        resumed.test_categories = scheduler.test_categories
+                        resumed.test_tags = scheduler.test_tags
+                        resumed.test_list = scheduler.test_list
+                        resumed.log_dir = scheduler.log_dir
+                        greenlit.perform_tests(self.mock_logger, resumed)
+                        body.assert_called_once()
+                        self.assertEqual(reboot.call_count, int(cleanup_ok))
+                        self.assertEqual(resumed.values["Result"], verdict.value)
+                finally:
+                    attr.allow_failure = original_allow_failure
 
     def test_posthook_without_ownership_does_not_mutate_or_reboot(self):
         """A user-owned environment needs no posthook mutation or reboot."""

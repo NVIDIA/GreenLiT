@@ -512,13 +512,14 @@ def test_nested_ste_hitless_update(sd, logger):
         for bdf in pci_utils.get_bdfs_with_ext_cap(pci_utils.EXT_CAP_ATS)
     }
     trace_log = os.path.join(sd.log_dir, "nested_ste_observe.log")
-    test_func.attr.nested_ste_bdf = None
-    test_func.attr.nested_ste_trace_proc = None
-    test_func.attr.nested_ste_worker_stuck = False
+    test_attr = GLTCore.get_test_attr(test_func)
+    test_attr.nested_ste_bdf = None
+    test_attr.nested_ste_trace_proc = None
+    test_attr.nested_ste_worker_stuck = False
     # Driver-restore backup lives on attr (like CXL cleanup_state / I2C
     # rebind_devices) so it is shared with the post_hooks and never leaks
     # across tests in a long-lived GLT process.
-    test_func.attr.driver_state = {}
+    test_attr.driver_state = {}
 
     bdf = None
     trace_proc = None
@@ -544,7 +545,7 @@ def test_nested_ste_hitless_update(sd, logger):
         # and try the next; only if NONE bind do we SKIP.
         try:
             bdf, bind_errors = _bind_usable_candidate(
-                candidates, test_func.attr.driver_state, logger)
+                candidates, test_attr.driver_state, logger)
         except OSError as exc:
             GLTCore.GLTTestResult.fail(
                 f"PCI candidate acquisition failed: {exc}", func=test_func)
@@ -554,19 +555,19 @@ def test_nested_ste_hitless_update(sd, logger):
                 f"defect); tried {len(candidates)} candidate(s): "
                 + "; ".join(bind_errors),
                 func=test_func)
-        test_func.attr.nested_ste_bdf = bdf
+        test_attr.nested_ste_bdf = bdf
         ats_capable = bdf.lower() in ats_bdfs
         logger.info("using PCI device %s (ATS-detected=%s)", bdf, ats_capable)
 
         trace_proc, fail_reason = _start_tracing(trace_log, logger)
-        test_func.attr.nested_ste_trace_proc = trace_proc
+        test_attr.nested_ste_trace_proc = trace_proc
         if fail_reason:
             GLTCore.GLTTestResult.fail(fail_reason, func=test_func)
 
         fail_reason, worker_stuck = _run_trigger(bdf, ITERATIONS, logger)
         if fail_reason:
             if worker_stuck:
-                test_func.attr.nested_ste_worker_stuck = True
+                test_attr.nested_ste_worker_stuck = True
                 GLTCore.GLTTestResult.fail(
                     fail_reason + " -- the trigger worker is stuck holding "
                     "/dev/iommu and vfio fds; leaving the device bound to "
@@ -576,7 +577,7 @@ def test_nested_ste_hitless_update(sd, logger):
             GLTCore.GLTTestResult.fail(fail_reason, func=test_func)
 
         _stop_tracing(trace_proc, trace_log)
-        test_func.attr.nested_ste_trace_proc = None
+        test_attr.nested_ste_trace_proc = None
         trace_proc = None
 
         disruptive, ste_writes, target_writes = _parse_trace(trace_log)
@@ -624,12 +625,12 @@ def test_nested_ste_hitless_update(sd, logger):
         # backup, mirroring the i2c tests.
         if trace_proc is not None:
             _stop_tracing(trace_proc, trace_log)
-            test_func.attr.nested_ste_trace_proc = None
+            test_attr.nested_ste_trace_proc = None
         # Restore the device unless the worker is stuck in a kernel ioctl
         # still holding its fds (touching it would race the in-flight ioctl).
         if bdf is not None and not worker_stuck:
             restore_ok = _restore_driver_state(
-                test_func.attr.driver_state, bdf, logger)
+                test_attr.driver_state, bdf, logger)
             # Surface a restore failure so a botched cleanup is not swallowed
             # into a clean PASS -- but only when the body itself did not
             # already fail/skip (sys.exc_info() empty), so a genuine
@@ -641,7 +642,7 @@ def test_nested_ste_hitless_update(sd, logger):
                     "recommended", func=test_func)
 
 
-test_nested_ste_hitless_update.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_nested_ste_hitless_update).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_nested_ste_cleanup,
     postskip=_nested_ste_cleanup,
     postfail=_nested_ste_cleanup,

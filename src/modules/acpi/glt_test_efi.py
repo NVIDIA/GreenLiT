@@ -118,7 +118,7 @@ def test_efi_runtime_services_mask(sd, logger):
         GLTCore.GLTTestResult.fail(f"Error accessing or processing EFI data: {e}")
 
 
-test_efi_runtime_services_mask.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_efi_runtime_services_mask).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_kexec_conditional_reboot_hook,
     postfail=_kexec_conditional_reboot_hook,
     postafail=_kexec_conditional_reboot_hook,

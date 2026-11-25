@@ -1020,7 +1020,7 @@ def test_pci_acs_configurability(sd, logger):
         )
 
 
-test_pci_acs_configurability.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_pci_acs_configurability).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_acs_kexec_conditional_reboot_hook,
     postfail=_acs_kexec_conditional_reboot_hook,
     postafail=_acs_kexec_conditional_reboot_hook,
@@ -1391,7 +1391,7 @@ def test_msix_mem_restore_no_ur(sd, logger):
 
 _msix_mem_restore_reboot_hook = GLTCore.PostHooks.for_conditional_reboot(
     "MsixMemRestoreMutated", lambda: True)
-test_msix_mem_restore_no_ur.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_msix_mem_restore_no_ur).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_msix_mem_restore_reboot_hook,
     postskip=_msix_mem_restore_reboot_hook,
     postfail=_msix_mem_restore_reboot_hook,

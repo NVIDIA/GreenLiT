@@ -403,7 +403,7 @@ class TestWorkqueueCacheShardGreenlitTests(GLTTestBase):
         """The scheduler should run feature exposure checks before the write test."""
         requires = (
             wq_cache_shard.test_workqueue_cache_shard_scope_sysfs_round_trip
-            .__wrapped__.requires
+            .attr.requires
         )
 
         self.assertIn(

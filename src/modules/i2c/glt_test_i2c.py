@@ -453,8 +453,8 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
     PATCH: https://lore.kernel.org/linux-tegra/20251118140620.549-2-akhilrajeev@nvidia.com/
     """
 
-    test_tegra_i2c_dma_pio_fallback.attr.picked_device = None
-    test_tegra_i2c_dma_pio_fallback.attr.dyndbg_enabled = False
+    GLTCore.get_test_attr(test_tegra_i2c_dma_pio_fallback).picked_device = None
+    GLTCore.get_test_attr(test_tegra_i2c_dma_pio_fallback).dyndbg_enabled = False
 
     if not Path("/sys/firmware/acpi").is_dir():
         GLTCore.GLTTestResult.skip(
@@ -470,7 +470,7 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
         GLTCore.GLTTestResult.skip("No tegra-i2c device bound to the platform driver.")
     dev_name = devices[0]
 
-    test_tegra_i2c_dma_pio_fallback.attr.picked_device = dev_name
+    GLTCore.get_test_attr(test_tegra_i2c_dma_pio_fallback).picked_device = dev_name
 
     # Enable dev_dbg() output for the i2c_tegra module so the fix-specific
     # "DMA not available, falling back to PIO" line reaches the kernel log.
@@ -481,7 +481,7 @@ def test_tegra_i2c_dma_pio_fallback(_, __):
         GLTCore.GLTTestResult.skip(
             "Could not enable dynamic debug for module i2c_tegra")
 
-    test_tegra_i2c_dma_pio_fallback.attr.dyndbg_enabled = True
+    GLTCore.get_test_attr(test_tegra_i2c_dma_pio_fallback).dyndbg_enabled = True
 
     try:
         checkpoint = glt_utils.capture_kernel_log_checkpoint()
@@ -521,7 +521,7 @@ def test_tegra410_i2c_device(_, logger):
     PATCH: https://git.kernel.org/torvalds/c/59717f260183
     """
 
-    test_tegra410_i2c_device.attr.rebind_devices = None
+    GLTCore.get_test_attr(test_tegra410_i2c_device).rebind_devices = None
 
     nvdev = NvDev()
     if not nvdev.is_cpu_type("vera"):
@@ -541,7 +541,7 @@ def test_tegra410_i2c_device(_, logger):
         GLTCore.GLTTestResult.fail(
             "No NVDA2017 Tegra410 I2C device is bound to tegra-i2c. "
             "Include kernel commit 59717f260183 to add Tegra410 support.")
-    test_tegra410_i2c_device.attr.rebind_devices = tuple(devices)
+    GLTCore.get_test_attr(test_tegra410_i2c_device).rebind_devices = tuple(devices)
 
     logger.info("Detected Tegra410 I2C platform devices: %s", ", ".join(devices))
 
@@ -596,7 +596,7 @@ def test_tegra410_i2c_device(_, logger):
             "and 59717f260183 to fix Tegra410 register-offset support.")
 
 
-test_tegra410_i2c_device.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_tegra410_i2c_device).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_restore_tegra_i2c_binding,
     postskip=_restore_tegra_i2c_binding,
     postfail=_restore_tegra_i2c_binding,
@@ -604,7 +604,7 @@ test_tegra410_i2c_device.attr.post_hooks = GLTCore.PostHooks.create(
 )
 
 
-test_tegra_i2c_dma_pio_fallback.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_tegra_i2c_dma_pio_fallback).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_restore_tegra_i2c_binding,
     postskip=_restore_tegra_i2c_binding,
     postfail=_restore_tegra_i2c_binding,

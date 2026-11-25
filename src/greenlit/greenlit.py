@@ -86,14 +86,14 @@ def apply_glt_configs(scheduler, logger):
                 logger.debug(f"  condition: {block.condition}")
                 func = GLTConf.cond_to_func(logger, block.condition)
                 setattr(func, "desc", block.condition.name or "")
-                obj.__wrapped__.attr.allow_failure.any_true.append(func)
+                GLTCore.get_test_attr(obj).allow_failure.any_true.append(func)
         if contents.conditional_skip:
             logger.debug(" contains conditional-skip:")
             for block in contents.conditional_skip:
                 logger.debug(f"  condition: {block.condition}")
                 func = GLTConf.cond_to_func(logger, block.condition)
                 setattr(func, "desc", block.condition.name or "")
-                obj.__wrapped__.attr.conditional_skip.any_true.append(func)
+                GLTCore.get_test_attr(obj).conditional_skip.any_true.append(func)
 
 
 def check_required_commands(logger):
@@ -241,17 +241,8 @@ def validate_test_case_args_conflicts(args, supported_categories=None, unknown_a
     return True, ""
 
 
-def _required_test_ids(test_obj):
-    """Return prerequisite test IDs directly referenced by a test object."""
-    wrapped = getattr(test_obj, "__wrapped__", None)
-    reqs = getattr(wrapped, "requires", None)
-    if reqs is None:
-        return set()
-    return set(reqs.dependency_names())
-
-
 def _test_matches_plan_tags(test_obj, active_plan_tags):
-    attr = test_obj.__wrapped__.attr
+    attr = GLTCore.get_test_attr(test_obj)
     return bool(set(attr.plans).intersection(active_plan_tags))
 
 
@@ -287,7 +278,7 @@ def list_cached_session():
 def list_test_cases(scheduler):
     """Print filtered test cases to stdout for --list."""
     for test_obj in scheduler.test_list:
-        attr = test_obj.__wrapped__.attr
+        attr = GLTCore.get_test_attr(test_obj)
         if attr.category not in scheduler.test_categories or \
                 not set(attr.plans).intersection(scheduler.test_tags):
             continue
@@ -348,7 +339,7 @@ def perform_tests(logger, scheduler):
         return
 
     for test_obj in scheduler.test_list:
-        attr = test_obj.__wrapped__.attr
+        attr = GLTCore.get_test_attr(test_obj)
         if attr.category not in scheduler.test_categories or not set(attr.plans).intersection(scheduler.test_tags):
             continue
 
@@ -364,11 +355,10 @@ def perform_tests(logger, scheduler):
             scheduler.progress_record_time(f"{attr.name}", "Start")
 
         try:
-            if hasattr(test_obj.__wrapped__, "requires"):
-                res, reason = test_obj.__wrapped__.requires.can_start(scheduler)
-                if not res:
-                    attr.result = (GLTCore.GLTTestResult.SKIP, reason)
-                    continue
+            res, reason = attr.requires.can_start(scheduler)
+            if not res:
+                attr.result = (GLTCore.GLTTestResult.SKIP, reason)
+                continue
 
             if hasattr(attr, "conditional_skip"):
                 res, reason = attr.conditional_skip.can_skip()
@@ -382,10 +372,15 @@ def perform_tests(logger, scheduler):
             test_logger.info("[%s] %s", attr.result[0].value, e)
         except GLTCore.GLTTestFail as e:
             test_logger.info("[%s] %s", attr.result[0].value, e)
-            if hasattr(attr.func, "allow_failure"):
-                res, reason = attr.func.allow_failure.can_fail()
-                if not res:
-                    attr.result = (GLTCore.GLTTestResult.AFAIL, reason)
+            try:
+                allowed, rule = attr.allow_failure.can_fail()
+            except Exception as error:  # pylint: disable=broad-exception-caught
+                # A broken rule must not stop the run; the failure stands.
+                test_logger.error("allow-failure rule raised %s: %s", type(error).__name__, error)
+                allowed, rule = False, ""
+            if allowed:
+                # Keep why the test failed; the rule only explains why it is allowed.
+                attr.result = (GLTCore.GLTTestResult.AFAIL, f"{e} {rule}".strip())
         except GLTCore.GLTTestWarn as e:
             test_logger.info("[%s] %s", attr.result[0].value, e)
         finally:
@@ -394,8 +389,8 @@ def perform_tests(logger, scheduler):
             attr.dump_attrs(test_logger)
         scheduler.progress_record_time(f"{attr.name}", "Completed")
 
-        post_hooks = getattr(attr, "post_hooks", None)
-        if post_hooks is not None and isinstance(post_hooks, GLTCore.PostHooks):
+        post_hooks = attr.post_hooks
+        if isinstance(post_hooks, GLTCore.PostHooks):
             if attr.result[0] == GLTCore.GLTTestResult.PASS:
                 post_hooks.postsuccess(scheduler, attr, test_logger)
             elif attr.result[0] == GLTCore.GLTTestResult.SKIP:
@@ -427,7 +422,7 @@ def registry_test_cases(logger, scheduler, verbose=False, collect_bug_report=Fal
     scheduler.progress_update('Summary', 'CollectBugReport', bool(collect_bug_report))
 
     for test_obj in scheduler.test_list:
-        attr = test_obj.__wrapped__.attr
+        attr = GLTCore.get_test_attr(test_obj)
         if attr.category not in scheduler.test_categories or not set(attr.plans).intersection(scheduler.test_tags):
             continue
 
@@ -552,7 +547,7 @@ def show_report(logger, scheduler):
     detail = ""
     p = f = af = s = w = 0
     for test_obj in scheduler.test_list:
-        attr = test_obj.__wrapped__.attr
+        attr = GLTCore.get_test_attr(test_obj)
         reason = ""
         if attr.result[0].value == GLTCore.GLTTestResult.PASS.value:
             p += 1
@@ -683,7 +678,8 @@ def discover_target_test_cases(
         selected_order.append(test_id)
         pending.extend(
             (required_id, test_id)
-            for required_id in sorted(_required_test_ids(test_obj))
+            for required_id in sorted(
+                set(GLTCore.get_test_attr(test_obj).requires.dependency_names()))
             if required_id not in selected_ids)
 
     return [test_map[test_id] for test_id in selected_order], "", 0
@@ -801,7 +797,7 @@ def main():
     scheduler = GLTCore.GLTScheduler(test_objs)
     scheduler.test_tags = active_plan_tags
     scheduler.test_categories = sorted({
-        test_obj.__wrapped__.attr.category for test_obj in scheduler.test_list
+        GLTCore.get_test_attr(test_obj).category for test_obj in scheduler.test_list
     })
     try:
         scheduler.sort()

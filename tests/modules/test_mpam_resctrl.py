@@ -62,8 +62,8 @@ class TestMpamResctrlDependencies(GLTTestBase):
 
     def _assert_pass_required(self, scheduler, prerequisite, dependent):
         """A skipped, failed, or unexecuted prerequisite must block its dependent."""
-        prerequisite_attr = scheduler.test_map[prerequisite].__wrapped__.attr
-        requires = scheduler.test_map[dependent].__wrapped__.requires
+        prerequisite_attr = scheduler.test_map[prerequisite].attr
+        requires = scheduler.test_map[dependent].attr.requires
         for status in (GLTCore.GLTTestResult.PASS, GLTCore.GLTTestResult.FAIL,
                        GLTCore.GLTTestResult.SKIP, GLTCore.GLTTestResult.NA):
             with self.subTest(status=status):
@@ -1363,14 +1363,14 @@ class TestMpamMaxDecorated(_MpamMaxSchemataHelpers):
 
     def test_reopened_scheduler_reaches_live_checks_after_schemata_failure(self):
         """The live probe can explain its own prerequisites on schema WARN/FAIL."""
-        requires = mpam_resctrl.test_mpam_l3_max_live_effect.attr.func.requires
+        requires = mpam_resctrl.test_mpam_l3_max_live_effect.attr.requires
         for status in (GLTCore.GLTTestResult.WARN, GLTCore.GLTTestResult.FAIL):
             with self.subTest(status=status):
                 scheduler = self.mock.Mock()
                 def test_object(name, status=status):
                     obj = self.mock.Mock()
-                    obj.__wrapped__ = self.mock.Mock()
-                    obj.__wrapped__.attr.result = (
+                    obj.attr = GLTCore.GLTTestAttr(name=name)
+                    obj.attr.result = (
                         GLTCore.GLTTestResult.PASS if name.endswith("resctrl_mount")
                         else status, "prerequisite result")
                     return obj
@@ -1392,7 +1392,7 @@ class TestMpamMaxDecorated(_MpamMaxSchemataHelpers):
         """Live-effect reaches independent checks after the mount prerequisite."""
         self.assertIn(
             "arm64:test_mpam_resctrl_mount",
-            mpam_resctrl.test_mpam_l3_max_live_effect.attr.func.requires.all_true,
+            mpam_resctrl.test_mpam_l3_max_live_effect.attr.requires.all_true,
         )
 
     @mock.patch("src.modules.arm64.glt_test_mpam_resctrl.NvDev")
@@ -1696,14 +1696,13 @@ class TestMpamMaxDecorated(_MpamMaxSchemataHelpers):
             ("test_mpam_mbm_counter_growth", "test_mpam_mbm_assignments"),
         )
         for name, prerequisite in dependencies:
-            requires = getattr(mpam_resctrl, name).attr.func.requires
+            requires = getattr(mpam_resctrl, name).attr.requires
             self.assertEqual(requires.all_true, [f"arm64:{prerequisite}"])
             for status in (GLTCore.GLTTestResult.FAIL, GLTCore.GLTTestResult.SKIP):
                 with self.subTest(test=name, prerequisite_status=status):
                     upstream = self.mock.Mock()
-                    upstream.__wrapped__ = self.mock.Mock()
-                    upstream.__wrapped__.attr.name = prerequisite
-                    upstream.__wrapped__.attr.result = (status, "prerequisite unavailable")
+                    upstream.attr = GLTCore.GLTTestAttr(name=prerequisite)
+                    upstream.attr.result = (status, "prerequisite unavailable")
                     scheduler = self.mock.Mock()
                     scheduler.get_test_obj_by_name.return_value = upstream
                     self.assertEqual(requires.can_start(scheduler),

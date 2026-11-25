@@ -13,7 +13,7 @@ import tempfile
 from unittest import mock
 
 from tests.test_base import GLTTestBase
-from src.common import glt_core as GLTCore
+from common import glt_core as GLTCore
 from src.greenlit import greenlit
 
 

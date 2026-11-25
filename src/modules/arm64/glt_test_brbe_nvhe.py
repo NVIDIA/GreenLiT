@@ -1026,7 +1026,7 @@ def test_brbe_nvhe_host_isolation(sd, logger):
     logger.info("BRBE nVHE host-isolation validation passed on CPU %d", cpu)
 
 
-test_brbe_nvhe_host_isolation.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_brbe_nvhe_host_isolation).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_restore_nvhe_boot,
     postskip=_restore_nvhe_boot,
     postafail=_restore_nvhe_boot,

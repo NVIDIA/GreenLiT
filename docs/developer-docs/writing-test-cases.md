@@ -544,13 +544,13 @@ def test_nvidia_perf_events(_, logger):
 
 When a test needs to run something after it completes (e.g. cleanup, teardown, or restore), use **post hooks**. The framework supports five hooks currently, one per outcome: `postsuccess` (test passed), `postskip` (test skipped), `postfail` (test failed), `postafail` (allowed failure), `postwarn` (test warned). After the test, the runner invokes the matching hook.
 
-**How to use:** Create a `PostHooks` instance with `GLTCore.PostHooks.create(postsuccess=..., postskip=..., postfail=..., postafail=..., postwarn=...)` and assign it to your test's **attr**: `test_something.attr.post_hooks = ...`. Pass callables with signature `(scheduler, attr, logger)` for the outcomes you need. Any slot you omit is a no-op. Each test has its own post hooks on its own attr; only tests that set `attr.post_hooks` get post hooks run. Example:
+**How to use:** Create a `PostHooks` instance with `GLTCore.PostHooks.create(postsuccess=..., postskip=..., postfail=..., postafail=..., postwarn=...)` and assign it to your test's **attr**: `GLTCore.get_test_attr(test_something).post_hooks = ...`. Pass callables with signature `(scheduler, attr, logger)` for the outcomes you need. Any slot you omit is a no-op. Each test has its own post hooks on its own attr; only tests that set `attr.post_hooks` get post hooks run. Example:
 
 ```python
 def test_something(sd, logger):
     ...
 
-test_something.attr.post_hooks = GLTCore.PostHooks.create(postsuccess=my_cleanup_fn)
+GLTCore.get_test_attr(test_something).post_hooks = GLTCore.PostHooks.create(postsuccess=my_cleanup_fn)
 ```
 
 You can pass the same or different callables for each outcome. For a full example that uses hooks to restore after a reboot, see [Create a Test Case that Requires Reboots](#create-a-test-case-that-requires-reboots).
@@ -659,7 +659,7 @@ def test_efi_runtime_services_mask(sd, logger):
     # Actual test logic runs here (only reached after kexec boot)
     ...
 
-test_efi_runtime_services_mask.attr.post_hooks = GLTCore.PostHooks.create(
+GLTCore.get_test_attr(test_efi_runtime_services_mask).post_hooks = GLTCore.PostHooks.create(
     postsuccess=_kexec_conditional_reboot_hook,
     postfail=_kexec_conditional_reboot_hook,
     postafail=_kexec_conditional_reboot_hook,

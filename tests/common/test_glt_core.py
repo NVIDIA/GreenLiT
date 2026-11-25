@@ -240,9 +240,9 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             return "test"
 
         # Verify attributes are set on the function
-        self.assertTrue(hasattr(test_func.__wrapped__, "attr"))
-        self.assertEqual(test_func.__wrapped__.attr.category, "test_cat")
-        self.assertEqual(test_func.__wrapped__.attr.name, "test_name")
+        self.assertTrue(hasattr(test_func, "attr"))
+        self.assertEqual(test_func.attr.category, "test_cat")
+        self.assertEqual(test_func.attr.name, "test_name")
 
         # Verify the function still works
         self.assertEqual(test_func(), "test")
@@ -253,7 +253,7 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             return "auto_name"
 
         self.assertEqual(
-            auto_name_func.__wrapped__.attr.name, "auto_name_func"
+            auto_name_func.attr.name, "auto_name_func"
         )
 
         class CallableWithoutName:
@@ -287,14 +287,14 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             return "real_world_example"
 
         # Verify both plans are applied
-        self.assertEqual(len(real_world_test.__wrapped__.attr.plans), 2)
-        self.assertIn("standard", real_world_test.__wrapped__.attr.plans)
-        self.assertIn("stress", real_world_test.__wrapped__.attr.plans)
-        self.assertEqual(real_world_test.__wrapped__.attr.category, "arm64")
+        self.assertEqual(len(real_world_test.attr.plans), 2)
+        self.assertIn("standard", real_world_test.attr.plans)
+        self.assertIn("stress", real_world_test.attr.plans)
+        self.assertEqual(real_world_test.attr.category, "arm64")
 
         # Test default result
         self.assertEqual(
-            real_world_test.__wrapped__.attr.result[0], GLTTestResult.NA
+            real_world_test.attr.result[0], GLTTestResult.NA
         )
 
     def test_extract_category(self):
@@ -316,7 +316,7 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
                 pass
 
             # Test that category was extracted correctly
-            self.assertEqual(test_func.__wrapped__.attr.category, "arm64")
+            self.assertEqual(test_func.attr.category, "arm64")
 
         # Test with invalid path
         mock_frame.filename = "src/common/glt_test_file.py"
@@ -345,26 +345,26 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             return "test_attrs"
 
         # Add conditions to the decorated function
-        test_attrs_func.__wrapped__.attr.allow_failure.all_true.append(
+        test_attrs_func.attr.allow_failure.all_true.append(
             test_condition
         )
-        test_attrs_func.__wrapped__.attr.conditional_skip.any_true.append(
+        test_attrs_func.attr.conditional_skip.any_true.append(
             test_condition
         )
-        attr = test_attrs_func.__wrapped__.attr
+        attr = test_attrs_func.attr
         attr.conditional_skip.any_true.append(lambda: False)
         attr.conditional_skip.all_true.append(lambda: False)
         attr.allow_failure.all_true.append(lambda: False)
 
         # Set test result
-        test_attrs_func.__wrapped__.attr.result = (
+        test_attrs_func.attr.result = (
             GLTTestResult.PASS,
             "Passed successfully",
         )
 
         # Test with mock logger
         mock_logger = self.mock.MagicMock()
-        test_attrs_func.__wrapped__.attr.dump_attrs(logger=mock_logger)
+        test_attrs_func.attr.dump_attrs(logger=mock_logger)
         mock_logger.debug.assert_called()
 
         # Test without logger
@@ -374,7 +374,7 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             output.append(text)
 
         with self.mock.patch("builtins.print", mock_print):
-            test_attrs_func.__wrapped__.attr.dump_attrs()
+            test_attrs_func.attr.dump_attrs()
 
         self.assertEqual(output.count("   - [test description]"), 2)
         self.assertEqual(output.count("   - [<lambda>]"), 3)
@@ -410,21 +410,17 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         # Create mock scheduler
         mock_sd = self.mock.MagicMock()
-        mock_pass_attr = self.mock.MagicMock()
+        mock_pass_attr = GLTTestAttr(name="pass_test")
         mock_pass_attr.result = (GLTTestResult.PASS, "Passed")
 
-        mock_fail_attr = self.mock.MagicMock()
+        mock_fail_attr = GLTTestAttr(name="fail_test")
         mock_fail_attr.result = (GLTTestResult.FAIL, "Failed")
 
         mock_pass_test = self.mock.MagicMock()
-        mock_pass_test.__wrapped__ = self.mock.MagicMock()
-        mock_pass_test.__wrapped__.attr = mock_pass_attr
-        mock_pass_test.__wrapped__.attr.name = "pass_test"
+        mock_pass_test.attr = mock_pass_attr
 
         mock_fail_test = self.mock.MagicMock()
-        mock_fail_test.__wrapped__ = self.mock.MagicMock()
-        mock_fail_test.__wrapped__.attr = mock_fail_attr
-        mock_fail_test.__wrapped__.attr.name = "fail_test"
+        mock_fail_test.attr = mock_fail_attr
 
         mock_sd.get_test_obj_by_name.side_effect = lambda x: (
             mock_pass_test if "pass" in x else mock_fail_test
@@ -432,34 +428,34 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         # Test must_pass decorator
         decorated = GLTRequires.must_pass("category", "test_name")(test_func)
-        self.assertTrue(hasattr(decorated.__wrapped__, "requires"))
+        self.assertTrue(hasattr(decorated.attr, "requires"))
         self.assertIn(
             "category:test_name",
-            decorated.__wrapped__.requires.all_true
+            decorated.attr.requires.all_true
         )
 
         # Test must_fail decorator
         decorated = GLTRequires.must_fail("category", "test_name")(test_func)
-        self.assertTrue(hasattr(decorated.__wrapped__, "requires"))
+        self.assertTrue(hasattr(decorated.attr, "requires"))
         self.assertIn(
             "category:test_name",
-            decorated.__wrapped__.requires.all_false
+            decorated.attr.requires.all_false
         )
 
         # Test any_pass decorator
         decorated = GLTRequires.any_pass("category", "test_name")(test_func)
-        self.assertTrue(hasattr(decorated.__wrapped__, "requires"))
+        self.assertTrue(hasattr(decorated.attr, "requires"))
         self.assertIn(
             "category:test_name",
-            decorated.__wrapped__.requires.any_true
+            decorated.attr.requires.any_true
         )
 
         # Test any_fail decorator
         decorated = GLTRequires.any_fail("category", "test_name")(test_func)
-        self.assertTrue(hasattr(decorated.__wrapped__, "requires"))
+        self.assertTrue(hasattr(decorated.attr, "requires"))
         self.assertIn(
             "category:test_name",
-            decorated.__wrapped__.requires.any_false
+            decorated.attr.requires.any_false
         )
 
         # Test can_start logic with different conditions
@@ -583,10 +579,10 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         # Verify the result was set
         self.assertEqual(
-            skip_test_func.__wrapped__.attr.result[0], GLTTestResult.SKIP
+            skip_test_func.attr.result[0], GLTTestResult.SKIP
         )
         self.assertEqual(
-            skip_test_func.__wrapped__.attr.result[1], "Skip reason"
+            skip_test_func.attr.result[1], "Skip reason"
         )
 
         # Test fail static method with custom function
@@ -602,10 +598,10 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         # Verify the result was set
         self.assertEqual(
-            fail_test_func.__wrapped__.attr.result[0], GLTTestResult.FAIL
+            fail_test_func.attr.result[0], GLTTestResult.FAIL
         )
         self.assertEqual(
-            fail_test_func.__wrapped__.attr.result[1], "Fail reason"
+            fail_test_func.attr.result[1], "Fail reason"
         )
 
         # Test warn static method with custom function
@@ -620,10 +616,10 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         # Verify the result was set
         self.assertEqual(
-            warn_test_func.__wrapped__.attr.result[0], GLTTestResult.WARN
+            warn_test_func.attr.result[0], GLTTestResult.WARN
         )
         self.assertEqual(
-            warn_test_func.__wrapped__.attr.result[1], "Warn reason"
+            warn_test_func.attr.result[1], "Warn reason"
         )
 
     def test_record_result_requires_glt_test_attr(self):
@@ -655,14 +651,6 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         with self.assertRaisesRegex(AttributeError, "test has no GLTTestAttr"):
             GLTTestResult.warn("wrong", WrongAttr())
-
-        class WrappedWithoutAttr:
-            """Wrapper whose inner object has no GLTTestAttr."""
-
-            __wrapped__ = PlainTest()
-
-        with self.assertRaisesRegex(AttributeError, "wrapped test has no GLTTestAttr"):
-            GLTTestResult.fail("wrapped", WrappedWithoutAttr())
 
     def test_scheduler(self):
         """Test the GLTScheduler class"""
@@ -854,35 +842,28 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         mock_sd = self.mock.MagicMock()
 
         # Create mock attributes for different test results
-        mock_pass_attr = self.mock.MagicMock()
+        mock_pass_attr = GLTTestAttr(name="pass_test")
         mock_pass_attr.result = (GLTTestResult.PASS, "Passed")
-        mock_pass_attr.name = "pass_test"
 
-        mock_fail_attr = self.mock.MagicMock()
+        mock_fail_attr = GLTTestAttr(name="fail_test")
         mock_fail_attr.result = (GLTTestResult.FAIL, "Failed")
-        mock_fail_attr.name = "fail_test"
 
-        mock_skip_attr = self.mock.MagicMock()
+        mock_skip_attr = GLTTestAttr(name="skip_test")
         mock_skip_attr.result = (GLTTestResult.SKIP, "Skipped")
-        mock_skip_attr.name = "skip_test"
 
-        mock_na_attr = self.mock.MagicMock()
+        mock_na_attr = GLTTestAttr(name="na_test")
         mock_na_attr.result = (GLTTestResult.NA, "Not Available")
-        mock_na_attr.name = "na_test"
 
-        mock_afail_attr = self.mock.MagicMock()
+        mock_afail_attr = GLTTestAttr(name="afail_test")
         mock_afail_attr.result = (GLTTestResult.AFAIL, "Allowed Failure")
-        mock_afail_attr.name = "afail_test"
 
-        mock_missing_attr = self.mock.MagicMock()
+        mock_missing_attr = GLTTestAttr(name="missing_test")
         mock_missing_attr.result = None
-        mock_missing_attr.name = "missing_test"
 
         # Create mock test objects
         def create_mock_test(attr):
             mock_test = self.mock.MagicMock()
-            mock_test.__wrapped__ = self.mock.MagicMock()
-            mock_test.__wrapped__.attr = attr
+            mock_test.attr = attr
             return mock_test
 
         mock_pass_test = create_mock_test(mock_pass_attr)
@@ -1014,7 +995,7 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         requires = GLTRequires()
         requires.all_true = ["nonexistent_test"]
 
-        # This should raise AttributeError when trying to access None.__wrapped__.attr
+        # This should raise AttributeError when the dependency has no metadata record.
         with self.assertRaises(AttributeError):
             requires.can_start(mock_sd)
 
@@ -1027,40 +1008,40 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             return "base1"
 
         must_pass_func = GLTRequires.must_pass("dep_cat", "dep_test")(base_func1)
-        self.assertIn("dep_cat:dep_test", must_pass_func.__wrapped__.requires.all_true)
-        self.assertEqual(len(must_pass_func.__wrapped__.requires.all_false), 0)
-        self.assertEqual(len(must_pass_func.__wrapped__.requires.any_true), 0)
-        self.assertEqual(len(must_pass_func.__wrapped__.requires.any_false), 0)
+        self.assertIn("dep_cat:dep_test", must_pass_func.attr.requires.all_true)
+        self.assertEqual(len(must_pass_func.attr.requires.all_false), 0)
+        self.assertEqual(len(must_pass_func.attr.requires.any_true), 0)
+        self.assertEqual(len(must_pass_func.attr.requires.any_false), 0)
 
         @GLTTestAttr(cat="test_cat", name="base_func2")
         def base_func2():
             return "base2"
 
         must_fail_func = GLTRequires.must_fail("dep_cat", "dep_test")(base_func2)
-        self.assertIn("dep_cat:dep_test", must_fail_func.__wrapped__.requires.all_false)
-        self.assertEqual(len(must_fail_func.__wrapped__.requires.all_true), 0)
-        self.assertEqual(len(must_fail_func.__wrapped__.requires.any_true), 0)
-        self.assertEqual(len(must_fail_func.__wrapped__.requires.any_false), 0)
+        self.assertIn("dep_cat:dep_test", must_fail_func.attr.requires.all_false)
+        self.assertEqual(len(must_fail_func.attr.requires.all_true), 0)
+        self.assertEqual(len(must_fail_func.attr.requires.any_true), 0)
+        self.assertEqual(len(must_fail_func.attr.requires.any_false), 0)
 
         @GLTTestAttr(cat="test_cat", name="base_func3")
         def base_func3():
             return "base3"
 
         any_pass_func = GLTRequires.any_pass("dep_cat", "dep_test")(base_func3)
-        self.assertIn("dep_cat:dep_test", any_pass_func.__wrapped__.requires.any_true)
-        self.assertEqual(len(any_pass_func.__wrapped__.requires.all_true), 0)
-        self.assertEqual(len(any_pass_func.__wrapped__.requires.all_false), 0)
-        self.assertEqual(len(any_pass_func.__wrapped__.requires.any_false), 0)
+        self.assertIn("dep_cat:dep_test", any_pass_func.attr.requires.any_true)
+        self.assertEqual(len(any_pass_func.attr.requires.all_true), 0)
+        self.assertEqual(len(any_pass_func.attr.requires.all_false), 0)
+        self.assertEqual(len(any_pass_func.attr.requires.any_false), 0)
 
         @GLTTestAttr(cat="test_cat", name="base_func4")
         def base_func4():
             return "base4"
 
         any_fail_func = GLTRequires.any_fail("dep_cat", "dep_test")(base_func4)
-        self.assertIn("dep_cat:dep_test", any_fail_func.__wrapped__.requires.any_false)
-        self.assertEqual(len(any_fail_func.__wrapped__.requires.all_true), 0)
-        self.assertEqual(len(any_fail_func.__wrapped__.requires.all_false), 0)
-        self.assertEqual(len(any_fail_func.__wrapped__.requires.any_true), 0)
+        self.assertIn("dep_cat:dep_test", any_fail_func.attr.requires.any_false)
+        self.assertEqual(len(any_fail_func.attr.requires.all_true), 0)
+        self.assertEqual(len(any_fail_func.attr.requires.all_false), 0)
+        self.assertEqual(len(any_fail_func.attr.requires.any_true), 0)
 
         # Test 2: Multiple decorators of same type
         @GLTRequires.must_pass("cat1", "test1")
@@ -1069,9 +1050,9 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         def multi_must_pass():
             return "multi"
 
-        self.assertEqual(len(multi_must_pass.__wrapped__.requires.all_true), 2)
-        self.assertIn("cat1:test1", multi_must_pass.__wrapped__.requires.all_true)
-        self.assertIn("cat2:test2", multi_must_pass.__wrapped__.requires.all_true)
+        self.assertEqual(len(multi_must_pass.attr.requires.all_true), 2)
+        self.assertIn("cat1:test1", multi_must_pass.attr.requires.all_true)
+        self.assertIn("cat2:test2", multi_must_pass.attr.requires.all_true)
 
         # Test 3: Mixed decorators
         @GLTRequires.must_pass("cat1", "test1")
@@ -1082,30 +1063,28 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
         def mixed_requirements():
             return "mixed"
 
-        self.assertEqual(len(mixed_requirements.__wrapped__.requires.all_true), 1)
-        self.assertEqual(len(mixed_requirements.__wrapped__.requires.all_false), 1)
-        self.assertEqual(len(mixed_requirements.__wrapped__.requires.any_true), 1)
-        self.assertEqual(len(mixed_requirements.__wrapped__.requires.any_false), 1)
+        self.assertEqual(len(mixed_requirements.attr.requires.all_true), 1)
+        self.assertEqual(len(mixed_requirements.attr.requires.all_false), 1)
+        self.assertEqual(len(mixed_requirements.attr.requires.any_true), 1)
+        self.assertEqual(len(mixed_requirements.attr.requires.any_false), 1)
 
-        self.assertIn("cat1:test1", mixed_requirements.__wrapped__.requires.all_true)
-        self.assertIn("cat2:test2", mixed_requirements.__wrapped__.requires.all_false)
-        self.assertIn("cat3:test3", mixed_requirements.__wrapped__.requires.any_true)
-        self.assertIn("cat4:test4", mixed_requirements.__wrapped__.requires.any_false)
+        self.assertIn("cat1:test1", mixed_requirements.attr.requires.all_true)
+        self.assertIn("cat2:test2", mixed_requirements.attr.requires.all_false)
+        self.assertIn("cat3:test3", mixed_requirements.attr.requires.any_true)
+        self.assertIn("cat4:test4", mixed_requirements.attr.requires.any_false)
 
-        # Test 4: A requirement decorator works before the test is wrapped.
+        # Test 4: A requirement decorator requires @GLTTestAttr to be applied first.
         def plain_func():
             return "plain"
 
-        decorated = GLTRequires.must_pass("cat", "test")(plain_func)
-        self.assertIn("cat:test", getattr(decorated, "requires").all_true)
+        with self.assertRaisesRegex(AttributeError, "decorated test has no GLTTestAttr"):
+            GLTRequires.must_pass("cat", "test")(plain_func)
 
-        @GLTTestAttr(cat="test_cat", name="require_first")
-        @GLTRequires.must_pass("cat", "test")
-        def require_first():
-            return "wrapped"
-
-        self.assertIn("cat:test", require_first.__wrapped__.requires.all_true)
-        self.assertIn("cat:test", GLTScheduler([require_first]).dependencies)
+        with self.assertRaisesRegex(AttributeError, "decorated test has no GLTTestAttr"):
+            @GLTTestAttr(cat="test_cat", name="require_first")
+            @GLTRequires.must_pass("cat", "test")
+            def require_first():
+                return "wrapped"
 
     def test_requires_real_world_scenarios(self):
         """Test real-world scenarios for GLTRequires"""
@@ -1122,18 +1101,16 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
 
         # Mock scheduler with skipped GPU detection
         mock_sd = self.mock.MagicMock()
-        mock_gpu_attr = self.mock.MagicMock()
+        mock_gpu_attr = GLTTestAttr(name="gpu_detection")
         mock_gpu_attr.result = (GLTTestResult.SKIP, "No GPU found")
-        mock_gpu_attr.name = "gpu_detection"
 
         mock_gpu_test = self.mock.MagicMock()
-        mock_gpu_test.__wrapped__ = self.mock.MagicMock()
-        mock_gpu_test.__wrapped__.attr = mock_gpu_attr
+        mock_gpu_test.attr = mock_gpu_attr
 
         mock_sd.get_test_obj_by_name.return_value = mock_gpu_test
 
         # GPU benchmark should not start because GPU detection was skipped
-        can_start, reason = gpu_benchmark_test.__wrapped__.requires.can_start(mock_sd)
+        can_start, reason = gpu_benchmark_test.attr.requires.can_start(mock_sd)
         self.assertFalse(can_start)
         self.assertIn("gpu_detection in all_true did not pass", reason)
 
@@ -1148,17 +1125,15 @@ class TestGLTCore(GLTTestBase):  # pylint: disable=too-many-public-methods
             return "memory cleaned"
 
         # If memory leak test was skipped (not failed), cleanup shouldn't run
-        mock_leak_attr = self.mock.MagicMock()
+        mock_leak_attr = GLTTestAttr(name="memory_leak_test")
         mock_leak_attr.result = (GLTTestResult.SKIP, "Memory test skipped due to low memory")
-        mock_leak_attr.name = "memory_leak_test"
 
         mock_leak_test = self.mock.MagicMock()
-        mock_leak_test.__wrapped__ = self.mock.MagicMock()
-        mock_leak_test.__wrapped__.attr = mock_leak_attr
+        mock_leak_test.attr = mock_leak_attr
 
         mock_sd.get_test_obj_by_name.return_value = mock_leak_test
 
-        can_start, reason = memory_cleanup_test.__wrapped__.requires.can_start(mock_sd)
+        can_start, reason = memory_cleanup_test.attr.requires.can_start(mock_sd)
         self.assertFalse(can_start)
         self.assertIn("memory_leak_test in all_false did not fail", reason)
 
