@@ -27,7 +27,6 @@ from common.nv_device import NvDev
 
 
 CPU_SYSFS_ROOT = Path("/sys/devices/system/cpu")
-NMI_WATCHDOG_PATH = Path("/proc/sys/kernel/nmi_watchdog")
 
 FIX_COMMIT = "49f2413f9b55"
 FIX_SUBJECT = "perf/arm_pmu: Skip PMCCNTR_EL0 on NVIDIA Olympus"
@@ -123,33 +122,12 @@ def _firmware_single_thread_reason(cpu_sysfs_root=CPU_SYSFS_ROOT):
     )
 
 
-def _nmi_watchdog_reason(path=NMI_WATCHDOG_PATH):
-    """Return why PMU watchdog state is unsupported, else empty."""
-    try:
-        value = Path(path).read_text(encoding="utf-8").strip()
-    except OSError as err:
-        raise ValueError(
-            f"Cannot confirm PMU hard-lockup watchdog state from {path}: {err}"
-        ) from err
-
-    if value == "0":
-        return ""
-    if value == "1":
-        return (
-            f"PMU hard-lockup watchdog is enabled ({path}=1); its pinned "
-            "CPU_CYCLES event can occupy PMCCNTR_EL0 and mask the regression."
-        )
-    raise ValueError(
-        f"Cannot interpret PMU hard-lockup watchdog value {value!r} from {path}."
-    )
-
-
 def _runtime_precondition_reason():
     """Return the first unsupported runtime precondition reason, else empty."""
     topology_reason = _firmware_single_thread_reason()
     if topology_reason:
         return topology_reason
-    return _nmi_watchdog_reason()
+    return perf_utils.pmu_hardlockup_watchdog_reason()
 
 
 def _parse_perf_stat_cycle_rows(stderr):

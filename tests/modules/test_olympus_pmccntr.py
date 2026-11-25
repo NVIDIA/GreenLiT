@@ -143,43 +143,6 @@ class TestOlympusPmccntrHelpers(GLTTestBase):
             with self.assertRaisesRegex(ValueError, "unreadable"):
                 olympus_pmccntr._firmware_single_thread_reason(temp_dir)
 
-    def test_nmi_watchdog_disabled_is_eligible(self):
-        """A disabled PMU hard-lockup watchdog leaves PMCCNTR available."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nmi_watchdog"
-            path.write_text("0\n", encoding="utf-8")
-
-            self.assertEqual(
-                olympus_pmccntr._nmi_watchdog_reason(path), ""
-            )
-
-    def test_nmi_watchdog_missing_is_failure(self):
-        """A missing watchdog sysctl leaves PMU counter ownership unknown."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "missing_nmi_watchdog"
-
-            with self.assertRaisesRegex(ValueError, "Cannot confirm"):
-                olympus_pmccntr._nmi_watchdog_reason(path)
-
-    def test_nmi_watchdog_enabled_is_ineligible(self):
-        """A pinned watchdog cycle event can hide a missing Olympus fix."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nmi_watchdog"
-            path.write_text("1\n", encoding="utf-8")
-
-            reason = olympus_pmccntr._nmi_watchdog_reason(path)
-
-        self.assertIn("can occupy PMCCNTR_EL0", reason)
-
-    def test_nmi_watchdog_invalid_value_is_failure(self):
-        """Unknown watchdog state fails closed."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nmi_watchdog"
-            path.write_text("unexpected\n", encoding="utf-8")
-
-            with self.assertRaisesRegex(ValueError, "Cannot interpret"):
-                olympus_pmccntr._nmi_watchdog_reason(path)
-
     # --- perf stat parsing and execution ---
 
     def test_parse_cycle_rows_preserves_repeated_counts(self):
@@ -319,7 +282,7 @@ class TestOlympusPmccntrRuntime(GLTTestBase):
             return_value="",
         )
         self.mock_watchdog_reason = self._start_patch(
-            f"{MODULE_PATH}._nmi_watchdog_reason",
+            f"{MODULE_PATH}.perf_utils.pmu_hardlockup_watchdog_reason",
             return_value="",
         )
         self.mock_resolve_perf = self._start_patch(

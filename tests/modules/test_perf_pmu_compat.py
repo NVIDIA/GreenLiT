@@ -19,6 +19,17 @@ from src.modules.arm64 import glt_test_pmu
 class TestPerfPmuCompatibility(GLTTestBase):
     """Test PMU behavior around perf selftest compatibility."""
 
+    def setUp(self):
+        """Disable the PMU watchdog for generic PMCCNTR test cases by default."""
+        super().setUp()
+        patcher = self.mock.patch(
+            "src.modules.arm64.glt_test_pmu.perf_utils."
+            "pmu_hardlockup_watchdog_reason",
+            return_value="",
+        )
+        self.mock_watchdog_reason = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _completed_process(self, args=None, returncode=0, stdout="", stderr=""):
         """Build a subprocess result for helper tests."""
         return subprocess.CompletedProcess(
@@ -34,6 +45,18 @@ class TestPerfPmuCompatibility(GLTTestBase):
             "",
             test_name=test_name,
         )
+
+    @staticmethod
+    def _write_smt_topology(root, online, siblings):
+        """Create a minimal CPU topology sysfs fixture."""
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "online").write_text(online, encoding="utf-8")
+        for cpu_id, sibling_list in siblings.items():
+            topology_dir = root / f"cpu{cpu_id}" / "topology"
+            topology_dir.mkdir(parents=True)
+            (topology_dir / "thread_siblings_list").write_text(
+                sibling_list, encoding="utf-8"
+            )
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.perf_utils")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
@@ -101,6 +124,82 @@ class TestPerfPmuCompatibility(GLTTestBase):
     def test_parse_cpu_list_mixed(self):
         """Comma list mixed with range."""
         self.assertEqual(glt_test_pmu._parse_cpu_list("0,2-3"), [0, 2, 3])
+
+    # --- _find_online_smt_pair ---
+
+    def test_find_online_smt_pair_selects_fully_online_siblings(self):
+        """An earlier singleton or partially offline core does not hide a pair."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_smt_topology(
+                root,
+                online="3,0,2",
+                siblings={0: "1,0", 2: "3,2", 3: "3,2"},
+            )
+
+            self.assertEqual(glt_test_pmu._find_online_smt_pair(root), (2, 3))
+
+    def test_find_online_smt_pair_returns_none_without_online_pair(self):
+        """A topology without two online siblings is unsupported, not malformed."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_smt_topology(
+                root,
+                online="0-1",
+                siblings={0: "0,2", 1: "1,3"},
+            )
+
+            self.assertIsNone(glt_test_pmu._find_online_smt_pair(root))
+
+    def test_find_online_smt_pair_rejects_invalid_online_data(self):
+        """Missing or malformed online CPU data fails topology inspection."""
+        for value in (None, "invalid", "0,,1", "0,3-2"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                self._write_smt_topology(root, online="0", siblings={0: "0"})
+                online_path = root / "online"
+                if value is None:
+                    online_path.unlink()
+                else:
+                    online_path.write_text(value, encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "online CPU topology"):
+                    glt_test_pmu._find_online_smt_pair(root)
+
+    def test_find_online_smt_pair_rejects_empty_online_data(self):
+        """An empty online mask cannot establish the absence of SMT."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_smt_topology(root, online="", siblings={})
+
+            with self.assertRaisesRegex(ValueError, "online CPU mask is empty"):
+                glt_test_pmu._find_online_smt_pair(root)
+
+    def test_find_online_smt_pair_rejects_invalid_sibling_data(self):
+        """Missing or malformed sibling data fails instead of looking like no SMT."""
+        for value in (None, "invalid", "0,,1", "0,3-2"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                self._write_smt_topology(root, online="0", siblings={0: "0"})
+                siblings_path = root / "cpu0" / "topology" / "thread_siblings_list"
+                if value is None:
+                    siblings_path.unlink()
+                else:
+                    siblings_path.write_text(value, encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "SMT sibling topology"):
+                    glt_test_pmu._find_online_smt_pair(root)
+
+    def test_find_online_smt_pair_rejects_inconsistent_sibling_data(self):
+        """A sibling list that omits its own CPU is malformed topology."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self._write_smt_topology(
+                root, online="0-1", siblings={0: "1", 1: "1"}
+            )
+
+            with self.assertRaisesRegex(ValueError, "does not include CPU 0"):
+                glt_test_pmu._find_online_smt_pair(root)
 
     # --- _parse_perf_stat_csv ---
 
@@ -189,6 +288,19 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
     # --- _probe_pmccntr_smt ---
 
+    def test_pmccntr_smt_workload_exits_zero(self):
+        """The real pinned child workload finishes normally instead of using timeout."""
+        busy_cpu = min(os.sched_getaffinity(0))
+        result = subprocess.run(
+            glt_test_pmu._pmccntr_smt_workload_command(busy_cpu),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=glt_test_pmu._PMCCNTR_SMT_WORKLOAD_SECONDS + 5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_probe_pmccntr_smt_timeout_raises_value_error(self, mock_run):
         """Outer perf timeout is converted to a probe failure."""
@@ -204,6 +316,22 @@ class TestPerfPmuCompatibility(GLTTestBase):
         with self.assertRaises(ValueError) as ctx:
             glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger, "/perf")
         self.assertIn("failed to start", str(ctx.exception))
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
+    def test_probe_pmccntr_smt_rejects_nonzero_status(self, mock_run):
+        """A failed perf command is invalid even if its output contains counts."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["/perf"],
+            returncode=1,
+            stdout="",
+            stderr=(
+                "CPU0,500000000,,cycles,1000004265,100.00,,\n"
+                "CPU1,40000,,cycles,1000004265,100.00,,\n"
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "status 1"):
+            glt_test_pmu._probe_pmccntr_smt(0, 1, self.mock_logger, "/perf")
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_probe_pmccntr_smt_uses_resolved_perf_command(self, mock_run):
@@ -222,6 +350,13 @@ class TestPerfPmuCompatibility(GLTTestBase):
         self.assertEqual(busy, 500000000)
         self.assertEqual(idle, 40000)
         self.assertEqual(mock_run.call_args.args[0][0], "/perf")
+        command = mock_run.call_args.args[0]
+        child_command = command[command.index("--") + 1:]
+        self.assertEqual(
+            child_command, glt_test_pmu._pmccntr_smt_workload_command(0)
+        )
+        self.assertNotIn("timeout", child_command)
+        self.assertNotIn("yes", child_command)
 
     # --- test_pmccntr_smt_handling (decorated function) ---
 
@@ -242,6 +377,40 @@ class TestPerfPmuCompatibility(GLTTestBase):
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._find_online_smt_pair")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.glt_utils")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_pmccntr_smt_skip_with_pmu_watchdog(
+        self, mock_nvdev, mock_glt_utils, mock_pair, mock_probe
+    ):
+        """An active watchdog can mask the SMT regression and forces a skip."""
+        mock_nvdev.return_value.is_cpu_type.return_value = True
+        self.mock_watchdog_reason.return_value = "watchdog occupies PMCCNTR"
+
+        with self.assertRaisesRegex(GLTCore.GLTTestSkip, "occupies PMCCNTR"):
+            glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
+
+        mock_pair.assert_not_called()
+        mock_probe.assert_not_called()
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._probe_pmccntr_smt")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._find_online_smt_pair")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.glt_utils")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_pmccntr_smt_fail_watchdog_inspection(
+        self, mock_nvdev, mock_glt_utils, mock_pair, mock_probe
+    ):
+        """Unknown watchdog state fails before selecting CPUs or running perf."""
+        mock_nvdev.return_value.is_cpu_type.return_value = True
+        self.mock_watchdog_reason.side_effect = ValueError("Cannot inspect watchdog")
+
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Cannot inspect watchdog"):
+            glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
+
+        mock_pair.assert_not_called()
+        mock_probe.assert_not_called()
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._probe_pmccntr_smt")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._find_online_smt_pair")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.glt_utils")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
     def test_pmccntr_smt_skip_no_smt_pair(
         self, mock_nvdev, mock_glt_utils, mock_pair, mock_probe
     ):
@@ -250,6 +419,22 @@ class TestPerfPmuCompatibility(GLTTestBase):
         mock_pair.return_value = None
         with self.assertRaises(GLTCore.GLTTestSkip):
             glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
+
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._probe_pmccntr_smt")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._find_online_smt_pair")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.glt_utils")
+    @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.NvDev")
+    def test_pmccntr_smt_fail_topology_inspection(
+        self, mock_nvdev, mock_glt_utils, mock_pair, mock_probe
+    ):
+        """Unreadable or malformed Vera topology fails instead of skipping."""
+        mock_nvdev.return_value.is_cpu_type.return_value = True
+        mock_pair.side_effect = ValueError("Cannot inspect SMT topology")
+
+        with self.assertRaisesRegex(GLTCore.GLTTestFail, "Cannot inspect SMT"):
+            glt_test_pmu.test_pmccntr_smt_handling(None, self.mock_logger)
+
+        mock_probe.assert_not_called()
 
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._probe_pmccntr_smt")
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu._find_online_smt_pair")

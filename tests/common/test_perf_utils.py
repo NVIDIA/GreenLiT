@@ -20,6 +20,7 @@ from common.perf_utils import (
     get_perf_version,
     has_coresight_fallback_evidence,
     natural_sort_key,
+    pmu_hardlockup_watchdog_reason,
     read_brbe_capabilities,
     resolve_perf_command,
     run_perf_test_candidates,
@@ -53,6 +54,41 @@ class TestPerfUtils(GLTTestBase):  # pylint: disable=too-many-public-methods
                 "/usr/lib/linux-tools/6.18/perf",
             ],
         )
+
+    def test_pmu_hardlockup_watchdog_disabled_is_eligible(self):
+        """A disabled PMU hard-lockup watchdog leaves PMCCNTR available."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "nmi_watchdog"
+            path.write_text("0\n", encoding="utf-8")
+
+            self.assertEqual(pmu_hardlockup_watchdog_reason(path), "")
+
+    def test_pmu_hardlockup_watchdog_enabled_is_ineligible(self):
+        """A pinned watchdog cycle event can hide a missing PMCCNTR fix."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "nmi_watchdog"
+            path.write_text("1\n", encoding="utf-8")
+
+            reason = pmu_hardlockup_watchdog_reason(path)
+
+        self.assertIn("can occupy PMCCNTR_EL0", reason)
+
+    def test_pmu_hardlockup_watchdog_invalid_value_is_failure(self):
+        """Unknown watchdog state fails closed."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "nmi_watchdog"
+            path.write_text("unexpected\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Cannot interpret"):
+                pmu_hardlockup_watchdog_reason(path)
+
+    def test_pmu_hardlockup_watchdog_missing_is_failure(self):
+        """A missing watchdog sysctl leaves PMU counter ownership unknown."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "missing_nmi_watchdog"
+
+            with self.assertRaisesRegex(ValueError, "Cannot confirm"):
+                pmu_hardlockup_watchdog_reason(path)
 
     @GLTTestBase.unittest.mock.patch("common.perf_utils.subprocess.run")
     def test_resolve_perf_command_rejects_path_version_substring(self, mock_run):

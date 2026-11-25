@@ -201,6 +201,28 @@ def natural_sort_key(path: Path):
 
 ARM_PMU_EVENT_SOURCE_PATH = Path("/sys/bus/event_source/devices")
 BRBE_ALLOWED_BRANCH_RECORD_COUNTS = frozenset((8, 16, 32, 64))
+NMI_WATCHDOG_PATH = Path("/proc/sys/kernel/nmi_watchdog")
+
+
+def pmu_hardlockup_watchdog_reason(path=NMI_WATCHDOG_PATH):
+    """Return why an active PMU watchdog invalidates PMCCNTR tests."""
+    try:
+        value = Path(path).read_text(encoding="utf-8").strip()
+    except OSError as err:
+        raise ValueError(
+            f"Cannot confirm PMU hard-lockup watchdog state from {path}: {err}"
+        ) from err
+
+    if value == "0":
+        return ""
+    if value == "1":
+        return (
+            f"PMU hard-lockup watchdog is enabled ({path}=1); its pinned "
+            "CPU_CYCLES event can occupy PMCCNTR_EL0 and mask the regression."
+        )
+    raise ValueError(
+        f"Cannot interpret PMU hard-lockup watchdog value {value!r} from {path}."
+    )
 
 
 def read_brbe_capabilities(event_source_path=ARM_PMU_EVENT_SOURCE_PATH):
