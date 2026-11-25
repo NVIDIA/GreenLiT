@@ -39,6 +39,7 @@ include = [
     "src/modules/arm64/ffa_dma_runtime/*",
     "src/modules/arm64/ffa_stmm_runtime/*",
     "src/modules/arm64/ls64/*",
+    "src/modules/arm64/vera_nmi_perf_probe/*",
     "src/modules/cpu/cppc_cpc_read_probe/*",
     "src/modules/i2c/kretprobes/*",
     "src/modules/iommu/cmdqv_hyp_own/*",
