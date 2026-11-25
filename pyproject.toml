@@ -45,6 +45,7 @@ include = [
     "src/modules/iommu/sva_invalidate/*",
     "src/modules/mm/bingo/*",
     "src/modules/mm/contpte_access_flags/*",
+    "src/modules/mm/mthp_contpte/*",
     "src/modules/mm/hotplug_tlb/*",
     "src/modules/pci/aspm_l1ss_saved_state_probe/*",
     "src/modules/pci/aspm_saved_state_probe/*",
