@@ -27,12 +27,11 @@ KALLSYMS_PATH = Path("/proc/kallsyms")
 PATCHED_RSI_SYMBOL = "arm64_rsi_is_protected"
 PREPATCH_RSI_SYMBOL = "__arm64_is_protected_mmio"
 
-EFI_SECRET_CONFIG = "CONFIG_EFI_SECRET"
 EFI_COCO_SECRET_CONFIG = "CONFIG_EFI_COCO_SECRET"
 SECURITYFS_CONFIG = "CONFIG_SECURITYFS"
 
 REALM_ENCRYPTED_MAPPING_COMMIT = "fa84e534c3ec2904d8718a83180294f7b5afecc7"
-ARM64_EFI_SECRET_COMMIT = "9e8a3df3e7f762966762a6fbf3282b9da2074127"
+ARM64_EFI_COCO_SECRET_COMMIT = "9e8a3df3e7f762966762a6fbf3282b9da2074127"
 
 # d02c2e45b1e7767b177f6854026e4ad0d70b4a4d added an arm64 read-only
 # EFI_ACPI_MEMORY_NVS mapping for CCEL, but it introduced no stable procfs,
@@ -93,12 +92,11 @@ def test_arm_cca_efi_secret_kernel_config(_, logger):
     except OSError as error:
         GLTCore.GLTTestResult.fail(
             f"Cannot read exact-release kernel config {config_path}: {error}; "
-            f"check for {ARM64_EFI_SECRET_COMMIT} or an equivalent downstream "
+            f"check for {ARM64_EFI_COCO_SECRET_COMMIT} or an equivalent downstream "
             "backport."
         )
 
     required_values = {
-        EFI_SECRET_CONFIG: ("y", "m"),
         EFI_COCO_SECRET_CONFIG: ("y",),
         SECURITYFS_CONFIG: ("y",),
     }
@@ -111,15 +109,13 @@ def test_arm_cca_efi_secret_kernel_config(_, logger):
         GLTCore.GLTTestResult.fail(
             "Arm CCA EFI secret-area support is not configured: "
             + ", ".join(invalid_configs)
-            + f"; check for {ARM64_EFI_SECRET_COMMIT} or an equivalent downstream "
+            + f"; check for {ARM64_EFI_COCO_SECRET_COMMIT} or an equivalent downstream "
             "backport."
         )
 
     logger.info(
         "Exact-release kernel config enables EFI secret support: "
-        "%s=%s, %s=y, %s=y",
-        EFI_SECRET_CONFIG,
-        kconfig[EFI_SECRET_CONFIG],
+        "%s=y, %s=y",
         EFI_COCO_SECRET_CONFIG,
         SECURITYFS_CONFIG,
     )

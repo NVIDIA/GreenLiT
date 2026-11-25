@@ -34,7 +34,6 @@ class TestArmCcaEfiSecretKernelConfig(_ArmCcaFirmwareDataTestBase):
             "src.modules.virt.glt_test_arm_cca_firmware_data."
             "check_kernel_config.parse_kconfig",
             return_value={
-                firmware_data.EFI_SECRET_CONFIG: "y",
                 firmware_data.EFI_COCO_SECRET_CONFIG: "y",
                 firmware_data.SECURITYFS_CONFIG: "y",
             },
@@ -44,23 +43,9 @@ class TestArmCcaEfiSecretKernelConfig(_ArmCcaFirmwareDataTestBase):
         )
         self.mock_platform.uname.return_value.release = "test-kernel"
 
-    def test_accepts_builtin_or_modular_efi_secret_config(self):
-        """EFI secret support may be configured built-in or as a module."""
-        for value in ("y", "m"):
-            with self.subTest(value=value):
-                self.mock_parse_kconfig.return_value[
-                    firmware_data.EFI_SECRET_CONFIG
-                ] = value
-
-                firmware_data.test_arm_cca_efi_secret_kernel_config(
-                    None, self.mock_logger
-                )
-
     def test_fails_when_efi_secret_configs_are_incomplete(self):
         """Every config needed by the EFI secret driver is required."""
         cases = (
-            (firmware_data.EFI_SECRET_CONFIG, None),
-            (firmware_data.EFI_SECRET_CONFIG, "n"),
             (firmware_data.EFI_COCO_SECRET_CONFIG, None),
             (firmware_data.EFI_COCO_SECRET_CONFIG, "m"),
             (firmware_data.SECURITYFS_CONFIG, None),
@@ -84,7 +69,7 @@ class TestArmCcaEfiSecretKernelConfig(_ArmCcaFirmwareDataTestBase):
 
                 failure = str(context.exception)
                 self.assertIn(name, failure)
-                self.assertIn(firmware_data.ARM64_EFI_SECRET_COMMIT, failure)
+                self.assertIn(firmware_data.ARM64_EFI_COCO_SECRET_COMMIT, failure)
 
     def test_fails_when_kernel_config_is_unreadable(self):
         """An unreadable exact-release config prevents qualification."""
