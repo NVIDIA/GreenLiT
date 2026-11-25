@@ -17,19 +17,24 @@
 Python script to test perf metric ID support.
 """
 # pylint: disable=duplicate-code
+import platform
 import shlex
 import subprocess
 from common import glt_core as GLTCore
 from common import perf_utils
+
 
 @GLTCore.GLTTestAttr()
 @GLTCore.GLTPlan("standard")
 @GLTCore.GLTPlan("stress")
 def test_perf_metric_id(_, logger):
     """
-    JIRA: DGX-11476
-    Check whether perf supports metric IDs.
+    JIRA: DGX-9484
+    Check paired INST_RETIRED and CPU_CYCLES metric IDs for IPC on Arm64.
     """
+
+    if platform.machine() not in ("aarch64", "arm64"):
+        GLTCore.GLTTestResult.skip("The paired Arm IPC metric-ID test requires Arm64.")
 
     perf_cmd, perf_reason = perf_utils.resolve_perf_command()
     if perf_cmd is None:
@@ -44,10 +49,13 @@ def test_perf_metric_id(_, logger):
     except subprocess.CalledProcessError as e:
         GLTCore.GLTTestResult.fail(f"Error executing command: {e}")
 
-    # Both stderr and stdout might contain the output we need
     full_output = cmd_output.stdout + cmd_output.stderr
-    expected_output = '{INST_RETIRED/metric-id=INST_RETIRED/,CPU_CYCLES/metric-id=CPU_CYCLES/}:W'
+    expected_output = (
+        "{INST_RETIRED/metric-id=INST_RETIRED/,CPU_CYCLES/metric-id=CPU_CYCLES/}:W"
+    )
 
     if expected_output not in full_output:
-        GLTCore.GLTTestResult.fail("Metric IDs not found in perf output. " +
-                                   "Include kernel commit 4473949074c3 and a24d9d9dc096 to fix it.")
+        GLTCore.GLTTestResult.fail(
+            f"Expected Arm IPC event group not found in perf output: {expected_output}"
+            " Related perf userspace commits: 4473949074c35 and a24d9d9dc096."
+        )
