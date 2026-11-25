@@ -29,6 +29,7 @@ from packaging import version
 from common import glt_core as GLTCore
 from common import glt_utils
 from common import perf_utils
+from common.cpu_topology import parse_cpu_mask
 from common.nv_device import NvDev
 from scripts import check_kernel_config
 
@@ -280,6 +281,7 @@ def _find_arm_spe_pmu(base_path=ARM_SPE_EVENT_SOURCE_PATH, logger=None):
 _PMCCNTR_SMT_BUSY_FLOOR = 100_000_000
 _PMCCNTR_SMT_IDLE_RATIO_MAX = 0.10
 _PMCCNTR_SMT_PROBE_TIMEOUT_SECONDS = 10
+_PMCCNTR_SMT_WORKLOAD_SECONDS = 2
 
 
 def _parse_cpu_list(s):
@@ -380,9 +382,7 @@ def _find_online_smt_pair(cpu_sysfs_root=CPU_SYSFS_ROOT):
     cpu_sysfs_root = Path(cpu_sysfs_root)
     online_path = cpu_sysfs_root / "online"
     try:
-        online_cpus = set(_parse_cpu_list(
-            online_path.read_text(encoding="utf-8")
-        ))
+        online_cpus = parse_cpu_mask(online_path.read_text(encoding="utf-8"))
     except (OSError, OverflowError, ValueError) as err:
         raise ValueError(
             f"Cannot inspect online CPU topology from {online_path}: {err}"
@@ -399,7 +399,7 @@ def _find_online_smt_pair(cpu_sysfs_root=CPU_SYSFS_ROOT):
             cpu_sysfs_root / f"cpu{cpu}" / "topology" / "thread_siblings_list"
         )
         try:
-            siblings = _parse_cpu_list(siblings_path.read_text(encoding="utf-8"))
+            siblings = parse_cpu_mask(siblings_path.read_text(encoding="utf-8"))
         except (OSError, OverflowError, ValueError) as err:
             raise ValueError(
                 f"Cannot inspect SMT sibling topology from {siblings_path}: {err}"
@@ -409,7 +409,7 @@ def _find_online_smt_pair(cpu_sysfs_root=CPU_SYSFS_ROOT):
                 f"Cannot inspect SMT sibling topology because {siblings_path} "
                 f"does not include CPU {cpu}: {siblings}"
             )
-        online_siblings = [c for c in siblings if c in online_cpus]
+        online_siblings = sorted(c for c in siblings if c in online_cpus)
         if len(online_siblings) >= 2:
             return online_siblings[0], online_siblings[1]
     return None
@@ -457,6 +457,17 @@ def _parse_perf_stat_csv(stderr, busy_cpu, idle_cpu):
     return counts[busy_cpu], counts[idle_cpu]
 
 
+def _pmccntr_smt_workload_command(busy_cpu):
+    """Return a pinned busy workload that exits zero after the probe interval."""
+    return [
+        "taskset", "-c", str(busy_cpu), sys.executable, "-c",
+        f"import time\n"
+        f"deadline = time.monotonic() + {_PMCCNTR_SMT_WORKLOAD_SECONDS}\n"
+        "while time.monotonic() < deadline:\n"
+        "    pass",
+    ]
+
+
 def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger, perf_cmd):
     """Run a single perf stat SMT probe and return (busy_cycles, idle_cycles).
 
@@ -468,7 +479,7 @@ def _probe_pmccntr_smt(busy_cpu, idle_cpu, logger, perf_cmd):
             [
                 perf_cmd, "stat", "-x,", "-e", "cycles", "-A",
                 "-C", f"{busy_cpu},{idle_cpu}",
-                "--", "taskset", "-c", str(busy_cpu), "timeout", "2s", "yes",
+                "--", *_pmccntr_smt_workload_command(busy_cpu),
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -904,7 +915,7 @@ def test_pmccntr_smt_handling(_, logger):
     if perf_cmd is None:
         GLTCore.GLTTestResult.fail(perf_reason)
 
-    for tool in ("taskset", "timeout", "yes"):
+    for tool in ("taskset",):
         if not glt_utils.is_cli_available(tool):
             GLTCore.GLTTestResult.fail(
                 f"Required tool '{tool}' not found; install it to run this test."

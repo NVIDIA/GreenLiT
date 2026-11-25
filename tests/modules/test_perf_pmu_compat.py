@@ -133,8 +133,8 @@ class TestPerfPmuCompatibility(GLTTestBase):
             root = Path(temp_dir)
             self._write_smt_topology(
                 root,
-                online="0,2-3",
-                siblings={0: "0-1", 2: "2-3", 3: "2-3"},
+                online="3,0,2",
+                siblings={0: "1,0", 2: "3,2", 3: "3,2"},
             )
 
             self.assertEqual(glt_test_pmu._find_online_smt_pair(root), (2, 3))
@@ -153,7 +153,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
     def test_find_online_smt_pair_rejects_invalid_online_data(self):
         """Missing or malformed online CPU data fails topology inspection."""
-        for value in (None, "invalid"):
+        for value in (None, "invalid", "0,,1", "0,3-2"):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
                 self._write_smt_topology(root, online="0", siblings={0: "0"})
@@ -177,7 +177,7 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
     def test_find_online_smt_pair_rejects_invalid_sibling_data(self):
         """Missing or malformed sibling data fails instead of looking like no SMT."""
-        for value in (None, "invalid"):
+        for value in (None, "invalid", "0,,1", "0,3-2"):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
                 self._write_smt_topology(root, online="0", siblings={0: "0"})
@@ -288,6 +288,19 @@ class TestPerfPmuCompatibility(GLTTestBase):
 
     # --- _probe_pmccntr_smt ---
 
+    def test_pmccntr_smt_workload_exits_zero(self):
+        """The real pinned child workload finishes normally instead of using timeout."""
+        busy_cpu = min(os.sched_getaffinity(0))
+        result = subprocess.run(
+            glt_test_pmu._pmccntr_smt_workload_command(busy_cpu),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=glt_test_pmu._PMCCNTR_SMT_WORKLOAD_SECONDS + 5,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     @GLTTestBase.unittest.mock.patch("src.modules.arm64.glt_test_pmu.subprocess.run")
     def test_probe_pmccntr_smt_timeout_raises_value_error(self, mock_run):
         """Outer perf timeout is converted to a probe failure."""
@@ -337,6 +350,13 @@ class TestPerfPmuCompatibility(GLTTestBase):
         self.assertEqual(busy, 500000000)
         self.assertEqual(idle, 40000)
         self.assertEqual(mock_run.call_args.args[0][0], "/perf")
+        command = mock_run.call_args.args[0]
+        child_command = command[command.index("--") + 1:]
+        self.assertEqual(
+            child_command, glt_test_pmu._pmccntr_smt_workload_command(0)
+        )
+        self.assertNotIn("timeout", child_command)
+        self.assertNotIn("yes", child_command)
 
     # --- test_pmccntr_smt_handling (decorated function) ---
 
