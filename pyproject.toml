@@ -35,6 +35,7 @@ include = [
     "external_tests/**/*",
     "src/common/virt/kvm_microvm/*",
     "src/modules/acpi/tegra_smccc_chipid_probe/*",
+    "src/modules/arm64/vera_nmi_watchdog/*",
     "src/modules/arm64/brbe_nvhe/*",
     "src/modules/arm64/ffa_dma_runtime/*",
     "src/modules/arm64/ffa_stmm_runtime/*",
