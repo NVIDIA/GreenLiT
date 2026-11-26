@@ -33,7 +33,6 @@ references:
     purpose: Canonical upstream Linux implementation and commit history.
   linux-nvidia:
     remote: https://github.com/NVIDIA/NV-Kernels.git
-    ref: linux-nvidia-6.18
     purpose: NVIDIA target kernel implementation and downstream commit history.
 lenses:
   convention:
@@ -345,22 +344,23 @@ lenses:
     #   2. [restatement] Passive retained-journal diagnostics accepted when declared; patch link ≠ patch presence ← !388#note_69138699, !388#note_69408274 (jszu), 8c10f07
     #   3. [policy] For patch-discrimination claims, derive simplest complete discriminator (not applied to passive diagnostics) ← 7630142, 8c10f07
     # [Target kernel scope]
-    #   1. [restatement] Establish declared kernel repo, branch/version, and hardware scope before ABI mismatch claims ← !368#note_66839797 (icheng), 8c10f07
-    #   2. [restatement] Upstream history is ancestry, not NVIDIA/backport ABI; report insufficient evidence when target evidence is absent ← !368#note_66839797 (icheng), 8c10f07
-    #   3. [policy] Distinguish upstream and backport hashes explicitly; reference declaration ≠ target match ← 8c10f07, b2f0f72
+    #   1. [restatement] SHA-only provenance is sufficient; target-specific findings require applicable evidence ← !368#note_66839797, !413#note_88085782
+    #   2. [policy] Discover only NVIDIA heads and use explicit revisions in source calls and evidence ← !413#note_88085782
+    #   3. [restatement] Upstream history is ancestry, not NVIDIA/backport ABI; report insufficient evidence when target evidence is absent ← !368#note_66839797 (icheng), 8c10f07
+    #   4. [policy] Distinguish upstream and backport hashes explicitly; reference declaration ≠ target match ← 8c10f07, b2f0f72
     # [Fixed-versus-unfixed boundary]
-    #   1. [policy] Inspect linux-nvidia for downstream target and linux-mainline for upstream provenance ← b2f0f72
+    #   1. [policy] Inspect linux-nvidia at the evidenced target branch or build commit and linux-mainline for upstream provenance ← b2f0f72
     #   2. [policy] Translate complete fix into smallest externally observable invariant without mirroring patch structure ← 7630142
-    #   3. [policy] State series/ABI/single-commit scope and align fail/comment/Makefile hashes to target kernel ← f8c2722, b2f0f72
+    #   3. [policy] Scope the claim and check patch attribution ← f8c2722, b2f0f72, !413#note_88085782
     #   4. [policy] Partial-fix kernels in multi-commit causal series must still fail ← cf3b69c, f8c2722
-    #   5. [policy] Prefer git_log (grep/path) and git_show over unscoped rg ← 14ffcd3
+    #   5. [policy] Choose the history tool appropriate to the lookup ← 14ffcd3, !413#note_88085783
     # [Patch SHA resolution]
-    #   1. [restatement] Non-ancestor PATCH SHA ≠ missing patch ← !379#note_69658586 (icheng), 7d9a4d3
-    #   2. [policy] Bound lookup to <=2 calls per cited SHA + confirmation git_show on 40-hex target match (never pass <40-hex prefixes to git_show) ← !426#note_78707988 (kaihengf), 14ffcd3, !413
-    #   3. [restatement] Confirm pinned-target 40-hex matches with git_show; off-pin commits do not establish target presence ← 7d9a4d3, !413#note_78758712 (jszu)
-    #   4. [policy] Never run pathless list_tree/rg on kernel trees or repeat failed/timed-out calls ← 14ffcd3, !413
-    #   5. [restatement] Ask to name verified target-pin ancestor hash when found; report insufficient evidence when unresolved ← 7d9a4d3, !383#note_72052228 (icheng), !401#note_72301237 (kaihengf), !413
-    #   6. [restatement] Cite only the pin or a verified ancestor; never invent hashes or treat mainline docs as NVIDIA ABI ← 7d9a4d3, !413#note_78758712 (jszu)
+    #   1. [restatement] Non-ancestor PATCH SHA ≠ missing patch on the target revision ← !379#note_69658586 (icheng), 7d9a4d3
+    #   2. [policy] Bound lookup to <=2 calls per cited SHA + confirmation git_show on 40-hex target match (never pass <40-hex prefixes to git_show); inspect the cited full SHA on linux-mainline and the explicit branch or build revision on linux-nvidia ← !426#note_78707988 (kaihengf), 14ffcd3, !413
+    #   3. [restatement] Confirm target-history 40-hex matches with git_show; off-branch commits do not establish target presence ← 7d9a4d3, !413#note_78758712 (jszu)
+    #   4. [policy] Scope kernel-tree searches by path and avoid repeating failed calls ← 14ffcd3, !413#note_88085783
+    #   5. [policy] Preserve the cited fix; support downstream claims with target evidence ← !383#note_72052228, !401#note_72301237, !413#note_88085782
+    #   6. [restatement] Distinguish upstream provenance from target membership and ABI evidence ← !413#note_78758712, !413#note_88085782
     # [Trigger execution]
     #   1. [policy] Verify kernel path under test actually ran (e.g. runtime-resume callback vs already-active device) ← f8c2722
     #   2. [restatement] Select affinity-bound (PMU, CPU) pairs jointly ← f8c2722, !413#note_78758721 (jszu)
@@ -411,73 +411,85 @@ lenses:
          claim, not to an explicitly accepted passive diagnostic.
 
       Target kernel scope:
-      1. Establish the declared kernel repository, branch/version, and hardware
-         scope before asserting an ABI or implementation mismatch.
-      2. Use upstream history for ancestry, not as an automatic substitute for a
+      1. A testcase may identify the fix by its commit SHA alone. Before
+         asserting a target-specific ABI or implementation mismatch,
+         establish the applicable repository, revision and hardware from the
+         testcase, MR or DUT evidence. When the target is ambiguous, continue
+         reviewing the observable behavior; a missing branch name alone
+         warrants no finding.
+      2. For a branch-specific NVIDIA claim, use
+         `list_refs(source="linux-nvidia",
+         globs=["refs/heads/linux-nvidia-*"])` and select a branch only when
+         target evidence identifies it. For `linux-nvidia` calls, pass the
+         explicit branch ref or full commit SHA as `revision` to `rg`,
+         `read_file`, `list_tree`, `git_log`, and `git_show`; supply both
+         revisions to `git_diff` as `from` and `to`. Record the inspected ref
+         or SHA in `submit_review`
+         `source_evidence.ref`.
+      3. Use upstream history for ancestry, not as an automatic substitute for a
          targeted NVIDIA/backport ABI. Require source or DUT evidence applicable
          to that target; if unavailable, report insufficient evidence rather
          than treating mainline differences as defects.
-      3. Distinguish upstream and backport hashes explicitly. A reference
+      4. Distinguish upstream and backport hashes explicitly. A reference
          declaration does not prove it matches the target kernel.
 
       Fixed-versus-unfixed boundary:
       1. Use the kernel history for the MR's stated target to establish the
          complete fixed-versus-unfixed boundary. For NVIDIA kernel targets,
-         inspect linux-nvidia for the downstream implementation, fixes, and
-         backports; use linux-mainline for upstream provenance and comparison.
-         Do not assume upstream and downstream commit hashes or behavior are
-         identical.
+         inspect `linux-nvidia` at the evidenced target branch or build commit
+         for the downstream implementation, fixes, and backports; use
+         `linux-mainline` for upstream provenance and comparison. Do not assume
+         upstream and downstream commit hashes or behavior are identical.
       2. Do not require the test structure to mirror the patch series or
          internal implementation. Translate the complete fix into the smallest
          externally observable invariant or state transition that is true only
          when the fix is present.
-      3. State explicitly whether the test covers the full series, a userspace
-         ABI surface, or a single commit, and align fail messages, comments, and
-         Makefile notes to the relevant target-kernel hashes.
+      3. State whether the testcase covers a series, a userspace ABI surface,
+         or a single commit. Flag an incorrect attribution in failure
+         messages, comments, or Makefile notes when evidence establishes the
+         discrepancy.
       4. When the claimed fix spans multiple causal commits, ensure relevant
          partial-fix kernels still fail.
-      5. Prefer `git_log` with `grep`/`path` for history questions and
-         `git_show` for a specific commit; `rg` is for the project's own files
-         or a kernel subtree named by `path`.
+      5. Prefer `git_log` with `grep` or `path` for history questions and
+         `git_show` for a known commit.
 
       Patch SHA resolution:
-      1. When a cited PATCH SHA is not an ancestor of the pinned target
-         reference, do not conclude the patch is absent.
-      2. Resolve it with at most two lookup calls per cited SHA (searching
-         target equivalence only on the pinned target reference), plus one
+      1. When a cited PATCH SHA is not an ancestor of the evidenced
+         NVIDIA target revision, do not conclude the patch is absent.
+      2. When a target revision is established, use at most two lookup calls per
+         cited SHA (up to 50 matching results from `git_log`), plus one
          confirmation `git_show` when `git_log` returns a 40-hex target match
-         (`git_show` requires a full 40-hex SHA; never pass an abbreviated
-         `<40`-hex prefix to `git_show`, as the tools cannot rev-parse short
-         SHAs directly):
+         (`git_show` rejects abbreviated
+         `<40`-hex prefixes—pass a full 40-hex SHA or `refs/heads/<name>`):
          - First lookup: when the cited SHA is 40-hex and its subject is not
-           already stated in the test or MR, call `git_show` on linux-mainline
-           to learn its subject (`linux-mainline` tracks `master` only, not
-           stable or `linux-next` branches, so a missing revision there is
-           insufficient evidence rather than proof the commit does not
-           exist—note it and move on); when the cited SHA is `<40`-hex, skip
-           `git_show` on linux-mainline.
-         - Second lookup: call `git_log` on linux-nvidia at its pinned target
-           reference (omit `revision` so `git_log` walks only the target pin's
-           ancestry; pass `path` when the touched kernel file is known) with
-           `grep` set to the bare hex prefix (at least 8 hex, 12+ when
-           available) of the SHA and/or the exact stated subject (cherry-pick
-           footers read "cherry picked from commit <sha>", "backported from",
-           or "upstream commit <sha>"; one regex covers them).
-      3. When that pinned-target log returns a 40-hex match, read it with
-         `git_show` on linux-nvidia to confirm equivalence; reading an arbitrary
-         commit outside the target pin's ancestry does not establish that the
-         target contains the fix.
-      4. Never `list_tree` or `rg` a kernel tree without `path`, and never
-         repeat a call that already failed or timed out.
-      5. If an equivalent ancestor on the target pin exists, the fix is present
-         on the target: ask the test to name that target-ref hash in PATCH/fail
-         text, and do not claim the fixed/unfixed boundary cannot be
-         established. If none is resolved after those calls (including an
-         unresolved `<40`-hex prefix without a cherry-pick footer, a commit off
-         `linux-mainline` `master`, or a timed-out `git_log` walk), report
-         insufficient evidence rather than patch absence.
-      6. Cite only the pin or a verified ancestor of the pin; do not invent a
-         hash or use linux-mainline documentation as the NVIDIA ABI.
+           already stated in the test or MR, call `git_show` on `linux-mainline`
+           with `revision: <cited-40-hex-SHA>` to learn its subject
+           (`linux-mainline` tracks `master` only, not stable or `linux-next`
+           branches, so a missing revision there is insufficient evidence rather
+           than proof the commit does not exist—note it and move on); when the
+           cited SHA is `<40`-hex, skip `git_show` on `linux-mainline`.
+         - Second lookup: call `git_log` on `linux-nvidia` with
+           the target branch ref or full build SHA as `revision`. Pass `path`
+           when the touched kernel file is known. To match commit messages, set `grep` to the
+           bare hex prefix (at least 8 hex, 12+ when available) of the SHA
+           and/or the exact stated subject (cherry-pick footers read
+           "cherry picked from commit <sha>", "backported from", or
+           "upstream commit <sha>"; one regex covers them).
+      3. When that target-revision log returns a 40-hex match, read it with
+         `git_show` (`source: "linux-nvidia"`, `revision: <40-hex-sha>`) to
+         confirm equivalence; reading an arbitrary commit outside the target
+         revision's ancestry does not establish that the target contains
+         the fix.
+      4. Pass `path` to `rg` and `list_tree` on kernel references. Do not
+         repeat a failed or timed-out call.
+      5. Keep a valid upstream or series SHA in the testcase. When reviewing
+         a downstream backport claim, cite the verified target equivalent and
+         check the applicable target source or DUT evidence. If the bounded
+         lookup is inconclusive, report insufficient evidence for that claim.
+      6. For target-membership claims, cite the selected branch or build commit
+         or a verified ancestor. Identify upstream commits as provenance. Never
+         invent a hash or use upstream documentation alone to establish the
+         NVIDIA ABI.
 
       Trigger execution:
       1. Before accepting a behavioral trigger as proof, verify the kernel path
