@@ -13,6 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Lens ownership (YAML comments outside `instructions: |` are not sent to the model):
+# - convention: mechanical checks: headers, licensing, placement, commits,
+#   tags, result-call semantics, process/resource hygiene, public-tree disclosure.
+# - test-design: design of test modules: reuse of existing helpers, test flow,
+#   state capture and restore, dependencies/gating, duplicate coverage, and
+#   unit-test expectations. Runs only when test code changes.
+# - discriminator: whether a test discriminates the claimed kernel fix.
+# - common-helper-contracts: shared-helper surface, fail-closed probes,
+#   version resolvers, session/resume integrity, and unit-test isolation.
+# - discovery: CLI scheduling, category/test-case discovery, resume, and YAML
+#   config application.
 version: 1
 auto_approve: true
 references:
@@ -27,21 +38,44 @@ references:
 lenses:
   convention:
     model: gemini-flash
-    # Policy sources (YAML comments; not sent to the model):
-    # - Jira IDs allowed; do not leak process: !379#note_69388553 (achi)
-    # - Cheap platform/config checks first: !374#note_65739004 (achi)
-    # - Keep historical evidence before skip: !388#note_69369915 and
-    #   !388#note_69397544 (achi, jszu)
-    # - Behavior-level tests, not implementation-mirroring: !363#note_64678026
-    #   (icheng)
-    # - Parser/shared-helper/framework coverage: guardrail so the !363 behavior
-    #   rule does not drop tests/modules, tests/common, or tests/greenlit coverage.
-    #   Not a quoted human comment.
-    # - Keep one-caller flows and mutate/verify/restore in the testcase, report
-    #   skip/fail directly, restore in finally: !392#note_73017297 and
-    #   !392#note_73017302 (achi)
-    # - Use must_pass instead of repeating prerequisite checks:
-    #   !392#note_73017293 and !392#note_73017295 (achi)
+    # Policy sources (paired 1:1 with numbered items in `instructions: |`; not sent to the model):
+    # [Placement, headers, licensing]
+    #   1. [policy] File location/naming, consistent SPDX/copyright header, and manifest/plan/package/doc registration ← f8c2722, !413 (after !407#note_74423890, kristinc; !409#note_77048176, jszu)
+    #   2. [restatement] Kernel/BPF and Python licensing; project-authored Makefiles follow the project default, subject to file-specific licensing ← README.md (License), !407#note_74747016, !413#note_85450124, !413#note_88083958 (achi)
+    #   3. [policy] Native C helpers and Makefiles live under src/modules/<category>/<native-helper>/, not loose in external_tests/ ← f8c2722
+    #   4. [policy] Copy-paste runnable examples, agent MUST/MUST NOT in AGENTS.md, and VERSION + pyproject.toml bumps ← f8c2722
+    #   5. [policy] Flag drive-by refactors and unrelated CI/doc churn bundled with feature work ← f8c2722
+    # [Commits]
+    #   1. [policy] Match MR title and commit summaries to CONTRIBUTING.md ← 1e3db76, f8c2722
+    #   2. [policy] Commit type mapping (feat: runtime tests, test: unit tests, fix: runtime/framework fixes) ← 1e3db76, f8c2722
+    #   3. [policy] Allow optional parenthesized scope without inventing one; require clear history for type-mismatch findings ← f8c2722
+    #   4. [policy] Require matching Changelog: and Signed-off-by: trailers on releasable non-merge commits ← f8c2722, !413
+    #   5. [policy] Flag unexercised hardware/kernel claims and mixed independent changes ← f8c2722
+    # [Result semantics and public tree]
+    #   1. [policy] skip() for absent optional features, warn() for non-conclusive observer gaps, fail() for definitive regressions ← f8c2722
+    #   2. [policy] Call fail()/skip()/warn() only from @GLTCore.GLTTestAttr()-decorated functions; helpers return info or raise ← f8c2722, 81c71293, !413#note_78756958 (jszu), !413#note_85450133 (achi)
+    #   3. [policy] Topology/HW match helpers distinguish match, unsupported (skip), and inspection failure (fail) ← f8c2722
+    #   4. [restatement] No internal host, tool, or service names in the public tree ← !380#note_72779248, !380#note_72779249, !380#note_72779250 (achi); [policy] no pre-production device IDs or internal branch/process details ← f8c2722 (after !311#note_63334746, achi)
+    #   5. [restatement] Jira IDs allowed for traceability ← !379#note_69388553 (achi), 8c10f07
+    #      except [policy] Do not infer Jira tags are mandatory everywhere ← 8c10f07 (generalized after !389#note_69409891, jszu)
+    # [Lifecycle and process idioms]
+    #   1. [restatement] Prefer sys.executable over bare python3 ← f8c2722, !413#note_78758701 (jszu)
+    #   2. [restatement] Keep make clean, tempdirs, and subprocess cleanup in finally on in-process exits ← f8c2722, !413#note_78758701 (jszu)
+    #   3. [restatement] Do not replace GreenLiT's global signal handlers in one test ← f8c2722, !413#note_78758701 (jszu)
+    #   4. [policy] Do not add redundant root/capability checks ← f8c2722
+    #      except [policy] Keep EACCES/EPERM handling for kernel-side denials ← !413 (guardrail after bot finding !392#note_72221954 and reply !392#note_72226593, csoto)
+    # [Import-time and UAPI]
+    #   1. [policy] src/modules/** must not raise for static ABI/endian checks at import ← f8c2722
+    #   2. [policy] Prefer struct.Struct for fixed UAPI layouts and mirror neighbor GENMASK/FIELD_PREP style ← f8c2722
+    # [Plan tags]
+    #   1. [policy] Assign standard vs disruptive (never both) ← 2b4824c, e24cfe5, f8c2722
+    #   2. [policy] Add stress for extended coverage; allow stress-only for long/heavy tests ← 2b4824c, f8c2722
+    #   3. [policy] Cite docs lines and sibling tests when requiring a tag ← !405#note_73313410 (bot), !413
+    # [General and reporting]
+    #   1. [policy] Flag clear project-evidenced deviations in typing, ownership, quoting, subprocess, resource, concurrency, post hooks, API, and parallel copies ← f8c2722
+    #   2. [policy] Verify new-file conventions; flag pre-existing issues in modified files only when expanded or depended on ← f8c2722
+    #   3. [policy] Report only explicit or multi-example rules; no single-file inference, taste, broad refactoring, or generic correctness/security/pylint review ← cf3b69c, f8c2722, !413
+    #   4. [policy] Anchor findings to changed GreenLiT head lines (or offending commit summary / MR title) ← cf3b69c, f8c2722, !413
     instructions: |
       Review every changed artifact for GreenLiT conventions and language
       idioms. Discover rules from, in descending authority: repo docs and tool
@@ -50,28 +84,38 @@ lenses:
       GreenLiT has no contrary pattern.
 
       Out of scope for this lens (do not duplicate findings):
+      - test design: helper reuse, test flow, state capture and restore,
+        dependencies and gating, duplicate coverage, unit-test expectations →
+        `test-design`
       - kernel fix discrimination, vacuity, and observer design → `discriminator`
       - helper duplication, carve-outs into `src/common/`, fail-closed probes,
         shared API/`_` surface, version resolvers, session/resume contracts →
         `common-helper-contracts`
       - CLI category discovery, config scoping, scheduler resume → `discovery`
 
-      Owned checks:
+      Owned checks (scope boundaries, not a finding quota; submit zero findings
+      when the diff complies):
 
-      Placement and packaging:
-      1. file location and naming; SPDX/copyright headers; registration in
-         manifests, test plans, decorators, package metadata, or docs.
-      2. Native C helpers and Makefiles belong under
+      Placement, headers, licensing:
+      1. Check file location and naming; SPDX/copyright headers consistent
+         between the copyright and license lines; registration in manifests,
+         test plans, decorators, package metadata (`.packignore`,
+         `pyproject.toml`), or docs.
+      2. Kernel modules, BPF, and other kernel-derived code stay
+         `GPL-2.0-only`; Python files are `Apache-2.0`. GreenLiT-authored
+         Makefiles default to `Apache-2.0`. Check the Makefile's own
+         licensing and provenance before flagging a different identifier.
+      3. Native C helpers and Makefiles belong under
          `src/modules/<category>/<native-helper>/`, not loose under
          `external_tests/`, unless genuinely third-party.
-      3. Examples must be copy-paste runnable; agent-facing MUST/MUST NOT
+      4. Examples must be copy-paste runnable; agent-facing MUST/MUST NOT
          instructions belong in AGENTS.md; version bumps update VERSION and
          pyproject.toml.
-      4. Flag drive-by refactors and unrelated CI/doc churn bundled with
+      5. Flag drive-by refactors and unrelated CI/doc churn bundled with
          feature work.
 
       Commits:
-      1. match the MR title and every commit summary to CONTRIBUTING.md.
+      1. Match the MR title and every commit summary to CONTRIBUTING.md.
       2. New runtime tests under `src/modules/` or `external_tests/` are
          `feat:`; unit-test-only commits under `tests/` are `test:`; fixes to
          existing runtime or framework behavior are `fix:`.
@@ -79,62 +123,40 @@ lenses:
          `feat: [DGX-#####] ...` without inventing a scope when recent siblings
          omit one. Report a type mismatch only when comparable history clearly
          supports the correction.
-      4. Require `Changelog:` and `Signed-off-by:` on releasable commits; flag
-         summaries that claim hardware/kernel behavior the diff does not
+      4. Require `Changelog:` and `Signed-off-by:` on releasable commits (not
+         merge commits), with the `Changelog:` type matching the summary type.
+      5. Flag summaries that claim hardware/kernel behavior the diff does not
          exercise; flag mixed independent changes that should be split or
          squash-described.
 
-      Result semantics:
-      1. `skip()` for absent optional sysfs/resctrl/arch/
-         tracefs/compiler/platform features; `warn()` for non-conclusive
-         observer gaps; `fail()` only for definitive regressions. Call
-         `fail()`/`skip()` only from `@GLTCore.GLTTestAttr()`-decorated
-         functions.
-      2. Topology/HW match helpers must distinguish match, unsupported (skip),
+      Result semantics and public tree:
+      1. Use `skip()` for absent optional
+         sysfs/resctrl/arch/tracefs/compiler/platform features; `warn()` for
+         non-conclusive observer gaps; `fail()` only for definitive regressions.
+      2. Call `fail()`/`skip()`/`warn()` only from
+         `@GLTCore.GLTTestAttr()`-decorated functions; helpers, including
+         nested helpers, must return information or raise and let the decorated
+         testcase map that information to a result.
+      3. Topology/HW match helpers must distinguish match, unsupported (skip),
          and inspection failure (fail)—never collapse infra errors into bare
          false/skip.
-      3. Do not expose internal workflow/process details in customer-visible
-         text.
-      4. Jira identifiers used for traceability are allowed, including in test
+      4. Do not expose internal host names, internal URLs/FQDNs, lab hostnames,
+         internal tool or service names, pre-production device identifiers or
+         unreleased codenames, or internal branch or process details in code,
+         docs, or customer-visible messages.
+      5. Jira identifiers used for traceability are allowed, including in test
          docstrings; an identifier alone is not process disclosure. Do not infer
          that Jira tags are mandatory everywhere.
 
       Lifecycle and process idioms:
-      1. prefer `sys.executable` over bare `python3`; keep `make clean`,
-         tempdirs, and device restore in `finally` that runs even when
-         skip/fail raises; do not replace GreenLiT's global signal handlers in
-         one test; do not add redundant root/capability checks
-         (`glt-test-suite` already requires root).
-      2. Do not add single-use or unittest-only wrappers that only forward to
-         another helper—inline or test the underlying function.
-      3. Check cheap, necessary platform/config prerequisites before module
-         loading, mutation, or expensive collection. Do not move a gate
-         earlier if that discards historical evidence required by an
-         explicitly accepted diagnostic contract.
-
-      Test flow:
-      1. judge each helper by its interface, not its caller count. A helper is
-         justified when it has a generic, testcase-independent interface with
-         clear inputs, outputs, and error behavior, and the author places it
-         deliberately as module-private, shared in `src/common/`, or inline in
-         the decorated testcase. Flag a helper when it only fragments a
-         testcase-specific inspect/mutate/verify/restore flow or only forwards
-         to another helper.
-      2. Do not flag a helper on caller count alone. Report skip/fail directly
-         as soon as the condition is known rather than returning status/reason
-         tuples solely for the caller to dispatch. Keep in-process restoration
-         in `finally` and collect cleanup errors only when needed; preserve
-         documented post-hook and reboot/resume cleanup contracts.
-
-      Test dependencies:
-      1. look for follow-up testcases that repeat prerequisite checks already
-         established by another testcase. When the follow-up requires that
-         testcase to pass, it MUST use
-         `@GLTCore.GLTRequires.must_pass(category, testcase)` and remove only
-         checks guaranteed by its PASS. Check skip/fail propagation and retain
-         follow-up-specific or mutable-state checks.
-      2. Do not add dependencies that suppress independently useful coverage
-         or diagnostics needed after a prerequisite fails or skips.
+      1. Prefer `sys.executable` over bare `python3`.
+      2. Keep `make clean`, tempdirs, and subprocess cleanup in `finally` that
+         runs on in-process exits, including when `skip()`/`fail()` raises.
+      3. Do not replace GreenLiT's global signal handlers in one test.
+      4. Do not add redundant root/capability checks (`glt-test-suite` already
+         requires root), but do not treat `EACCES`/`EPERM` handling as a
+         redundant root check—the handling exists for kernel-side permission
+         denials.
 
       Import-time and UAPI:
       1. `src/modules/**` must not raise for ABI size, endianness, or similar
@@ -144,55 +166,231 @@ lenses:
          unless ctypes field access is required; mirror kernel
          `GENMASK`/`FIELD_PREP` bitfield style when neighbors do.
 
-      Tags and unit coverage:
-      1. assign new functional tests to `standard` when they are
-         non-disruptive, or to `disruptive` when they intentionally reboot or
-         kexec, or might hang or crash if a required patch is missing; never
-         assign both.
+      Plan tags:
+      1. Assign new functional tests to `standard` when they are non-disruptive,
+         or to `disruptive` when they intentionally reboot or kexec, or might
+         hang or crash if a required patch is missing; never assign both.
       2. Add `stress` for extended stress or stability coverage when
-         appropriate. Long-running or heavy-tooling tests may be
-         `stress`-only. Prefer `tests/modules/` for hardware-independent
-         parsing and multi-candidate selection; expect `tests/greenlit/` for
-         deterministic `src/greenlit/**` logic. Request tests for concrete
-         uncovered hardware-independent behavior or contracts, including
-         failure paths—not every private helper or implementation branch
-         merely because it exists. Prefer behavior-level assertions and
-         existing test seams; do not require wrapper extraction or
-         implementation-mirroring tests. Hardware-dependent cases may use the
-         documented targeted-review or hardware-validation path. Preserve
-         meaningful parser, shared-helper, and framework coverage; private
-         visibility alone is not an exemption.
+         appropriate. Long-running or heavy-tooling tests may be `stress`-only.
+      3. Cite the docs lines and sibling tests when requiring a tag.
 
-      Other conventions:
+      General and reporting:
       1. Also flag clear deviations in typing, ownership, quoting, subprocess,
          resource, concurrency, post hooks, public API compatibility, and
          consistency between duplicated parallel implementations—only when
          project evidence supports the rule.
-
-      Reporting and scope:
-      1. Inspect docs, neighbors, tests, call sites, and history before
+      2. Inspect docs, neighbors, tests, call sites, and history before
          asserting a convention. For new files, verify header, location,
          registration, tests, and nearby structure. For modified files, report a
          pre-existing violation only when the change expands or materially
          depends on it.
-      2. Report only rules that are explicit or backed by multiple relevant
-         examples; cite evidence and the smallest compliant change. Do not
-         infer from one unrelated file, impose personal taste, request broad
-         refactoring, or repeat generic correctness/security review.
-      3. Anchor every finding to a changed GreenLiT line, except
-         commit-message findings, which anchor to the offending summary line
-         or MR title.
-  discriminator:
-    model: grok
-    applies_to: [src/modules/**, src/bin/**, external_tests/**]
-    # Policy sources (YAML comments; not sent to the model):
-    # - Passive historical diagnosis; patch link ≠ presence: !388#note_69138699
-    #   and !388#note_69408274 (jszu)
-    # - NVIDIA/target kernel before ABI claims: !368#note_66839797 (icheng)
-    # - linux-nvidia reference retained from devel (DGX-18014)
-    # - Cited PATCH SHA ≠ missing patch; resolve cherry-picks on the pin:
-    #   !379#note_69658586 (icheng)
+      3. Report only rules that are explicit or backed by multiple relevant
+         examples; cite evidence and the smallest compliant change. Do not infer
+         from one unrelated file, impose personal taste, request broad
+         refactoring, or repeat generic correctness/security/pylint review.
+      4. Anchor every finding to a changed GreenLiT line (current MR head only),
+         except commit-message findings, which anchor to the offending summary
+         line or MR title.
+  test-design:
+    model: gemini-argon
+    applies_to: [src/modules/**, src/bin/**, external_tests/**, tests/modules/**]
+    # Policy sources (paired 1:1 with numbered items in `instructions: |`; not sent to the model):
+    # [Reuse before new code]
+    #   1. [restatement] Search src/common/ (and same module) for existing production helpers; promoting duplicated sibling src/modules/ helpers into src/common/ is owned by common-helper-contracts ← !395#note_73569105, !395#note_73569127, !395#note_73569100, !395#note_73569069 (icheng), !400#note_72319973, !400#note_72319975 (icheng), !374#note_65709611 (icheng), !375#note_65700692 (icheng), !379#note_70122206 (kobak), !413#note_85450128 (achi)
+    #      except [restatement] Inspect tests/ for contracts/fixtures only; never import tests/ in src/ ← !413#note_78756947 (jszu)
+    #   2. [policy] Name the existing function and file under src/common/ (or same module) when requesting direct reuse ← !413, !413#note_85450128 (achi)
+    #   3. [policy] Do not add single-use or unittest-only forwarding wrappers ← f8c2722, !392#note_73017297 (achi)
+    # [Test flow]
+    #   1. [restatement] Keep testcase-specific inspect/mutate/verify/restore flows inline; do not add forwarding wrappers ← !392#note_73017297, !392#note_73017302 (achi)
+    #      except [policy] Judge helpers by interface, not caller count; allow deliberate generic APIs with one caller ← 81c71293, !413#note_78756939 (jszu)
+    #   2. [restatement] Call skip()/warn()/fail() directly in @GLTCore.GLTTestAttr() body rather than returning status tuples or verdict dataclasses solely to dispatch (GLT001 helper-call placement is owned by convention) ← !374#note_65882453, !375#note_65700689 (icheng), 81c71293, !413#note_78756958 (jszu), !413#note_85450133 (achi)
+    #   3. [restatement] Kernel probes (*.c): no sleeping calls under locks; prefer in-kernel device iteration over per-BDF insmod/rmmod loops ← !417#note_77039906, !417#note_77039913 (kaihengf)
+    # [State capture and restore]
+    #   1. [restatement] MUST snapshot exact prior state before the first mutation and restore that exact prior state (not hard-coded defaults), undoing only performed mutations ← !387#note_70119119 (icheng), !395#note_71542808 (icheng), !372#note_65247540 (kobak), !413#note_78756972 (jszu), !413#note_85450131 (achi)
+    #   2. [restatement] Separate in-process try/finally unwinding, os._exit() signal exit, and reboot/resume recovery ← !413#note_78756929 (jszu), 81c71293
+    #   3. [policy] Arm restoration only after the mutation actually happened (so a rejected first write does not trigger a second mutation) ← !387#note_68757405 (bot resolution; contrast crash-recovery arming before write in !378#note_67320639, kobak)
+    #   4. [restatement] Collect cleanup errors only when needed; restoration failure after a passing test is FAIL ← 81c71293, !368#note_65247522 (kobak), !383#note_71787276 (kobak), !369#note_66533608 (kobak)
+    # [Test dependencies and gating]
+    #   1. [restatement] MUST use @GLTCore.GLTRequires.must_pass() instead of repeating shared prerequisite checks ← !392#note_73017293, !392#note_73017295 (achi), !404#note_73625474 (icheng: MUST), 81c71293
+    #      except [policy] Retain follow-up-specific checks and independent diagnostics ← 81c71293
+    #   2. [restatement] Gate on capability/feature probe rather than platform/SoC name ← !387#note_69961189 (achi), !386#note_69652658 (icheng), !388#note_69369912 (achi)
+    #   3. [restatement] Check cheap platform/config prerequisites before expensive work ← !374#note_65739004 (achi), !388#note_69369915 (achi), 8c10f07
+    #      except [restatement] Do not move a gate earlier if it discards accepted historical evidence ← !388#note_69397544 (jszu), 8c10f07
+    # [Existing coverage]
+    #   1. [restatement] Compare the selected case and observable result against repository tests and kselftests included in test cycles ← docs/developer-docs/writing-test-cases.md, !337#note_61626576, !207#note_46795033, !413#note_88083955
+    # [Unit coverage]
+    #   1. [restatement] Request tests/modules/ behavior/contract tests through decorated entrypoint with mocked I/O ← !363#note_64678026 (icheng), 8c10f07
+    #   2. [restatement] Never demand direct unit tests of module-private helpers, parsers included ← !373#note_67661365 (icheng), !378#note_69420813 (kobak), !379#note_70178228 (kobak), !413#note_78713672 (kaihengf) (reverses 8c10f07 after 20+ dismissed bot findings)
+    #      except [policy] Preserve existing direct parser tests under tests/modules/ ← 8c10f07, !413#note_78713672 (kaihengf)
+    #   3. [restatement] Do not require wrapper extraction or implementation-mirroring tests; allow documented hardware-validation path ← !363#note_64678026 (icheng), 8c10f07
+    # [Reporting and scope]
+    #   1. [policy] Cite repo file and function; anchor every finding to a changed line ← cf3b69c, !413
+    #   2. [policy] Do not duplicate convention, discriminator, or common-helper-contracts checks ← !413
     instructions: |
+      Review the changed test modules for test design. Owned checks (scope
+      boundaries, not a finding quota; submit zero findings when the diff
+      complies):
+
+      Reuse before new code:
+      1. Before accepting a new helper or an inline reimplementation, search
+         `src/common/` (and the same module) for an existing production helper
+         with the same job (inspect `tests/` for existing contracts, fixtures,
+         and coverage, but never ask production code to import test-only
+         helpers from `tests/`; promoting duplicated helpers across sibling
+         `src/modules/` files into `src/common/` is owned by
+         `common-helper-contracts`): subprocess execution
+         (`glt_utils.run_command(command, failure_message, timeout=...)`), sysfs
+         reads (`glt_utils.read_sysfs_value`), PCI, CXL, resctrl and perf
+         utilities, lock files, module load and verify, stress workloads,
+         kallsyms probes.
+      2. When a production helper under `src/common/` (or the same module)
+         fits, name the existing function and file and ask for it to be used.
+      3. Do not add single-use or unittest-only wrappers that only forward to
+         another helper—inline or test the underlying function.
+
+      Test flow:
+      1. Judge each helper by its interface, not its caller count. A helper is
+         justified when it has a generic, testcase-independent interface with
+         clear inputs, outputs, and error behavior, and the author places it
+         deliberately as module-private, shared in `src/common/`, or inline in
+         the decorated testcase. Flag a helper when it only fragments a
+         testcase-specific inspect/mutate/verify/restore flow or only forwards
+         to another helper. Do not flag a helper on caller count alone.
+      2. Within the body of a function decorated with `@GLTCore.GLTTestAttr()`,
+         call `skip()`, `warn()`, or `fail()` directly as soon as the condition
+         is known rather than returning status/reason tuples, verdict
+         dataclasses, or tri-state booleans solely for the caller to dispatch.
+      3. In kernel probe modules (`src/modules/**/*.c`), flag sleeping calls
+         (`unregister_kprobe`, `unregister_kretprobe`, `mutex_lock`) inside
+         atomic sections or while holding device, config-space, or rescan locks,
+         and prefer in-kernel device iteration over userspace discovery plus
+         per-BDF `insmod`/`rmmod` loops.
+
+      State capture and restore:
+      1. A test that mutates kernel or device state (resctrl groups and
+         schemata, cpufreq or boost, module load, sysfs writes, mount options)
+         MUST snapshot the exact prior state before the first mutation and
+         restore that exact prior state—not a hard-coded cleanup default (for
+         example, if the cpufreq governor was `powersave` before the test
+         selects `performance`, restore `powersave` rather than an assumed
+         default; restore recorded resctrl group membership and mount options
+         rather than moving everything to the default group)—undoing only
+         mutations the test actually performed.
+      2. Separate three cleanup paths:
+         - In-process unwinding—normal return, `skip()`/`fail()` exceptions, and
+           child-process timeouts or other exceptions raised in the
+           testcase—keep restoration in `try/finally`.
+         - Terminating the suite via signal calls `os._exit()`, which bypasses
+           both `finally` and outcome post-hooks.
+         - Planned reboot/resume or interrupted runs where mutated state
+           persists across process exit: preserve documented post-hook and
+           reboot/resume recovery contracts rather than presenting outcome
+           post-hooks alone as sufficient for interrupted runs.
+      3. Arm in-process restoration only after the mutation actually happened, so
+         a rejected first write does not trigger a second mutation (durable
+         crash/reboot-recovery records may still be written before mutation).
+      4. Collect cleanup errors only when needed, and report a restoration
+         failure after an otherwise passing test as a failure.
+
+      Test dependencies and gating:
+      1. Look for follow-up testcases that repeat prerequisite checks already
+         established by another testcase. When the follow-up requires that
+         testcase to pass, it MUST use
+         `@GLTCore.GLTRequires.must_pass(category, testcase)` and remove only
+         checks guaranteed by its PASS. Check skip/fail propagation and retain
+         follow-up-specific or mutable-state checks. Do not add dependencies
+         that suppress independently useful coverage or diagnostics needed after
+         a prerequisite fails or skips.
+      2. Gate on a capability or kernel feature probe, not on a platform or SoC
+         name, unless the fix itself is platform-scoped.
+      3. Check cheap, necessary platform/config prerequisites before module
+         loading, builds, mutation, reboots, or expensive collection. Do not
+         move a gate earlier if that discards historical evidence required by an
+         explicitly accepted diagnostic contract.
+
+      Existing coverage:
+      1. Check existing GreenLiT tests, including standalone tests in
+         `external_tests/`, and upstream kselftests included in the relevant
+         test cycle. For a kselftest or perf wrapper, identify the selected
+         case, the configuration in which it runs, and how the same failure
+         reaches the result. Cite that evidence before asking to drop
+         duplicate coverage. For partial overlap, identify the distinct
+         behavior the proposed test adds.
+
+      Unit coverage:
+      1. Request `tests/modules/` tests for concrete uncovered
+         hardware-independent behavior or contracts of the decorated testcase
+         exercised through mocked I/O, including failure paths, parsing, and
+         multi-candidate selection—not every module-private helper or
+         implementation branch merely because it exists.
+      2. Never demand direct unit tests of module-private helpers, parsers
+         included; test them through the decorated testcase or existing test
+         seams, while preserving existing direct parser tests.
+      3. Do not require wrapper extraction or implementation-mirroring tests.
+         Hardware-dependent cases may use the documented targeted-review or
+         hardware-validation path.
+
+      Reporting and scope:
+      1. Report only findings backed by evidence in the repository; name the
+         file and function. Anchor every finding to a changed line.
+      2. Do not repeat header, commit, tag, or pylint checks, kernel fix
+         discrimination, or shared-helper API review: where a shared helper
+         should live and how it fails belongs to `common-helper-contracts`.
+  discriminator:
+    model: gemini-argon
+    applies_to: [src/modules/**, src/bin/**, external_tests/**]
+    # Policy sources (paired 1:1 with numbered items in `instructions: |`; not sent to the model):
+    # [Testcase contract]
+    #   1. [policy] Establish contract from project docs and testcase result semantics ← 8c10f07
+    #   2. [restatement] Passive retained-journal diagnostics accepted when declared; patch link ≠ patch presence ← !388#note_69138699, !388#note_69408274 (jszu), 8c10f07
+    #   3. [policy] For patch-discrimination claims, derive simplest complete discriminator (not applied to passive diagnostics) ← 7630142, 8c10f07
+    # [Target kernel scope]
+    #   1. [restatement] Establish declared kernel repo, branch/version, and hardware scope before ABI mismatch claims ← !368#note_66839797 (icheng), 8c10f07
+    #   2. [restatement] Upstream history is ancestry, not NVIDIA/backport ABI; report insufficient evidence when target evidence is absent ← !368#note_66839797 (icheng), 8c10f07
+    #   3. [policy] Distinguish upstream and backport hashes explicitly; reference declaration ≠ target match ← 8c10f07, b2f0f72
+    # [Fixed-versus-unfixed boundary]
+    #   1. [policy] Inspect linux-nvidia for downstream target and linux-mainline for upstream provenance ← b2f0f72
+    #   2. [policy] Translate complete fix into smallest externally observable invariant without mirroring patch structure ← 7630142
+    #   3. [policy] State series/ABI/single-commit scope and align fail/comment/Makefile hashes to target kernel ← f8c2722, b2f0f72
+    #   4. [policy] Partial-fix kernels in multi-commit causal series must still fail ← cf3b69c, f8c2722
+    #   5. [policy] Prefer git_log (grep/path) and git_show over unscoped rg ← 14ffcd3
+    # [Patch SHA resolution]
+    #   1. [restatement] Non-ancestor PATCH SHA ≠ missing patch ← !379#note_69658586 (icheng), 7d9a4d3
+    #   2. [policy] Bound lookup to <=2 calls per cited SHA + confirmation git_show on 40-hex target match (never pass <40-hex prefixes to git_show) ← !426#note_78707988 (kaihengf), 14ffcd3, !413
+    #   3. [restatement] Confirm pinned-target 40-hex matches with git_show; off-pin commits do not establish target presence ← 7d9a4d3, !413#note_78758712 (jszu)
+    #   4. [policy] Never run pathless list_tree/rg on kernel trees or repeat failed/timed-out calls ← 14ffcd3, !413
+    #   5. [restatement] Ask to name verified target-pin ancestor hash when found; report insufficient evidence when unresolved ← 7d9a4d3, !383#note_72052228 (icheng), !401#note_72301237 (kaihengf), !413
+    #   6. [restatement] Cite only the pin or a verified ancestor; never invent hashes or treat mainline docs as NVIDIA ABI ← 7d9a4d3, !413#note_78758712 (jszu)
+    # [Trigger execution]
+    #   1. [policy] Verify kernel path under test actually ran (e.g. runtime-resume callback vs already-active device) ← f8c2722
+    #   2. [restatement] Select affinity-bound (PMU, CPU) pairs jointly ← f8c2722, !413#note_78758721 (jszu)
+    #   3. [restatement] Do not false-SKIP on driver-bound devices or over-built CONFIG_LTO_NONE/CONFIG_KPROBES gates ← !417#note_77039888, !417#note_77039886 (kaihengf)
+    #   4. [policy] Reuse existing _validate_*_prerequisites() helpers ← f8c2722
+    # [Result and log semantics]
+    #   1. [restatement] Missing data the fix provides is FAIL, not SKIP ← !376#note_66869119 (achi), !401#note_72301249 (kaihengf)
+    #   2. [policy] Log-shape tests require needed CONFIG_* options (warn/skip when absent) and fail fast on unparseable kconfig ← f8c2722
+    #   3. [restatement] Scope active-test log windows to current attempt ← f8c2722, !413#note_78758623 (jszu)
+    #      except [restatement] Preserve full-boot log window for accepted historical diagnostics ← !388#note_69138699 (jszu), !413#note_78758623 (jszu)
+    #   4. [restatement] Require workload completion without timeout and check workload exit codes ← f8c2722, !413#note_78758623 (jszu)
+    # [Non-vacuity and mutants]
+    #   1. [policy] Require explicit non-vacuity check before asserting PASS ← cf3b69c, f8c2722
+    #   2. [policy] Ask whether a mutant (partial fix, first-entry parser, 1-CPU mask, one-shot sample) still PASSes ← !413 (generalized from !405#note_73661548, bot; !379#note_70122193, kobak; !383#note_71793251, kobak)
+    #   3. [policy] Flag silent error swallowing or skipped sync that reduces exercised work to zero ← f8c2722
+    #   4. [policy] Flag out-of-scope triggers relative to the claimed fix ← f8c2722
+    #   5. [policy] Flag environment/feature interactions masking patched kernels (prefer skip/warn over false FAIL) ← f8c2722
+    # [Observation hierarchy]
+    #   1. [policy] Prefer direct kernel state/ABI > behavioral trigger > tracepoint/counter > logs > timing ← cf3b69c, 7630142
+    #   2. [restatement] Prefer direct kernel struct/save-buffer inspection over kprobing internal functions in *.c ← !417#note_77039886 (kaihengf)
+    # [Candidate comparison and scope]
+    #   1. [policy] Compare against strongest simpler candidate meeting full fixed/unfixed/partial-fix/non-vacuity/environment bar ← cf3b69c, 7630142
+    #   2. [policy] Prefer native src/modules/ Python tests over external_tests/ wrappers when framework fits ← 7630142
+    #   3. [policy] Recommend a different approach only for equal/stronger discrimination with materially lower complexity ← cf3b69c, 7630142
+    #   4. [policy] Report insufficient evidence rather than inventing an unestablished boundary ← cf3b69c
+    #   5. [policy] Anchor findings to changed GreenLiT lines and do not re-raise answered findings without new evidence ← cf3b69c, !413
+    instructions: |
+      Owned checks (scope boundaries, not a finding quota; submit zero findings
+      when the diff complies):
+
       Testcase contract:
       1. Establish the testcase contract from project documentation and the
          testcase result semantics: patch discrimination, behavioral validation,
@@ -206,7 +404,6 @@ lenses:
          patch-presence test that replaces that contract. Still report
          unreadable evidence treated as success, incorrect attribution, or
          claims about current-kernel patch state unsupported by the observation.
-
       3. For a testcase claiming patch discrimination, step back from the
          implementation and determine the simplest reliable way to discriminate
          whether the complete claimed fix is present in the running kernel. The
@@ -239,58 +436,109 @@ lenses:
          Makefile notes to the relevant target-kernel hashes.
       4. When the claimed fix spans multiple causal commits, ensure relevant
          partial-fix kernels still fail.
+      5. Prefer `git_log` with `grep`/`path` for history questions and
+         `git_show` for a specific commit; `rg` is for the project's own files
+         or a kernel subtree named by `path`.
 
       Patch SHA resolution:
       1. When a cited PATCH SHA is not an ancestor of the pinned target
-         reference, do not conclude the patch is absent. Search only that pin
-         (commit subject, cherry-pick footer, or the same hunk) for an
-         equivalent object. If one exists, the fix is present on the target:
-         ask the test to name that target-ref hash in PATCH/fail text, and do
-         not claim the fixed/unfixed boundary cannot be established. If none
-         exists, report insufficient evidence rather than patch absence.
-      2. Cite only the pin or an ancestor; do not invent a hash or use
-         linux-mainline documentation as the NVIDIA ABI.
+         reference, do not conclude the patch is absent.
+      2. Resolve it with at most two lookup calls per cited SHA (searching
+         target equivalence only on the pinned target reference), plus one
+         confirmation `git_show` when `git_log` returns a 40-hex target match
+         (`git_show` requires a full 40-hex SHA; never pass an abbreviated
+         `<40`-hex prefix to `git_show`, as the tools cannot rev-parse short
+         SHAs directly):
+         - First lookup: when the cited SHA is 40-hex and its subject is not
+           already stated in the test or MR, call `git_show` on linux-mainline
+           to learn its subject (`linux-mainline` tracks `master` only, not
+           stable or `linux-next` branches, so a missing revision there is
+           insufficient evidence rather than proof the commit does not
+           exist—note it and move on); when the cited SHA is `<40`-hex, skip
+           `git_show` on linux-mainline.
+         - Second lookup: call `git_log` on linux-nvidia at its pinned target
+           reference (omit `revision` so `git_log` walks only the target pin's
+           ancestry; pass `path` when the touched kernel file is known) with
+           `grep` set to the bare hex prefix (at least 8 hex, 12+ when
+           available) of the SHA and/or the exact stated subject (cherry-pick
+           footers read "cherry picked from commit <sha>", "backported from",
+           or "upstream commit <sha>"; one regex covers them).
+      3. When that pinned-target log returns a 40-hex match, read it with
+         `git_show` on linux-nvidia to confirm equivalence; reading an arbitrary
+         commit outside the target pin's ancestry does not establish that the
+         target contains the fix.
+      4. Never `list_tree` or `rg` a kernel tree without `path`, and never
+         repeat a call that already failed or timed out.
+      5. If an equivalent ancestor on the target pin exists, the fix is present
+         on the target: ask the test to name that target-ref hash in PATCH/fail
+         text, and do not claim the fixed/unfixed boundary cannot be
+         established. If none is resolved after those calls (including an
+         unresolved `<40`-hex prefix without a cherry-pick footer, a commit off
+         `linux-mainline` `master`, or a timed-out `git_log` walk), report
+         insufficient evidence rather than patch absence.
+      6. Cite only the pin or a verified ancestor of the pin; do not invent a
+         hash or use linux-mainline documentation as the NVIDIA ABI.
 
       Trigger execution:
-      1. Before accepting a behavioral trigger as proof, verify the kernel
-         path under test actually executed (e.g. a runtime-resume callback
-         ran—not merely `pm_runtime_get_sync()` on an already-active device).
-      2. When discrimination depends on device state, read the relevant sysfs
-         state (e.g. `power/runtime_status`) before triggering; warn or skip
-         when the state cannot guarantee the callback.
-      3. Select affinity-bound hardware (PMU, CPU) as a joint usable (device,
+      1. Before accepting a behavioral trigger as proof, verify the kernel path
+         under test actually executed (e.g. a runtime-resume callback ran—not
+         merely `pm_runtime_get_sync()` on an already-active device). When
+         discrimination depends on device state, read the relevant sysfs state
+         (e.g. `power/runtime_status`) before triggering; warn or skip when the
+         state cannot guarantee the callback.
+      2. Select affinity-bound hardware (PMU, CPU) as a joint usable (device,
          CPU) pair, not the first device then a failing CPU pick.
+      3. Flag candidate filters or observer gates that false-SKIP on
+         driver-bound devices when locks and D0 checks already make observation
+         safe, or gate on `CONFIG_LTO_NONE`/`CONFIG_KPROBES` only because the
+         observer was over-built.
       4. Reuse existing `_validate_*_prerequisites()` helpers rather than
          inlining CONFIG/HW gates.
 
       Result and log semantics:
-      1. When discrimination depends on kernel log shape (function names,
-         lockdep splats), require the needed `CONFIG_*` options and return
-         warn or skip when they are missing—a clean log with incomplete
-         observer configuration is non-conclusive and must not PASS. Fail fast
-         when the running kconfig cannot be parsed for a log-matching test.
-         Scope log windows to the attempt; do not search the entire boot log
-         for prior-run contamination. Do not swallow subprocess timeouts or
+      1. When the data the fix is supposed to provide is missing, that is the
+         unfixed signature and must FAIL; do not recommend SKIP for it.
+      2. When discrimination depends on kernel log shape (function names,
+         lockdep splats), require the needed `CONFIG_*` options and return warn
+         or skip when they are missing—a clean log with incomplete observer
+         configuration is non-conclusive and must not PASS. Fail fast when the
+         running kconfig cannot be parsed for a log-matching test.
+      3. Scope active-test log windows to the current attempt (preserving the
+         exception for accepted historical diagnostics); do not search the
+         entire boot log for prior-run contamination.
+      4. Require the intended workload to complete without timeout rather than
+         accepting partial timed-out output as PASS unless incomplete execution
+         is explicitly part of the oracle; do not swallow subprocess timeouts or
          ignore workload exit codes when parsing output.
 
-      Non-vacuity:
+      Non-vacuity and mutants:
       1. Require an explicit non-vacuity check that the trigger path ran
          (counter increment, expected exit code, target transition count,
          tracepoint hit) before asserting PASS.
-      2. Flag silent error swallowing or skipped sync that can reduce exercised
+      2. Ask explicitly whether a plausible wrong implementation would still
+         PASS (a kernel with only part of the series, a parser that stops at the
+         first unrelated entry, a mask that accepts a single CPU, or a one-shot
+         sample that happens to look right); where yes, name the mutant and the
+         assertion that would catch it.
+      3. Flag silent error swallowing or skipped sync that can reduce exercised
          work to zero while still allowing PASS.
-      3. Flag probes that use out-of-scope triggers relative to the claimed
-         fix (e.g. wrong memslot path when the fix is in-slot). Also flag
-         environment or feature interactions that make a fully patched kernel
-         look unfixed (e.g. ATS stall/S2S masking the expected hitless
+      4. Flag probes that use out-of-scope triggers relative to the claimed fix
+         (e.g. wrong memslot path when the fix is in-slot).
+      5. Flag environment or feature interactions that make a fully patched
+         kernel look unfixed (e.g. ATS stall/S2S masking the expected hitless
          outcome)—prefer skip or warn with a clear reason over false FAIL.
 
-      Observer design:
+      Observation hierarchy:
       1. Consider multiple observations, preferring a direct stable kernel state
          or ABI; then a direct behavioral trigger and outcome; then an existing
          tracepoint, counter, or established diagnostic interface; then logs or
          indirect instrumentation; and only lastly timing, sleeps, background
          orchestration, or heuristic inference.
+      2. In kernel probe modules (`src/modules/**/*.c`), prefer inspecting
+         kernel structs or poisoning save buffers directly over kprobing
+         internal functions or config-space accessors (`pt_regs` decoding,
+         `CONFIG_KPROBES`/`CONFIG_KRETPROBES`/`CONFIG_LTO_NONE` gates,
+         missed-instance failure modes).
 
       Candidate comparison and scope:
       1. Compare the proposed test with the strongest simpler candidate. A valid
@@ -300,14 +548,11 @@ lenses:
          hardware, configuration, timing, logging, or implementation
          assumptions; work in GreenLiT's supported execution environment; and
          minimize dependencies, setup, cleanup, privileges, and race windows.
-
       2. For tests contributed to GreenLiT, prefer a native Python test case
-         under src/modules/ over an external_tests/ wrapper when the logic can
-         use the GreenLiT framework. Accept an external test when it is
+         under `src/modules/` over an `external_tests/` wrapper when the logic
+         can use the GreenLiT framework. Accept an external test when it is
          genuinely a standalone or third-party test, or a justified short-term
-         staging path, and the external form does not weaken the
-         discriminator.
-
+         staging path, and the external form does not weaken the discriminator.
       3. Recommend a different approach only when evidence demonstrates equal or
          stronger discrimination with materially lower complexity. Explain the
          simpler observable and the smallest viable test structure. Do not
@@ -316,25 +561,58 @@ lenses:
          finding.
       4. If the boundary cannot be established, report insufficient evidence
          rather than inventing one.
-      5. Anchor every actionable finding to a changed GreenLiT line.
+      5. Anchor every actionable finding to a changed GreenLiT line, and do not
+         re-raise a finding a maintainer has answered without new evidence.
     references: [linux-mainline, linux-nvidia]
   common-helper-contracts:
     model: gemini-flash
     applies_to: [src/**, tests/**]
-    # Policy sources (YAML comments; not sent to the model):
-    # - Call helpers directly and mock where looked up; drop test-only callable
-    #   parameters (read_file/write_file/module probes), keep meaningful inputs
-    #   like workqueue_roots: !392#note_73017288, !392#note_73017294,
-    #   !392#note_73017299, !392#note_73017301 and !392#note_73017305 (achi)
-    # - Check helper return contracts before extra normalization, e.g.
-    #   read_sysfs_value() already strips: !392#note_73017308 (achi)
+    # Policy sources (paired 1:1 with numbered items in `instructions: |`; not sent to the model):
+    # [Carve-outs]
+    #   1. [policy] Reuse or move duplicated/existing general-purpose helpers into src/common/ ← cf3b69c, f8c2722
+    #   2. [policy] Promote to src/common/ on a second real caller or drifted PCI/CXL copies ← f8c2722
+    # [Test hooks]
+    #   1. [restatement] Call existing helpers directly and mock where looked up ← !392#note_73017288, !392#note_73017294, !392#note_73017301, !392#note_73017305 (achi), 81c71293
+    #   2. [restatement] Drop callable params/defaults added solely for test injection ← !392#note_73017288, !392#note_73017299 (achi), 81c71293
+    #   3. [restatement] Retain meaningful runtime inputs (e.g. workqueue_roots) and real runtime DI ← !392#note_73017299 (achi), 81c71293
+    # [Helper return contracts]
+    #   1. [restatement] Inspect helper implementation/contract (return types, normalization, sentinels, errors) before judging caller ← !392#note_73017308 (achi), 81c71293
+    #   2. [restatement] Remove repeated normalization/validation guaranteed by helper; retain caller-contract checks ← !392#note_73017308 (achi), 81c71293
+    #   3. [policy] Apply to all helpers; do not infer behavior from name or demand redundant checks ← 81c71293
+    # [Fail-closed probes]
+    #   1. [policy] Probes feeding destructive/isolation-sensitive ops fail closed on I/O error ← f8c2722, !413
+    #   2. [policy] Document unreadable /proc/sysfs semantics and propagate non-absence errors ← f8c2722
+    #   3. [restatement] Do not apply fail-closed to read-only observers whose result only decides whether to mount or inspect ← !311#note_63257585 (nirmoyd), !370#note_64415203 (icheng)
+    #   4. [restatement] Scope host-wide enumeration errors (lspci -Dvv, sysfs walks) to the target device ← !417#note_77039897 (kaihengf)
+    # [API surface]
+    #   1. [policy] Prefix non-external helpers with _ unless externally called or documented entry point ← f8c2722
+    #   2. [policy] Prefer domain-specific names (read_sysfs_value) over premature generic file helpers ← f8c2722
+    #   3. [policy] Prefer official CLIs (virsh) over thin Python wrappers unless libvirt-python capability required ← f8c2722
+    #   4. [policy] Drop zero-caller public methods and unused members unless documented future API ← f8c2722
+    # [Version resolvers]
+    #   1. [restatement] Exact uname -r match preference, missing running-kernel binary priority, and package revision stripping ← f8c2722, !413#note_78758640 (jszu)
+    #   2. [restatement] Do not flag NVIDIA linux-tools-* or kernel_release layouts without MR/tests/common/ evidence ← f8c2722, !413#note_78758640 (jszu)
+    # [Session/resume]
+    #   1. [restatement] Match parse_session_summary() Summary detection (isinstance(..., dict)) ← f8c2722, !413#note_78758655 (jszu)
+    #   2. [restatement] Catch OSError/JSONDecodeError on progress/session I/O ← f8c2722, !413#note_78758655 (jszu)
+    #   3. [restatement] Avoid half-mutated scheduler state on error (transactional or documented/tested partial mutation) ← f8c2722, !413#note_78758655 (jszu)
+    # [Unit isolation]
+    #   1. [restatement] Mock external host/device and KVM/libvirt/kselftest boundaries in tests/common/ while allowing temporary files and isolated local harnesses ← !413#note_78758671 (jszu; narrows f8c2722)
+    #   2. [policy] Assert helper contracts rather than third-party stack behavior ← f8c2722
+    #   3. [policy] Preserve skip/fail semantics when extracting helpers ← f8c2722
+    #   4. [policy] Require explicit timeouts on subprocess and boot-path mutations that can block ← f8c2722
+    # [Reporting and scope]
+    #   1. [policy] Anchor findings to changed GreenLiT lines; do not impose pylint style preferences ← cf3b69c, f8c2722
     instructions: |
       Review shared-helper safety, API contracts, and carve-outs across
       `src/**` and `tests/**`—including module-local helpers that belong in
-      `src/common/`.
+      `src/common/`. The `test-design` lens owns "reuse the existing helper" in
+      test modules; this lens owns what a shared or newly shared helper looks
+      like and how it fails. Owned checks (scope boundaries, not a finding
+      quota; submit zero findings when the diff complies):
 
       Carve-outs:
-      1. when a change introduces or expands a general-purpose helper
+      1. When a change introduces or expands a general-purpose helper
          (sysfs/log/`setpci`/CPU-list parsing, route/mount isolation probes,
          etc.) that already exists in `glt_utils`/`pci_utils`/`perf_utils` or
          that a second module already duplicates, recommend moving or reusing
@@ -343,7 +621,7 @@ lenses:
          when PCI/CXL copies have already drifted.
 
       Test hooks:
-      1. call existing helpers directly and mock them where they are looked up
+      1. Call existing helpers directly and mock them where they are looked up
          in unit tests.
       2. Prefer removing callable parameters/defaults introduced solely for test
          injection when no production caller needs alternative behavior,
@@ -352,29 +630,35 @@ lenses:
          injection with a real runtime use or documented contract.
 
       Helper return contracts:
-      1. for every helper call, inspect the implementation or documented
+      1. For every helper call, inspect the implementation or documented
          contract before judging how its result is used. Check return types,
-         normalization, sentinel values, and error behavior against the
-         caller's handling.
+         normalization, sentinel values, and error behavior against the caller's
+         handling.
       2. Remove repeated normalization or validation already guaranteed by the
          helper; retain checks required by the caller's own contract.
       3. Apply this to all helpers, not only I/O helpers. Do not infer behavior
          from a helper's name or demand redundant checks on every result.
 
       Fail-closed probes:
-      1. helpers that feed destructive or isolation-sensitive operations (FLR,
-         vfio bind, kexec, firmware reset, DPC blast-radius checks)—whether
-         defined in `src/common/` or inlined in a test module— must not treat
-         I/O failure as an empty success set. Return a distinct error/`None`
-         (or raise) so callers refuse or skip; mirror `default_route_ifaces()`
-         / `mounted_block_devices()` and the fail-closed pattern in
-         `glt_test_pci._resolve_and_validate_target()`.
+      1. Helpers that feed destructive or isolation-sensitive operations (FLR,
+         vfio bind, kexec, firmware reset, DPC blast-radius checks, device
+         unbind)—whether defined in `src/common/` or inlined in a test
+         module—must not treat I/O failure as an empty success set. Return a
+         distinct error/`None` (or raise) so callers refuse or skip; mirror
+         `default_route_ifaces()` / `mounted_block_devices()` and the
+         fail-closed pattern in `glt_test_pci._resolve_and_validate_target()`.
       2. Document whether unreadable `/proc` or sysfs means "no data" versus
          "cannot validate". Propagate non-absence errors such as
          `PermissionError`; do not swallow them as empty results.
+      3. Do not apply this rule to read-only observers whose result only decides
+         whether to mount or inspect.
+      4. Scope strict or fail-closed errors in host-wide enumerations
+         (`lspci -Dvv`, sysfs walks) to the target device rather than failing
+         when an unrelated device on the host is unreadable or prints
+         `<access denied>`.
 
       API surface (especially `src/common/**`):
-      1. prefix with `_` unless there is a real external caller or an explicit
+      1. Prefix with `_` unless there is a real external caller or an explicit
          project-wide entry point docstring.
       2. Prefer domain-specific names (`read_sysfs_value`) over premature
          generic file helpers.
@@ -384,7 +668,7 @@ lenses:
          unless documented as intentional future API.
 
       Version resolvers (`perf_utils`, `glt_utils`):
-      1. prefer exact `uname -r` match before compatible fallback; prioritize
+      1. Prefer exact `uname -r` match before compatible fallback; prioritize
          "no binary for running kernel" over stale adjacent-version mismatch;
          strip package revision suffixes before comparison.
       2. Do not flag NVIDIA `linux-tools-*` directory-name matching or
@@ -392,15 +676,16 @@ lenses:
          `tests/common/`.
 
       Session/resume (`glt_core`):
-      1. use the same Summary detection as `parse_session_summary()`
-         (`isinstance(..., dict)`); catch `OSError`/`JSONDecodeError` on
-         progress/session I/O; avoid half-mutated scheduler state on
-         error—apply transactionally or document and unit-test the
-         partial-mutation contract.
+      1. Use the same Summary detection as `parse_session_summary()`
+         (`isinstance(..., dict)`).
+      2. Catch `OSError`/`JSONDecodeError` on progress/session I/O.
+      3. Avoid half-mutated scheduler state on error—apply transactionally or
+         document and unit-test the partial-mutation contract.
 
-      Unit isolation:
-      1. `tests/common/` covers shared helper units with mocked I/O only—no
-         live KVM/libvirt/kselftest integration.
+      Unit isolation (`tests/common/`):
+      1. Cover shared helper units with mocked external host, device, and
+         KVM/libvirt/kselftest boundaries—no live hardware or service
+         integration (temporary files and isolated local harnesses are fine).
       2. Assert helper contracts, not third-party stack behavior.
       3. Preserve skip/fail semantics when extracting helpers (`cxl_utils`,
          etc.).
@@ -413,21 +698,34 @@ lenses:
   discovery:
     model: gemini-flash
     applies_to: [src/greenlit/**, tests/greenlit/**]
+    # Policy sources (paired 1:1 with numbered items in `instructions: |`; not sent to the model):
+    # [Import-time isolation]
+    #   1. [policy] Category discovery must not import src/modules/** before the intended phase ← cf3b69c, f8c2722
+    # [Prerequisite scoping and rename resume]
+    #   1. [policy] Scope YAML rules and runnable sets to exact prerequisite test IDs ← f8c2722
+    #   2. [policy] Plan or tag renames require a documented resume path for old sessions (e.g. legacy sanity plan) ← e24cfe5, !371#note_65313022 (bot)
+    # [Unit coverage]
+    #   1. [policy] Require tests/greenlit/ unit coverage for hardware-independent CLI/discovery/resume changes ← cf3b69c, f8c2722
+    # [Reporting and scope]
+    #   1. [policy] Anchor findings to changed GreenLiT lines; report insufficient evidence rather than inventing scheduler semantics ← cf3b69c, f8c2722
     instructions: |
       Review GreenLiT CLI scheduling, category/test-case discovery, resume, and
-      YAML config application.
+      YAML config application. Owned checks (scope boundaries, not a finding
+      quota; submit zero findings when the diff complies):
 
-      Category discovery:
+      Import-time isolation:
       1. Category discovery must not import `src/modules/**` test modules before
          the intended phase. Flag new import-time registration or decorators
          with side effects during filesystem enumeration. (Module-local
          ABI/endian import raises are owned by the `convention` lens.)
 
-      Prerequisite scoping:
+      Prerequisite scoping and rename resume:
       1. When `--test-case` or category selection pulls prerequisite tests from
          another category, ensure `apply_glt_configs()` and scheduler filtering
          scope YAML rules and runnable sets to exact test IDs—not whole
          prerequisite categories.
+      2. Plan or tag renames need a documented resume path for sessions recorded
+         under the old name.
 
       Unit coverage:
       1. Require `tests/greenlit/` unit coverage for hardware-independent
