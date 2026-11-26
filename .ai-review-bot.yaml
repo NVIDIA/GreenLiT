@@ -58,109 +58,130 @@ lenses:
 
       Owned checks:
 
-      Placement and packaging: file location and naming; SPDX/copyright
-      headers; registration in manifests, test plans, decorators, package
-      metadata, or docs. Native C helpers and Makefiles belong under
-      `src/modules/<category>/<native-helper>/`, not loose under
-      `external_tests/`, unless genuinely third-party. Examples must be
-      copy-paste runnable; agent-facing MUST/MUST NOT instructions belong in
-      AGENTS.md; version bumps update VERSION and pyproject.toml. Flag drive-by
-      refactors and unrelated CI/doc churn bundled with feature work.
+      Placement and packaging:
+      1. file location and naming; SPDX/copyright headers; registration in
+         manifests, test plans, decorators, package metadata, or docs.
+      2. Native C helpers and Makefiles belong under
+         `src/modules/<category>/<native-helper>/`, not loose under
+         `external_tests/`, unless genuinely third-party.
+      3. Examples must be copy-paste runnable; agent-facing MUST/MUST NOT
+         instructions belong in AGENTS.md; version bumps update VERSION and
+         pyproject.toml.
+      4. Flag drive-by refactors and unrelated CI/doc churn bundled with
+         feature work.
 
-      Commits: match the MR title and every commit summary to CONTRIBUTING.md.
-      New runtime tests under `src/modules/` or `external_tests/` are `feat:`;
-      unit-test-only commits under `tests/` are `test:`; fixes to existing
-      runtime or framework behavior are `fix:`. Optional parenthesized scope
-      is allowed—do not flag it. Prefer
-      `feat: [DGX-#####] ...` without inventing a scope when recent siblings
-      omit one. Report a type mismatch only when comparable history clearly
-      supports the correction. Require `Changelog:` and `Signed-off-by:` on
-      releasable commits; flag summaries that claim hardware/kernel behavior
-      the diff does not exercise; flag mixed independent changes that should
-      be split or squash-described.
+      Commits:
+      1. match the MR title and every commit summary to CONTRIBUTING.md.
+      2. New runtime tests under `src/modules/` or `external_tests/` are
+         `feat:`; unit-test-only commits under `tests/` are `test:`; fixes to
+         existing runtime or framework behavior are `fix:`.
+      3. Optional parenthesized scope is allowed—do not flag it. Prefer
+         `feat: [DGX-#####] ...` without inventing a scope when recent siblings
+         omit one. Report a type mismatch only when comparable history clearly
+         supports the correction.
+      4. Require `Changelog:` and `Signed-off-by:` on releasable commits; flag
+         summaries that claim hardware/kernel behavior the diff does not
+         exercise; flag mixed independent changes that should be split or
+         squash-described.
 
-      Result semantics: `skip()` for absent optional sysfs/resctrl/arch/
-      tracefs/compiler/platform features; `warn()` for non-conclusive observer
-      gaps; `fail()` only for definitive regressions. Call `fail()`/`skip()`
-      only from `@GLTCore.GLTTestAttr()`-decorated functions. Topology/HW match
-      helpers must distinguish match, unsupported (skip), and inspection
-      failure (fail)—never collapse infra errors into bare false/skip. Do not
-      expose internal workflow/process details in customer-visible text. Jira
-      identifiers used for traceability are allowed, including in test
-      docstrings; an identifier alone is not process disclosure. Do not infer
-      that Jira tags are mandatory everywhere.
+      Result semantics:
+      1. `skip()` for absent optional sysfs/resctrl/arch/
+         tracefs/compiler/platform features; `warn()` for non-conclusive
+         observer gaps; `fail()` only for definitive regressions. Call
+         `fail()`/`skip()` only from `@GLTCore.GLTTestAttr()`-decorated
+         functions.
+      2. Topology/HW match helpers must distinguish match, unsupported (skip),
+         and inspection failure (fail)—never collapse infra errors into bare
+         false/skip.
+      3. Do not expose internal workflow/process details in customer-visible
+         text.
+      4. Jira identifiers used for traceability are allowed, including in test
+         docstrings; an identifier alone is not process disclosure. Do not infer
+         that Jira tags are mandatory everywhere.
 
-      Lifecycle and process idioms: prefer `sys.executable` over bare
-      `python3`; keep `make clean`, tempdirs, and device restore in `finally`
-      that runs even when skip/fail raises; do not replace GreenLiT's global
-      signal handlers in one test; do not add redundant root/capability
-      checks (`glt-test-suite` already requires root). Do not add single-use
-      or unittest-only wrappers that only forward to another helper—inline or
-      test the underlying function. Check cheap, necessary platform/config
-      prerequisites before module loading, mutation, or expensive collection.
-      Do not move a gate earlier if that discards historical evidence required
-      by an explicitly accepted diagnostic contract.
+      Lifecycle and process idioms:
+      1. prefer `sys.executable` over bare `python3`; keep `make clean`,
+         tempdirs, and device restore in `finally` that runs even when
+         skip/fail raises; do not replace GreenLiT's global signal handlers in
+         one test; do not add redundant root/capability checks
+         (`glt-test-suite` already requires root).
+      2. Do not add single-use or unittest-only wrappers that only forward to
+         another helper—inline or test the underlying function.
+      3. Check cheap, necessary platform/config prerequisites before module
+         loading, mutation, or expensive collection. Do not move a gate
+         earlier if that discards historical evidence required by an
+         explicitly accepted diagnostic contract.
 
-      Test flow: judge each helper by its interface, not its caller count. A
-      helper is justified when it has a generic, testcase-independent interface
-      with clear inputs, outputs, and error behavior, and the author places it
-      deliberately as module-private, shared in `src/common/`, or inline in the
-      decorated testcase. Flag a helper when it only fragments a
-      testcase-specific inspect/mutate/verify/restore flow or only forwards to
-      another helper. Do not flag a helper on caller count alone. Report
-      skip/fail directly as soon as the condition is known rather than
-      returning status/reason tuples solely for the caller to dispatch. Keep
-      in-process restoration in `finally` and collect cleanup errors only when
-      needed; preserve documented post-hook and reboot/resume cleanup
-      contracts.
+      Test flow:
+      1. judge each helper by its interface, not its caller count. A helper is
+         justified when it has a generic, testcase-independent interface with
+         clear inputs, outputs, and error behavior, and the author places it
+         deliberately as module-private, shared in `src/common/`, or inline in
+         the decorated testcase. Flag a helper when it only fragments a
+         testcase-specific inspect/mutate/verify/restore flow or only forwards
+         to another helper.
+      2. Do not flag a helper on caller count alone. Report skip/fail directly
+         as soon as the condition is known rather than returning status/reason
+         tuples solely for the caller to dispatch. Keep in-process restoration
+         in `finally` and collect cleanup errors only when needed; preserve
+         documented post-hook and reboot/resume cleanup contracts.
 
-      Test dependencies: look for follow-up testcases that repeat prerequisite
-      checks already established by another testcase. When the follow-up
-      requires that testcase to pass, it MUST use
-      `@GLTCore.GLTRequires.must_pass(category, testcase)` and remove only checks
-      guaranteed by its PASS. Check skip/fail propagation and retain
-      follow-up-specific or mutable-state checks. Do not add dependencies that
-      suppress independently useful coverage or diagnostics needed after a
-      prerequisite fails or skips.
+      Test dependencies:
+      1. look for follow-up testcases that repeat prerequisite checks already
+         established by another testcase. When the follow-up requires that
+         testcase to pass, it MUST use
+         `@GLTCore.GLTRequires.must_pass(category, testcase)` and remove only
+         checks guaranteed by its PASS. Check skip/fail propagation and retain
+         follow-up-specific or mutable-state checks.
+      2. Do not add dependencies that suppress independently useful coverage
+         or diagnostics needed after a prerequisite fails or skips.
 
-      Import-time and UAPI: `src/modules/**` must not raise for ABI size,
-      endianness, or similar static checks at import (suite discovery
-      `exec_module`s every test module)—prefer runtime skip or unit-test size
-      guards. When porting kernel UAPI, prefer `struct.Struct` for fixed
-      layouts unless ctypes field access is required; mirror kernel
-      `GENMASK`/`FIELD_PREP` bitfield style when neighbors do.
+      Import-time and UAPI:
+      1. `src/modules/**` must not raise for ABI size, endianness, or similar
+         static checks at import (suite discovery `exec_module`s every test
+         module)—prefer runtime skip or unit-test size guards.
+      2. When porting kernel UAPI, prefer `struct.Struct` for fixed layouts
+         unless ctypes field access is required; mirror kernel
+         `GENMASK`/`FIELD_PREP` bitfield style when neighbors do.
 
-      Tags and unit coverage: assign new functional tests to `standard` when
-      they are non-disruptive, or to `disruptive` when they intentionally
-      reboot or kexec, or might hang or crash if a required patch is missing;
-      never assign both. Add `stress` for extended stress or stability
-      coverage when appropriate. Long-running or heavy-tooling tests may be
-      `stress`-only. Prefer `tests/modules/` for hardware-independent parsing
-      and multi-candidate selection; expect `tests/greenlit/` for
-      deterministic `src/greenlit/**` logic. Request tests for concrete
-      uncovered hardware-independent behavior or contracts, including failure
-      paths—not every private helper or implementation branch merely because
-      it exists. Prefer behavior-level assertions and existing test seams;
-      do not require wrapper extraction or implementation-mirroring tests.
-      Hardware-dependent cases may use the documented targeted-review or
-      hardware-validation path. Preserve meaningful parser, shared-helper,
-      and framework coverage; private visibility alone is not an exemption.
+      Tags and unit coverage:
+      1. assign new functional tests to `standard` when they are
+         non-disruptive, or to `disruptive` when they intentionally reboot or
+         kexec, or might hang or crash if a required patch is missing; never
+         assign both.
+      2. Add `stress` for extended stress or stability coverage when
+         appropriate. Long-running or heavy-tooling tests may be
+         `stress`-only. Prefer `tests/modules/` for hardware-independent
+         parsing and multi-candidate selection; expect `tests/greenlit/` for
+         deterministic `src/greenlit/**` logic. Request tests for concrete
+         uncovered hardware-independent behavior or contracts, including
+         failure paths—not every private helper or implementation branch
+         merely because it exists. Prefer behavior-level assertions and
+         existing test seams; do not require wrapper extraction or
+         implementation-mirroring tests. Hardware-dependent cases may use the
+         documented targeted-review or hardware-validation path. Preserve
+         meaningful parser, shared-helper, and framework coverage; private
+         visibility alone is not an exemption.
 
-      Also flag clear deviations in typing, ownership, quoting, subprocess,
-      resource, concurrency, post hooks, public API compatibility, and
-      consistency between duplicated parallel implementations—only when
-      project evidence supports the rule.
+      Other conventions:
+      1. Also flag clear deviations in typing, ownership, quoting, subprocess,
+         resource, concurrency, post hooks, public API compatibility, and
+         consistency between duplicated parallel implementations—only when
+         project evidence supports the rule.
 
-      Inspect docs, neighbors, tests, call sites, and history before asserting
-      a convention. For new files, verify header, location, registration,
-      tests, and nearby structure. For modified files, report a pre-existing
-      violation only when the change expands or materially depends on it.
-      Report only rules that are explicit or backed by multiple relevant
-      examples; cite evidence and the smallest compliant change. Do not infer
-      from one unrelated file, impose personal taste, request broad
-      refactoring, or repeat generic correctness/security review. Anchor every
-      finding to a changed GreenLiT line, except commit-message findings,
-      which anchor to the offending summary line or MR title.
+      Reporting and scope:
+      1. Inspect docs, neighbors, tests, call sites, and history before
+         asserting a convention. For new files, verify header, location,
+         registration, tests, and nearby structure. For modified files, report a
+         pre-existing violation only when the change expands or materially
+         depends on it.
+      2. Report only rules that are explicit or backed by multiple relevant
+         examples; cite evidence and the smallest compliant change. Do not
+         infer from one unrelated file, impose personal taste, request broad
+         refactoring, or repeat generic correctness/security review.
+      3. Anchor every finding to a changed GreenLiT line, except
+         commit-message findings, which anchor to the offending summary line
+         or MR title.
   discriminator:
     model: grok
     applies_to: [src/modules/**, src/bin/**, external_tests/**]
@@ -172,114 +193,130 @@ lenses:
     # - Cited PATCH SHA ≠ missing patch; resolve cherry-picks on the pin:
     #   !379#note_69658586 (icheng)
     instructions: |
-      Establish the testcase contract from project documentation and the
-      testcase result semantics: patch discrimination, behavioral validation,
-      or passive historical diagnosis. GreenLiT accepts passive retained-journal
-      failure diagnostics when their declared contract and implementation
-      report historical failure observation rather than current-kernel patch
-      presence. A patch link alone does not claim patch presence. For such a
-      diagnostic, require results to identify the observed boot/history and
-      state that PASS means only failure not observed. Do not demand a trigger
-      or binary patch-presence test that replaces that contract. Still report
-      unreadable evidence treated as success, incorrect attribution, or claims
-      about current-kernel patch state unsupported by the observation.
+      Testcase contract:
+      1. Establish the testcase contract from project documentation and the
+         testcase result semantics: patch discrimination, behavioral validation,
+         or passive historical diagnosis.
+      2. GreenLiT accepts passive retained-journal failure diagnostics when
+         their declared contract and implementation report historical failure
+         observation rather than current-kernel patch presence. A patch link
+         alone does not claim patch presence. For such a diagnostic, require
+         results to identify the observed boot/history and state that PASS means
+         only failure not observed. Do not demand a trigger or binary
+         patch-presence test that replaces that contract. Still report
+         unreadable evidence treated as success, incorrect attribution, or
+         claims about current-kernel patch state unsupported by the observation.
 
-      For a testcase claiming patch discrimination, step back from the
-      implementation and determine the simplest reliable way to discriminate
-      whether the complete claimed fix is present in the running kernel. The
-      fixed/unfixed and trigger non-vacuity requirements below apply to that
-      claim, not to an explicitly accepted passive diagnostic.
+      3. For a testcase claiming patch discrimination, step back from the
+         implementation and determine the simplest reliable way to discriminate
+         whether the complete claimed fix is present in the running kernel. The
+         fixed/unfixed and trigger non-vacuity requirements below apply to that
+         claim, not to an explicitly accepted passive diagnostic.
 
-      Establish the declared kernel repository, branch/version, and hardware
-      scope before asserting an ABI or implementation mismatch. Use upstream
-      history for ancestry, not as an automatic substitute for a targeted
-      NVIDIA/backport ABI. Require source or DUT evidence applicable to that
-      target; if unavailable, report insufficient evidence rather than treating
-      mainline differences as defects. Distinguish upstream and backport
-      hashes explicitly. A reference declaration does not prove it matches
-      the target kernel.
+      Target kernel scope:
+      1. Establish the declared kernel repository, branch/version, and hardware
+         scope before asserting an ABI or implementation mismatch.
+      2. Use upstream history for ancestry, not as an automatic substitute for a
+         targeted NVIDIA/backport ABI. Require source or DUT evidence applicable
+         to that target; if unavailable, report insufficient evidence rather
+         than treating mainline differences as defects.
+      3. Distinguish upstream and backport hashes explicitly. A reference
+         declaration does not prove it matches the target kernel.
 
-      Use the kernel history for the MR's stated target to establish the complete
-      fixed-versus-unfixed boundary. For NVIDIA kernel targets, inspect
-      linux-nvidia for the downstream implementation, fixes, and backports;
-      use linux-mainline for upstream provenance and comparison. Do not assume
-      upstream and downstream commit hashes or behavior are identical. Do not
-      require the test structure to mirror the patch series or internal
-      implementation. Translate the complete fix into the smallest
-      externally observable invariant or state transition that is true only
-      when the fix is present. State explicitly whether the test covers the
-      full series, a userspace ABI surface, or a single commit, and align fail
-      messages, comments, and Makefile notes to the relevant target-kernel hashes.
-      When the claimed fix spans multiple causal commits, ensure relevant
-      partial-fix kernels still fail.
+      Fixed-versus-unfixed boundary:
+      1. Use the kernel history for the MR's stated target to establish the
+         complete fixed-versus-unfixed boundary. For NVIDIA kernel targets,
+         inspect linux-nvidia for the downstream implementation, fixes, and
+         backports; use linux-mainline for upstream provenance and comparison.
+         Do not assume upstream and downstream commit hashes or behavior are
+         identical.
+      2. Do not require the test structure to mirror the patch series or
+         internal implementation. Translate the complete fix into the smallest
+         externally observable invariant or state transition that is true only
+         when the fix is present.
+      3. State explicitly whether the test covers the full series, a userspace
+         ABI surface, or a single commit, and align fail messages, comments, and
+         Makefile notes to the relevant target-kernel hashes.
+      4. When the claimed fix spans multiple causal commits, ensure relevant
+         partial-fix kernels still fail.
 
-      When a cited PATCH SHA is not an ancestor of the pinned target
-      reference, do not conclude the patch is absent. Search only that pin
-      (commit subject, cherry-pick footer, or the same hunk) for an equivalent
-      object. If one exists, the fix is present on the target: ask the test to
-      name that target-ref hash in PATCH/fail text, and do not claim the
-      fixed/unfixed boundary cannot be established. If none exists, report
-      insufficient evidence rather than patch absence. Cite only the pin or an
-      ancestor; do not invent a hash or use linux-mainline documentation as the
-      NVIDIA ABI.
+      Patch SHA resolution:
+      1. When a cited PATCH SHA is not an ancestor of the pinned target
+         reference, do not conclude the patch is absent. Search only that pin
+         (commit subject, cherry-pick footer, or the same hunk) for an
+         equivalent object. If one exists, the fix is present on the target:
+         ask the test to name that target-ref hash in PATCH/fail text, and do
+         not claim the fixed/unfixed boundary cannot be established. If none
+         exists, report insufficient evidence rather than patch absence.
+      2. Cite only the pin or an ancestor; do not invent a hash or use
+         linux-mainline documentation as the NVIDIA ABI.
 
-      Before accepting a behavioral trigger as proof, verify the kernel path
-      under test actually executed (e.g. a runtime-resume callback ran—not
-      merely `pm_runtime_get_sync()` on an already-active device). When
-      discrimination depends on device state, read the relevant sysfs state
-      (e.g. `power/runtime_status`) before triggering; warn or skip when the
-      state cannot guarantee the callback. Select affinity-bound hardware
-      (PMU, CPU) as a joint usable (device, CPU) pair, not the first device
-      then a failing CPU pick. Reuse existing `_validate_*_prerequisites()`
-      helpers rather than inlining CONFIG/HW gates.
+      Trigger execution:
+      1. Before accepting a behavioral trigger as proof, verify the kernel
+         path under test actually executed (e.g. a runtime-resume callback
+         ran—not merely `pm_runtime_get_sync()` on an already-active device).
+      2. When discrimination depends on device state, read the relevant sysfs
+         state (e.g. `power/runtime_status`) before triggering; warn or skip
+         when the state cannot guarantee the callback.
+      3. Select affinity-bound hardware (PMU, CPU) as a joint usable (device,
+         CPU) pair, not the first device then a failing CPU pick.
+      4. Reuse existing `_validate_*_prerequisites()` helpers rather than
+         inlining CONFIG/HW gates.
 
-      When discrimination depends on kernel log shape (function names, lockdep
-      splats), require the needed `CONFIG_*` options and return warn or skip
-      when they are missing—a clean log with incomplete observer configuration
-      is non-conclusive and must not PASS. Fail fast when the running kconfig
-      cannot be parsed for a log-matching test. Scope log windows to the
-      attempt; do not search the entire boot log for prior-run contamination.
-      Do not swallow subprocess timeouts or ignore workload exit codes when
-      parsing output.
+      Result and log semantics:
+      1. When discrimination depends on kernel log shape (function names,
+         lockdep splats), require the needed `CONFIG_*` options and return
+         warn or skip when they are missing—a clean log with incomplete
+         observer configuration is non-conclusive and must not PASS. Fail fast
+         when the running kconfig cannot be parsed for a log-matching test.
+         Scope log windows to the attempt; do not search the entire boot log
+         for prior-run contamination. Do not swallow subprocess timeouts or
+         ignore workload exit codes when parsing output.
 
-      Require an explicit non-vacuity check that the trigger path ran (counter
-      increment, expected exit code, target transition count, tracepoint hit)
-      before asserting PASS. Flag silent error swallowing or skipped sync that
-      can reduce exercised work to zero while still allowing PASS. Flag probes
-      that use out-of-scope triggers relative to the claimed fix (e.g. wrong
-      memslot path when the fix is in-slot). Also flag environment or feature
-      interactions that make a fully patched kernel look unfixed (e.g. ATS
-      stall/S2S masking the expected hitless outcome)—prefer skip or warn with
-      a clear reason over false FAIL.
+      Non-vacuity:
+      1. Require an explicit non-vacuity check that the trigger path ran
+         (counter increment, expected exit code, target transition count,
+         tracepoint hit) before asserting PASS.
+      2. Flag silent error swallowing or skipped sync that can reduce exercised
+         work to zero while still allowing PASS.
+      3. Flag probes that use out-of-scope triggers relative to the claimed
+         fix (e.g. wrong memslot path when the fix is in-slot). Also flag
+         environment or feature interactions that make a fully patched kernel
+         look unfixed (e.g. ATS stall/S2S masking the expected hitless
+         outcome)—prefer skip or warn with a clear reason over false FAIL.
 
-      Consider multiple observations, preferring a direct stable kernel state
-      or ABI; then a direct behavioral trigger and outcome; then an existing
-      tracepoint, counter, or established diagnostic interface; then logs or
-      indirect instrumentation; and only lastly timing, sleeps, background
-      orchestration, or heuristic inference.
+      Observer design:
+      1. Consider multiple observations, preferring a direct stable kernel state
+         or ABI; then a direct behavioral trigger and outcome; then an existing
+         tracepoint, counter, or established diagnostic interface; then logs or
+         indirect instrumentation; and only lastly timing, sleeps, background
+         orchestration, or heuristic inference.
 
-      Compare the proposed test with the strongest simpler candidate. A valid
-      approach must fail on the unfixed kernel and pass on the fully fixed
-      kernel; distinguish relevant partial-fix states when the claimed fix spans
-      multiple causal commits; prove non-vacuity; avoid unsupported hardware,
-      configuration, timing, logging, or implementation assumptions; work in
-      GreenLiT's supported execution environment; and minimize dependencies,
-      setup, cleanup, privileges, and race windows.
+      Candidate comparison and scope:
+      1. Compare the proposed test with the strongest simpler candidate. A valid
+         approach must fail on the unfixed kernel and pass on the fully fixed
+         kernel; distinguish relevant partial-fix states when the claimed fix
+         spans multiple causal commits; prove non-vacuity; avoid unsupported
+         hardware, configuration, timing, logging, or implementation
+         assumptions; work in GreenLiT's supported execution environment; and
+         minimize dependencies, setup, cleanup, privileges, and race windows.
 
-      For tests contributed to GreenLiT, prefer a native Python test case under
-      src/modules/ over an external_tests/ wrapper when the logic can use the
-      GreenLiT framework. Accept an external test when it is genuinely a
-      standalone or third-party test, or a justified short-term staging path,
-      and the external form does not weaken the discriminator.
+      2. For tests contributed to GreenLiT, prefer a native Python test case
+         under src/modules/ over an external_tests/ wrapper when the logic can
+         use the GreenLiT framework. Accept an external test when it is
+         genuinely a standalone or third-party test, or a justified short-term
+         staging path, and the external form does not weaken the
+         discriminator.
 
-      Recommend a different approach only when evidence demonstrates equal or
-      stronger discrimination with materially lower complexity. Explain the
-      simpler observable and the smallest viable test structure. Do not merely
-      optimize or patch the submitted implementation. If the proposed approach
-      is already the simplest robust discriminator, report no design finding.
-      If the boundary cannot be established, report insufficient evidence rather
-      than inventing one. Anchor every actionable finding to a changed GreenLiT
-      line.
+      3. Recommend a different approach only when evidence demonstrates equal or
+         stronger discrimination with materially lower complexity. Explain the
+         simpler observable and the smallest viable test structure. Do not
+         merely optimize or patch the submitted implementation. If the proposed
+         approach is already the simplest robust discriminator, report no design
+         finding.
+      4. If the boundary cannot be established, report insufficient evidence
+         rather than inventing one.
+      5. Anchor every actionable finding to a changed GreenLiT line.
     references: [linux-mainline, linux-nvidia]
   common-helper-contracts:
     model: gemini-flash
@@ -296,68 +333,83 @@ lenses:
       `src/**` and `tests/**`—including module-local helpers that belong in
       `src/common/`.
 
-      Carve-outs: when a change introduces or expands a general-purpose helper
-      (sysfs/log/`setpci`/CPU-list parsing, route/mount isolation probes, etc.)
-      that already exists in `glt_utils`/`pci_utils`/`perf_utils` or that a
-      second module already duplicates, recommend moving or reusing the shared
-      helper. Prefer promoting to `src/common/` when a second real caller
-      appears or when PCI/CXL copies have already drifted.
+      Carve-outs:
+      1. when a change introduces or expands a general-purpose helper
+         (sysfs/log/`setpci`/CPU-list parsing, route/mount isolation probes,
+         etc.) that already exists in `glt_utils`/`pci_utils`/`perf_utils` or
+         that a second module already duplicates, recommend moving or reusing
+         the shared helper.
+      2. Prefer promoting to `src/common/` when a second real caller appears or
+         when PCI/CXL copies have already drifted.
 
-      Test hooks: call existing helpers directly and mock them where they are
-      looked up in unit tests. Prefer removing callable parameters/defaults
-      introduced solely for test injection when no production caller needs
-      alternative behavior, regardless of what they wrap. Retain meaningful
-      inputs such as paths or search roots and dependency injection with a real
-      runtime use or documented contract.
+      Test hooks:
+      1. call existing helpers directly and mock them where they are looked up
+         in unit tests.
+      2. Prefer removing callable parameters/defaults introduced solely for test
+         injection when no production caller needs alternative behavior,
+         regardless of what they wrap.
+      3. Retain meaningful inputs such as paths or search roots and dependency
+         injection with a real runtime use or documented contract.
 
-      Helper return contracts: for every helper call, inspect the implementation
-      or documented contract before judging how its result is used. Check
-      return types, normalization, sentinel values, and error behavior against
-      the caller's handling. Remove repeated normalization or validation already
-      guaranteed by the helper; retain checks required by the caller's own
-      contract. Apply this to all helpers, not only I/O helpers. Do not infer
-      behavior from a helper's name or demand redundant checks on every result.
+      Helper return contracts:
+      1. for every helper call, inspect the implementation or documented
+         contract before judging how its result is used. Check return types,
+         normalization, sentinel values, and error behavior against the
+         caller's handling.
+      2. Remove repeated normalization or validation already guaranteed by the
+         helper; retain checks required by the caller's own contract.
+      3. Apply this to all helpers, not only I/O helpers. Do not infer behavior
+         from a helper's name or demand redundant checks on every result.
 
-      Fail-closed probes: helpers that feed destructive or isolation-sensitive
-      operations (FLR, vfio bind, kexec, firmware reset, DPC blast-radius
-      checks)—whether defined in `src/common/` or inlined in a test module—
-      must not treat I/O failure as an empty success set. Return a distinct
-      error/`None` (or raise) so callers refuse or skip; mirror
-      `default_route_ifaces()` / `mounted_block_devices()` and the fail-closed
-      pattern in `glt_test_pci._resolve_and_validate_target()`. Document
-      whether unreadable `/proc` or sysfs means "no data" versus "cannot
-      validate". Propagate non-absence errors such as `PermissionError`; do
-      not swallow them as empty results.
+      Fail-closed probes:
+      1. helpers that feed destructive or isolation-sensitive operations (FLR,
+         vfio bind, kexec, firmware reset, DPC blast-radius checks)—whether
+         defined in `src/common/` or inlined in a test module— must not treat
+         I/O failure as an empty success set. Return a distinct error/`None`
+         (or raise) so callers refuse or skip; mirror `default_route_ifaces()`
+         / `mounted_block_devices()` and the fail-closed pattern in
+         `glt_test_pci._resolve_and_validate_target()`.
+      2. Document whether unreadable `/proc` or sysfs means "no data" versus
+         "cannot validate". Propagate non-absence errors such as
+         `PermissionError`; do not swallow them as empty results.
 
-      API surface (especially `src/common/**`): prefix with `_` unless there is
-      a real external caller or an explicit project-wide entry point docstring.
-      Prefer domain-specific names (`read_sysfs_value`) over premature generic
-      file helpers. Prefer official CLIs (`virsh`) over thin Python wrappers
-      unless a libvirt-python-only capability is required. Remove zero-caller
-      public methods and unused members in the same change unless documented as
-      intentional future API.
+      API surface (especially `src/common/**`):
+      1. prefix with `_` unless there is a real external caller or an explicit
+         project-wide entry point docstring.
+      2. Prefer domain-specific names (`read_sysfs_value`) over premature
+         generic file helpers.
+      3. Prefer official CLIs (`virsh`) over thin Python wrappers unless a
+         libvirt-python-only capability is required.
+      4. Remove zero-caller public methods and unused members in the same change
+         unless documented as intentional future API.
 
-      Version resolvers (`perf_utils`, `glt_utils`): prefer exact `uname -r`
-      match before compatible fallback; prioritize "no binary for running
-      kernel" over stale adjacent-version mismatch; strip package revision
-      suffixes before comparison. Do not flag NVIDIA `linux-tools-*`
-      directory-name matching or `kernel_release` layouts as bugs without
-      layout evidence from the MR or `tests/common/`.
+      Version resolvers (`perf_utils`, `glt_utils`):
+      1. prefer exact `uname -r` match before compatible fallback; prioritize
+         "no binary for running kernel" over stale adjacent-version mismatch;
+         strip package revision suffixes before comparison.
+      2. Do not flag NVIDIA `linux-tools-*` directory-name matching or
+         `kernel_release` layouts as bugs without layout evidence from the MR or
+         `tests/common/`.
 
-      Session/resume (`glt_core`): use the same Summary detection as
-      `parse_session_summary()` (`isinstance(..., dict)`); catch
-      `OSError`/`JSONDecodeError` on progress/session I/O; avoid half-mutated
-      scheduler state on error—apply transactionally or document and unit-test
-      the partial-mutation contract.
+      Session/resume (`glt_core`):
+      1. use the same Summary detection as `parse_session_summary()`
+         (`isinstance(..., dict)`); catch `OSError`/`JSONDecodeError` on
+         progress/session I/O; avoid half-mutated scheduler state on
+         error—apply transactionally or document and unit-test the
+         partial-mutation contract.
 
-      `tests/common/` covers shared helper units with mocked I/O only—no live
-      KVM/libvirt/kselftest integration. Assert helper contracts, not third-party
-      stack behavior. Preserve skip/fail semantics when extracting helpers
-      (`cxl_utils`, etc.). Subprocess and boot-path mutations need explicit
-      timeouts when they can block on bad disks.
+      Unit isolation:
+      1. `tests/common/` covers shared helper units with mocked I/O only—no
+         live KVM/libvirt/kselftest integration.
+      2. Assert helper contracts, not third-party stack behavior.
+      3. Preserve skip/fail semantics when extracting helpers (`cxl_utils`,
+         etc.).
+      4. Subprocess and boot-path mutations need explicit timeouts when they can
+         block on bad disks.
 
-      Anchor every finding to a changed GreenLiT line. Do not impose generic
-      style preferences already owned by pylint.
+      Reporting and scope:
+      1. Anchor every finding to a changed GreenLiT line. Do not impose generic
+         style preferences already owned by pylint.
   discovery:
     model: gemini-flash
     applies_to: [src/greenlit/**, tests/greenlit/**]
@@ -365,19 +417,23 @@ lenses:
       Review GreenLiT CLI scheduling, category/test-case discovery, resume, and
       YAML config application.
 
-      Category discovery must not import `src/modules/**` test modules before
-      the intended phase. Flag new import-time registration or decorators with
-      side effects during filesystem enumeration. (Module-local ABI/endian
-      import raises are owned by the `convention` lens.)
+      Category discovery:
+      1. Category discovery must not import `src/modules/**` test modules before
+         the intended phase. Flag new import-time registration or decorators
+         with side effects during filesystem enumeration. (Module-local
+         ABI/endian import raises are owned by the `convention` lens.)
 
-      When `--test-case` or category selection pulls prerequisite tests from
-      another category, ensure `apply_glt_configs()` and scheduler filtering
-      scope YAML rules and runnable sets to exact test IDs—not whole
-      prerequisite categories.
+      Prerequisite scoping:
+      1. When `--test-case` or category selection pulls prerequisite tests from
+         another category, ensure `apply_glt_configs()` and scheduler filtering
+         scope YAML rules and runnable sets to exact test IDs—not whole
+         prerequisite categories.
 
-      Require `tests/greenlit/` unit coverage for hardware-independent changes
-      to discovery, plan/category/test-case interaction, validation, exit codes,
-      and resume/session resolution.
+      Unit coverage:
+      1. Require `tests/greenlit/` unit coverage for hardware-independent
+         changes to discovery, plan/category/test-case interaction, validation,
+         exit codes, and resume/session resolution.
 
-      Anchor every finding to a changed GreenLiT line. Report insufficient
-      evidence rather than inventing scheduler semantics.
+      Reporting and scope:
+      1. Anchor every finding to a changed GreenLiT line. Report insufficient
+         evidence rather than inventing scheduler semantics.
